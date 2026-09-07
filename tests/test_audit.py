@@ -7,6 +7,7 @@ invariant must fire.
 
 import dataclasses
 
+import numpy as np
 import pytest
 
 from training.audit import audit_specs, run_audit
@@ -123,8 +124,8 @@ def test_I1_catches_a_label_dependent_transform():
     specs = ([_spec(2, sample_id=i, transforms=(("codec", {}),)) for i in range(500)] +
              [_spec(1, sample_id=500 + i, transforms=()) for i in range(500)])
     report = audit_specs(specs)
-    assert not report.results["I1_transform_label_independence"][0]
-    assert "codec" in report.results["I1_transform_label_independence"][1]
+    assert not report.results["I1_transform_name_independence"][0]
+    assert "codec" in report.results["I1_transform_name_independence"][1]
 
 
 def test_I5_catches_a_file_drawn_from_outside_the_slice(manifest, specs):
@@ -226,12 +227,7 @@ def test_I1b_excludes_cell_9_and_why(manifest):
 
 
 def test_I1b_catches_a_duration_shortcut():
-    """Nothing else in the audit looks at duration.
-
-    If fake samples were systematically longer -- e.g. because AI songs are
-    used whole while real mixes are cropped -- this is the only check that sees
-    it, and it is exactly the E-S2 failure mode.
-    """
+    """Nothing else in the audit looks at duration."""
     def timed(cell, sample_id, seconds):
         return SampleSpec(
             sample_id=sample_id, epoch=0, seed=0, scheme_version="v1",
@@ -243,7 +239,91 @@ def test_I1b_catches_a_duration_shortcut():
 
     specs = ([timed(2, i, 50.0) for i in range(500)] +
              [timed(1, 500 + i, 8.0) for i in range(500)])
-    report = audit_specs(specs)
-    passed, why = report.results["I1b_metadata_shortcut_auc"]
+    passed, why = audit_specs(specs).results["I1b_metadata_shortcut_auc"]
     assert not passed, why
-    assert "AUC = 1.0" in why or "AUC = 0.9" in why, why
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 regression: three leaks that passed the whole audit clean
+
+def _retimed(spec, seconds):
+    k = seconds / spec.duration_s
+    return dataclasses.replace(spec, duration_s=seconds, components=tuple(
+        dataclasses.replace(c, duration_s=c.duration_s * k,
+                            target_start_s=c.target_start_s * k)
+        for c in spec.components))
+
+
+LEAKS = {
+    # A name-only frequency table is blind to this: the NAME is on both sides at
+    # exactly equal rate, so I1 reports 0.0000 while the parameter is decisive.
+    "transform_parameter": lambda s, f: dataclasses.replace(
+        s, transforms=(("rawboost", {"strength": 0.9 if f else 0.1}),)),
+    # `normalize` is the A-S1 test-chain draw and was read by nothing at all.
+    "normalize_container": lambda s, f: dataclasses.replace(
+        s, normalize={"container": "mp3" if f else "wav"}),
+    # Cancels marginally, points opposite ways inside two strata. The model gets
+    # the interaction for free because it is trained to predict presence.
+    "duration_x_stratum": lambda s, f: _retimed(s, float(np.clip(
+        s.duration_s + (14 if s.stratum == "mixed" else -14) * (1 if f else -1),
+        4.0, 60.0))),
+}
+
+
+@pytest.mark.parametrize("leak", sorted(LEAKS))
+def test_audit_catches_each_leak_that_once_passed(manifest, specs, leak):
+    """Every one of these passed the entire audit clean before I1b was hardened."""
+    trapped = [LEAKS[leak](s, s.file_fake) for s in specs]
+    report = audit_specs(trapped, manifest=manifest, slice_="train")
+    assert not report.ok, f"{leak} is invisible to the audit"
+    assert "I1b_metadata_shortcut_auc" in report.failures, report.failures
+
+
+def test_audit_catches_all_three_leaks_together(manifest, specs):
+    trapped = list(specs)
+    for fn in LEAKS.values():
+        trapped = [fn(s, s.file_fake) for s in trapped]
+    assert not audit_specs(trapped, manifest=manifest, slice_="train").ok
+
+
+def test_the_name_only_check_is_genuinely_blind_to_a_parameter(manifest, specs):
+    """🔴 Pins why I1 is not sufficient, so nobody deletes I1b as redundant."""
+    trapped = [LEAKS["transform_parameter"](s, s.file_fake) for s in specs]
+    report = audit_specs(trapped, manifest=manifest, slice_="train")
+    passed, why = report.results["I1_transform_name_independence"]
+    assert passed, "the transform NAME is balanced -- that is the trap"
+    assert "0.0000" in why
+    assert not report.results["I1b_metadata_shortcut_auc"][0], "I1b must catch it"
+
+
+def test_reference_stream_keeps_headroom_under_the_stricter_probe(manifest):
+    """The per-stratum probe must not manufacture false alarms."""
+    for f8 in (0.0, 1.0):
+        report = run_audit(Sampler(manifest, SamplerConfig(f8=f8)), n=N, manifest=manifest)
+        passed, why = report.results["I1b_metadata_shortcut_auc"]
+        assert passed, f"f8={f8}: {why}"
+
+
+def test_audit_is_stable_across_draw_budgets_and_manifests(manifest):
+    """🔴 A guardrail that cries wolf gets switched off.
+
+    Two false alarms were found this way: `source_offset_s` as a feature (the
+    model cannot observe where in a source file we started reading, and with a
+    small whole-file pool its range separated the labels at AUC 0.764), and I3
+    counting components drawn only once (a file drawn once cannot appear on
+    both sides -- that measures the draw budget, not the sampler).
+    """
+    from training.synthetic import synthetic_manifest
+    for npp, nwf in ((60, 60), (200, 200)):
+        m = synthetic_manifest(n_per_pool=npp, n_whole_file=nwf, seed=0)
+        for f8 in (0.0, 1.0):
+            for n in (1500, 6000):
+                report = run_audit(Sampler(m, SamplerConfig(f8=f8)), n=n, manifest=m)
+                assert report.ok, f"{npp}/{nwf} f8={f8} n={n}: {report.failures}"
+
+
+def test_source_offset_is_not_a_feature():
+    """It is not observable by the model, so it cannot be a shortcut."""
+    from training.audit import _feature_frame
+    _, names = _feature_frame([_spec(1, sample_id=i) for i in range(50)])
+    assert not any("offset" in n for n in names), names

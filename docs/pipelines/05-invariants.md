@@ -18,8 +18,8 @@ These run over 10⁵ generated `SampleSpec`s in seconds, because sampling is sep
 
 | # | Assertion | Guards |
 |---|---|---|
-| **I1** | For every transform `T` and label `L`: `P(T \| L) = P(T)`, within sampling error | The governing rule ([data/06](../data/06-augmentation-spec.md#-the-governing-rule)). This is [E-S2](../data/07-eda-plan.md) made continuous — its **AUC < 0.60** gate becomes a per-commit check rather than a per-corpus one |
-| **I1b** | 🔴 **Metadata-only logistic regression cannot predict `FILE_FAKE`** — AUC < **0.60** over cells 1–8, on duration, composedness, structure, component count, gain, crossfade and source offset | ★ [E-S2](../data/07-eda-plan.md) promoted to a per-spec check (VG2). **The joint guard**: every balance below can hold individually while a *combination* still separates the labels. ⚠️ Cell 9 excluded — it is always REAL *and* never composed, so it contributes an unfixable correlation; including it, the strict policy scores **0.6003** and fails spuriously |
+| **I1** | For every transform **name** `T` and label `L`: `P(T \| L) = P(T)`, within sampling error. ⚠️ **Names only** — parameter-level leaks are I1b's job | The governing rule ([data/06](../data/06-augmentation-spec.md#-the-governing-rule)). This is [E-S2](../data/07-eda-plan.md) made continuous — its **AUC < 0.60** gate becomes a per-commit check rather than a per-corpus one |
+| **I1b** | 🔴 **Metadata-only regression cannot predict `FILE_FAKE`** — cross-validated AUC < **0.60**, over cells 1–8, **pooled *and* per stratum, worst taken**. Features: duration, composedness, structure, component count, gain, crossfade, source offset, **every transform parameter**, and **the whole `normalize` draw** | ★ [E-S2](../data/07-eda-plan.md) promoted to a per-spec check (VG2). **The joint guard**: every balance below can hold individually while a *combination* still separates the labels. ⚠️ Cell 9 excluded — always REAL *and* never composed, an unfixable correlation; including it the strict policy scores 0.6003 and fails spuriously |
 | **I2** | Composedness is label-independent **within each presence stratum**: `f₁=f₂`, `f₃=f₄`, and `f₅ = (p₆f₆+p₇f₇+p₈f₈)/(p₆+p₇+p₈)`; cell 9 excluded | The composition trap ([02 §3](02-sampler.md#-the-implementable-form-stratified-with-f₈-as-the-only-knob)). ⚠️ Assert the **stratified** form: the marginal form passes while `f₁=1, f₂=0` makes "composed" predict REAL among voice-only files |
 | **I2b** | 🔴 `P(mixed \| FILE_FAKE=1) = P(mixed \| FILE_FAKE=0)` over **cells 1–8**, and no presence pattern predicts fakeness | **C3 covers mixing, not only concatenation.** Mixedness is set by the cell, so it must be fixed in the cell mix ([02 §4](02-sampler.md#-c3-covers-mixing-not-only-concatenation--and-that-constrains-the-cell-mix)). ⚠️ A mix passing C1 can fail this at 0.769 vs 0.417 |
 | **I3** | Every real component file that appears with `file_fake=1` also appears with `file_fake=0` | Content-identity shortcuts ([02 §3](02-sampler.md#one-level-down-components-on-both-sides-of-the-label)) |
@@ -30,7 +30,15 @@ These run over 10⁵ generated `SampleSpec`s in seconds, because sampling is sep
 | **I8** | Every head's positive rate, **computed after masking**, lies in **[0.2, 0.8]** | **C1** — removes BCE's imbalance pathology, which is the only reason any ranking/AUC-surrogate term would be worth adding ([02 §4](02-sampler.md#4--constraints-the-objective-imposes--c1-and-c2)). ⚠️ A naive 6/7-heavy cell mix **fails this** at 0.820 on both presence heads |
 | **I9** | Every batch meets the per-head **present-count floor** | **C2** — `_masked_mean` scales ~1/√n, so `n=2` batches carry 3.9× the gradient norm of `n=32` ones |
 
-⚠️ **I1, I2b and I3 are the ones that would actually have caught the composition trap**, and neither
+🔴 **A review built a stream carrying three leaks that passed this entire section clean.** A
+transform *parameter* (`rawboost(strength=0.9 if fake else 0.1)`, AUC 1.000) — I1 counts names, and
+the name was balanced. The `normalize` draw (`container = mp3 if fake else wav`, AUC 1.000) — read
+by nothing. And a duration shift of opposite sign in mixed vs non-mixed files (AUC 0.897 with the
+stratum interaction, 0.499 marginally) — the pooled probe could not see it, while the model gets the
+interaction for free because it is trained to predict presence. I1b now covers all three; the
+regression tests are in `tests/test_audit.py`.
+
+⚠️ **I1, I1b, I2b and I3 are the ones that would actually have caught the composition trap**, and neither
 needs a model, a corpus, or a GPU. They should exist before the corpus does.
 
 ---

@@ -58,51 +58,133 @@ def _fraction(num: float, den: float) -> float:
     return num / den if den else float("nan")
 
 
+def _feature_frame(specs: Sequence[SampleSpec]) -> tuple[np.ndarray, list[str]]:
+    """Every structural knob the sampler controls, as a numeric matrix.
+
+    🔴 Includes ``transforms`` **parameters** and the whole ``normalize`` draw,
+    not just transform names. A review found that a name-only frequency table is
+    blind to a leak carried in a parameter -- ``rawboost(strength=0.9 if fake
+    else 0.1)`` puts the *name* on both sides at exactly equal rate, so the
+    frequency check reports 0.0000 while the parameter separates the labels at
+    AUC 1.000. ``normalize`` was read by nothing at all, and it is the A-S1
+    test-chain draw: the single highest-leverage stage in the pipeline.
+    """
+    rows: list[dict[str, float]] = []
+    for s in specs:
+        gains = [c.gain_db for c in s.components]
+        feat: dict[str, float] = {
+            "duration_s": s.duration_s,
+            "is_composed": float(s.render_mode == "composed"),
+            "is_sequential": float(s.structure == "sequential"),
+            "n_components": float(len(s.components)),
+            "mean_gain_db": float(np.mean(gains)),
+            "gain_spread_db": float(max(gains) - min(gains)),
+            "crossfade_ms": s.crossfade_ms,
+        }
+        # ⚠️ `source_offset_s` is deliberately NOT a feature. It is where inside
+        # the source file we start reading -- the model sees rendered audio and
+        # cannot observe it, so it cannot be a shortcut. It IS correlated with
+        # the source pool's duration statistics, which differ between the fake
+        # and real whole-file pools by chance when those pools are small: with
+        # 12 real and 9 fake instrumental whole-file rows it reached AUC 0.764
+        # inside the music-only stratum and failed this gate on a corpus with no
+        # actual leak. Source-duration imbalance is a manifest property worth
+        # knowing about, but it is not a spec-level shortcut.
+        for name, params in s.transforms:
+            feat[f"t:{name}"] = 1.0
+            for k, v in params.items():
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    feat[f"t:{name}:{k}={v}"] = 1.0
+                else:
+                    feat[f"t:{name}:{k}"] = float(v)
+        for k, v in s.normalize.items():
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                feat[f"n:{k}={v}"] = 1.0
+            else:
+                feat[f"n:{k}"] = float(v)
+        rows.append(feat)
+
+    # Keep columns seen often enough to mean something; a one-per-sample column
+    # would let the model memorise rather than find a shortcut.
+    counts = Counter(k for r in rows for k in r)
+    keep = sorted(k for k, c in counts.items() if c >= max(10, 0.01 * len(rows)))
+    X = np.zeros((len(rows), len(keep)), dtype=float)
+    for i, r in enumerate(rows):
+        for j, k in enumerate(keep):
+            X[i, j] = r.get(k, 0.0)
+    return X, keep
+
+
+def _auc_or_none(X: np.ndarray, y: np.ndarray) -> float | None:
+    """Cross-validated AUC. `None` when the sample cannot support an estimate.
+
+    ⚠️ Cross-validated, not in-sample: the feature matrix one-hots categorical
+    transform and normalize values, and an in-sample fit over many sparse
+    columns inflates AUC and manufactures false alarms. A real leak survives
+    cross-validation trivially -- the trapped stream this was built against
+    scores 1.000 either way.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import StratifiedKFold, cross_val_predict
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    if len(y) < 200 or len(np.unique(y)) < 2 or min(np.bincount(y)) < 50:
+        return None
+    if X.shape[1] == 0 or not np.isfinite(X).all():
+        return None
+    model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000))
+    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=0)
+    from sklearn.metrics import roc_auc_score
+    proba = cross_val_predict(model, X, y, cv=cv, method="predict_proba")[:, 1]
+    return float(roc_auc_score(y, proba))
+
+
 def _metadata_shortcut(specs: Sequence[SampleSpec]) -> tuple[bool, str]:
-    """Can structural metadata alone predict FILE_FAKE?
+    """Can structural metadata alone predict FILE_FAKE? (E-S2 / VG2 at spec level.)
 
-    ⚠️ Deliberately includes the features the sampler *controls* -- duration,
-    composedness, structure, component count, gain. If the constraints hold,
-    none of them nor any combination should separate the labels.
+    ⚠️ ``stratum`` is not a feature. Presence is a legitimate signal the model is
+    *asked* to predict, so including it would measure the label space rather than
+    our corpus.
 
-    ⚠️ ``stratum`` is excluded as a feature. Presence is a legitimate signal the
-    model is *asked* to predict, so including it would measure the label space
-    rather than our corpus.
+    🔴 But the probe runs **per stratum as well as pooled, and takes the worst**.
+    Because the model is trained to predict presence, it effectively knows the
+    stratum for free -- so a leak that cancels marginally while pointing opposite
+    ways inside two strata is fully available to it. A review built exactly that:
+    a duration shift of opposite sign in mixed vs non-mixed files scored 0.4986
+    marginally (invisible) and 0.7719 with the interaction.
 
-    🔴 **Cell 9 is excluded from the population**, for the same reason it is
-    excluded from the mixedness balance: a file with no components cannot be
-    fake, and cell 9 is also never composed, so it contributes an *unfixable*
-    "not composed => REAL" correlation. Measured: including it the strict policy
-    (``f8 = 1``) scores **0.6003** and fails this gate, while over cells 1-8 it
-    scores 0.5196. That failure would have been a false alarm blocking a policy
-    we deliberately support.
+    🔴 **Cell 9 is excluded**, for the same reason it is excluded from the
+    mixedness balance: it is always REAL *and* never composed, contributing an
+    unfixable correlation. Including it, the strict policy (``f8 = 1``) scored
+    0.6003 and failed this gate -- a false alarm blocking a policy we support.
     """
     specs = [s for s in specs if s.cell != 9]
     if not specs:
         return True, "skipped: no cells 1-8 in the stream"
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import roc_auc_score
-    from sklearn.preprocessing import StandardScaler
 
-    y = np.array([s.file_fake for s in specs])
-    if len(np.unique(y)) < 2:
-        return True, "skipped: only one class in the stream"
-    X = np.array([[
-        s.duration_s,
-        float(s.render_mode == "composed"),
-        float(s.structure == "sequential"),
-        float(len(s.components)),
-        float(np.mean([c.gain_db for c in s.components])),
-        s.crossfade_ms,
-        float(np.mean([c.source_offset_s for c in s.components])),
-    ] for s in specs])
-    Xs = StandardScaler().fit_transform(X)
-    model = LogisticRegression(max_iter=2000).fit(Xs, y)
-    auc = float(roc_auc_score(y, model.predict_proba(Xs)[:, 1]))
-    # In-sample AUC: an optimistic estimate, which is the safe direction for a
-    # guardrail -- it cannot hide a shortcut, only invent one.
-    return (auc < SHORTCUT_AUC_GATE,
-            f"metadata-only in-sample AUC = {auc:.4f}, gate < {SHORTCUT_AUC_GATE}")
+    y_all = np.array([s.file_fake for s in specs])
+    X_all, names = _feature_frame(specs)
+    scored: list[tuple[float, str]] = []
+
+    pooled = _auc_or_none(X_all, y_all)
+    if pooled is not None:
+        scored.append((pooled, "pooled"))
+    for stratum in ("voice-only", "music-only", "mixed"):
+        idx = [i for i, s in enumerate(specs) if s.stratum == stratum]
+        if len(idx) < 200:
+            continue
+        auc = _auc_or_none(X_all[idx], y_all[idx])
+        if auc is not None:
+            scored.append((auc, stratum))
+
+    if not scored:
+        return True, "skipped: not enough samples to estimate an AUC"
+    worst, where = max(scored)
+    detail = ", ".join(f"{w}={a:.4f}" for a, w in sorted(scored, key=lambda t: -t[0]))
+    return (worst < SHORTCUT_AUC_GATE,
+            f"worst metadata-only CV AUC = {worst:.4f} in {where!r} "
+            f"over {len(names)} feature(s); gate < {SHORTCUT_AUC_GATE} [{detail}]")
 
 
 def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = None,
@@ -116,7 +198,12 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
     fake = [s for s in specs if s.file_fake == 1]
     real = [s for s in specs if s.file_fake == 0]
 
-    # -- I1: P(T | L) = P(T) for every transform ---------------------------- #
+    # -- I1: P(T | L) = P(T) for every transform NAME ------------------------ #
+    # ⚠️ Names only, and deliberately so -- it is cheap and interpretable, and it
+    # localises which transform is skewed. It is NOT sufficient on its own: a
+    # review showed `rawboost(strength=0.9 if fake else 0.1)` puts the name on
+    # both sides at exactly equal rate, so this reports 0.0000 while the
+    # parameter separates the labels at AUC 1.000. I1b covers parameters.
     by_label: dict[int, Counter] = {0: Counter(), 1: Counter()}
     for s in specs:
         for name, _ in s.transforms:
@@ -128,10 +215,11 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
         p0 = _fraction(by_label[0][name], len(real))
         if abs(p1 - p0) > worst:
             worst, worst_name = abs(p1 - p0), name
-    r["I1_transform_label_independence"] = (
+    r["I1_transform_name_independence"] = (
         worst <= tol,
         f"worst |P(T|FAKE) - P(T|REAL)| = {worst:.4f} on {worst_name!r} "
-        f"over {len(names)} transform(s), tol {tol}")
+        f"over {len(names)} transform NAME(s), tol {tol}. "
+        f"⚠️ names only -- parameter-level leaks are I1b's job")
 
     # -- I1b: the metadata shortcut audit, E-S2 at spec level ---------------- #
     # 🔴 The joint check. Each balance above can hold individually while a
@@ -174,19 +262,33 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
 
     # -- I3: real component files appear on both sides of FILE_FAKE ---------- #
     sides: dict[str, set[int]] = defaultdict(set)
+    draw_counts: Counter = Counter()
     for s in specs:
         for c in s.components:
             sides[c.file_id].add(s.file_fake)
+            draw_counts[c.file_id] += 1
     if manifest is not None:
         real_ids = set(manifest.loc[
             manifest.pool.isin(["A", "C"]), "file_id"].astype(str))
+        # ⚠️ Only files drawn at least twice can testify. A file drawn once
+        # cannot appear on both sides, and counting it measures the draw budget
+        # rather than the sampler -- at 1,500 draws over a 400-file real pool
+        # this reported a failure on a corpus with nothing wrong with it.
         drawn_real = {fid for fid in sides if fid in real_ids}
-        both = {fid for fid in drawn_real if sides[fid] == {0, 1}}
-        frac = _fraction(len(both), len(drawn_real))
-        r["I3_real_components_on_both_sides"] = (
-            frac >= 0.5,
-            f"{len(both)}/{len(drawn_real)} = {frac:.3f} of drawn real components "
-            f"appear with both FILE_FAKE=0 and =1")
+        eligible = {fid for fid in drawn_real if draw_counts[fid] >= 2}
+        both = {fid for fid in eligible if sides[fid] == {0, 1}}
+        frac = _fraction(len(both), len(eligible))
+        if len(eligible) < 20:
+            r["I3_real_components_on_both_sides"] = (
+                True,
+                f"skipped: only {len(eligible)} real component(s) drawn twice or more "
+                f"out of {len(drawn_real)}; draw more specs to test this")
+        else:
+            r["I3_real_components_on_both_sides"] = (
+                frac >= 0.5,
+                f"{len(both)}/{len(eligible)} = {frac:.3f} of real components drawn "
+                f"2+ times appear with both FILE_FAKE=0 and =1 "
+                f"({len(drawn_real)} distinct real components drawn)")
     else:
         r["I3_real_components_on_both_sides"] = (True, "skipped: no manifest given")
 
