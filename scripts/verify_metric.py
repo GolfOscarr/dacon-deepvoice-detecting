@@ -4,25 +4,24 @@
 Every number in docs/validation/02-metric-harness.md and 05-lb-probe-plan.md is produced here.
 Run:  .venv/bin/python scripts/verify_metric.py
 """
+import sys
+from pathlib import Path
+
 import numpy as np
 from scipy.stats import norm
-from sklearn.metrics import roc_curve, roc_auc_score
+from sklearn.metrics import roc_auc_score
 
-W = dict(file=0.45, music=0.27, voice=0.18, vp=0.05, mp=0.05)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-
-def eer(y_true, y_score):
-    """The official estimator, transcribed from the competition page."""
-    fpr, tpr, _ = roc_curve(y_true, y_score, pos_label=1, drop_intermediate=False)
-    fnr = 1 - tpr
-    idx = np.argmin(np.abs(fpr - fnr))
-    return (fpr[idx] + fnr[idx]) / 2
+# The properties below are only worth anything if they hold for the estimator we
+# actually ship, so import it rather than restating it here.
+from metrics.dacon import SCORE_WEIGHTS as W  # noqa: E402
+from metrics.dacon import eer  # noqa: E402
+from metrics.dacon import roll_up  # noqa: E402
 
 
 def total(eer_f, eer_v, eer_m, auc_vp, auc_mp):
-    ads = 0.5 * (1 - eer_f) + 0.2 * (1 - eer_v) + 0.3 * (1 - eer_m)
-    cps = 0.5 * auc_vp + 0.5 * auc_mp
-    return 0.9 * ads + 0.1 * cps
+    return roll_up(eer_f, eer_v, eer_m, auc_vp, auc_mp)[2]
 
 
 def gaussian_scores(n_pos, n_neg, target_eer, rng):
@@ -52,9 +51,9 @@ def check_decomposition():
     s_m = total(.5, .5, eM, .5, .5)
     s_full = total(eF, eV, eM, aV, aM)
 
-    r_f = 0.5 - (s_f - 0.5) / W["file"]
-    r_v = 0.5 - (s_v - 0.5) / W["voice"]
-    r_m = 0.5 - (s_m - 0.5) / W["music"]
+    r_f = 0.5 - (s_f - 0.5) / W["eer_file"]
+    r_v = 0.5 - (s_v - 0.5) / W["eer_voice"]
+    r_m = 0.5 - (s_m - 0.5) / W["eer_music"]
     ads = 0.5 * (1 - r_f) + 0.2 * (1 - r_v) + 0.3 * (1 - r_m)
     r_cps = (s_full - 0.9 * ads) / 0.1
 

@@ -81,23 +81,34 @@ average into the headline number.
 
 | Step | Deliverable | Done when |
 |---|---|---|
-| 1 | `dacon.py` + T1–T10, T13, T14 | Tests green; `verify_metric.py` still passes against the imported `eer` |
-| 2 | `submission.py` + `validate_submission` | Round-trips DACON's `sample_submission.csv` with the correct ID set |
-| 3 | **`submit.zip` skeleton** — constant-0.5 `script.py` | Packaged offline, runs on the 3 dummy files |
-| 4 | 🔴 **Submit P0** | Leaderboard returns **exactly 0.5000** |
-| 5 | `aggregate.py` + T11, T12 | Fold-rescale test reproduces mean-of-folds 0.1040 vs pooled-raw 0.1705 |
-| 6 | `breakdown.py` | Emits the full Tier-3 table from a prediction frame |
+| 1 | ✅ `dacon.py` + T1–T10, T13, T14 | Tests green; `verify_metric.py` passes through the imported `eer` |
+| 2 | ✅ `submission.py` + `validate_submission` | Writes and re-reads a 1,200-row file; VG5 rejects saturated, constant and non-finite columns |
+| 3 | ⬜ **`submit.zip` skeleton** — constant-0.5 `script.py` | Packaged offline, runs on the 3 dummy files |
+| 4 | ⬜ 🔴 **Submit P0** | Leaderboard returns **exactly 0.5000** |
+| 5 | ✅ `aggregate.py` + T11, T12 | Fold-rescale test reproduces mean-of-folds 0.1040 vs pooled-raw 0.1705 |
+| 6 | ✅ `breakdown.py` | Emits the full Tier-3 table; shared contrast pools for label-determining keys |
 
 Steps 1–4 are the critical path and are worth doing before any modeling. Steps 5–6 are needed
 before the first *comparison* between two models, which is later.
 
 ## Definition of done
 
-- [ ] All 14 tests green under scikit-learn **1.8.0**, not just 1.9.0 ([02 §9](02-metric-harness.md#9-version-pinning))
-- [ ] `scripts/verify_metric.py` imports `metrics.dacon.eer` rather than redefining it
-- [ ] `score_frame` reproduces a hand-computed 5-row fixture
-- [ ] P0 returned exactly 0.5000 on the real leaderboard
-- [ ] No function in `metrics/` reads more than one file's row when called from `script.py`
+- [x] All tests green under scikit-learn **1.8.0**, the server's version — 47 tests, not 14:
+      the plan's T1–T14 plus submission-writer, bootstrap and breakdown coverage
+- [x] `scripts/verify_metric.py` imports `metrics.dacon.eer` rather than redefining it,
+      and reports identical numbers through it
+- [x] `dacon_score` reproduces a hand-computed fixture (T8: labels `1,1,0,1,0`, scores
+      `.9,.8,.4,.3,.1` → EER **5/12**)
+- [x] No function in `metrics/` reads more than one row when called from `script.py`
+      — the VG5 assertions scan a column, but they are diagnostics over our own output
+- [ ] **P0 returned exactly 0.5000 on the real leaderboard** ← the one open item; needs the
+      `submit.zip` skeleton, which is step 3 and not part of this module
+
+⚠️ **Version skew not yet closed.** scikit-learn matches the server at 1.8.0, but local numpy
+(2.5.3) and pandas (3.0.5) are far ahead of the server's 1.26.4 / 2.0.3, and the local venv is
+Python 3.12 against the server's 3.11.15. Nothing in `metrics/` uses a recent API, but that is an
+argument, not a test. Close it by running the suite in a 3.11 environment with the server's pins
+before the first real submission.
 
 ## Deferred
 

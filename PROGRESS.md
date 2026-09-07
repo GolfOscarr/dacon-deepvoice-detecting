@@ -73,7 +73,7 @@ Docs: 57 files under [`docs/`](docs/README.md) · Code: none yet
 - [ ] Email AI-Hub (safezone1@aihub.kr) re: NIA / competition use
 - [ ] **G1** dummy-file forensics → `signal_chain.yaml`
 - [ ] **G2** license audit of `docs/data/11-source-inventory.md` (top 10 first)
-- [ ] `submit.zip` skeleton + trivial model → validate I/O, runtime, offline packaging
+- [ ] `submit.zip` skeleton + trivial model → validate I/O, runtime, offline packaging (`metrics/submission.py` is ready to vendor)
 - [ ] LB probe: all-constant 0.5 submission → **must score exactly 0.5000**
 
 **Highest-value single experiment**
@@ -85,7 +85,7 @@ Docs: 57 files under [`docs/`](docs/README.md) · Code: none yet
 - [x] Decision protocol: 3 speeds, paired-bootstrap promotion rule, experiment ledger
 - [x] Gates **VG1–VG6** defined with pre-committed thresholds
 - [x] 🔴 LB decomposition solved: **4 marginal submissions** recover all 3 fake EERs *and* CPS
-- [ ] **Implement** `metrics/dacon.py` + `tests/test_metrics.py` (14 known-answer cases) → [`validation/06`](docs/validation/06-implementation-plan.md)
+- [x] **Implemented** `metrics/` — dacon · submission · aggregate · breakdown, 47 tests green under the server's scikit-learn 1.8.0 (branch `feat/metrics-harness`)
 - [ ] **Implement** `folds.parquet` builder + VG1 assertions
 - [ ] Wire VG2/VG3 (`E-S2`, `E-A2`) to run per-experiment, not ad hoc
 - [ ] 🔴 Resolve the **music-family shortfall** below before any fold is built

@@ -1,0 +1,9 @@
+# Local development environment for the metrics harness.
+#
+# scikit-learn is pinned to the evaluation server's version because the metric
+# depends on roc_curve's tie handling and vertex set.
+scikit-learn==1.8.0
+numpy
+pandas
+scipy          # simulations in scripts/verify_metric.py only; not a runtime dep
+pytest
