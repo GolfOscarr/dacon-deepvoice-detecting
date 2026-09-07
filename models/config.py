@@ -98,6 +98,14 @@ class FreqPoolConfig:
     kind: str = "gem"          # gem | mean | max | none
     p_init: float = 3.0        # 3.0 = sharper than mean, softer than max
     learnable: bool = True     # lets the model settle G5 instead of us guessing
+    #: How signed features are made positive before the power mean. GeM comes
+    #: from image retrieval on post-ReLU (non-negative) features; SSL hidden
+    #: states are signed, and roughly half of them are negative. ⚠️ `clamp`
+    #: maps every negative entry to eps -- discarding ~50% of the distribution
+    #: with exactly zero gradient -- and is kept only to reproduce that
+    #: behaviour deliberately. `softplus` is monotone, positive and
+    #: differentiable everywhere, so nothing is thrown away.
+    rectifier: str = "softplus"   # softplus | clamp
 
 
 @dataclass(frozen=True)
@@ -118,11 +126,22 @@ class FrontendConfig:
 
 @dataclass(frozen=True)
 class SEDHeadConfig:
-    """One SED head (docs/architecture/04)."""
+    """One SED head (docs/architecture/04).
+
+    🔴 `attention` matters more than it looks. The source notebook applies
+    `tanh` to the attention logits before the softmax, which bounds them to
+    [-1, 1] and caps the weight any single frame can receive at
+    `1/(1 + (T-1)e^-2)` ~= 7.4/T -- so at T=3000 (a 60 s file under
+    `whole_file`) the "attention" pooling is within 7.4x of a uniform mean, and
+    `clip_logits` is functionally the mean pool that 04 §1 calls "the whole
+    problem". `linear` removes the cap; `tanh` is kept only for parity with the
+    source recipe and is documented as capped.
+    """
     hidden: int = 512
     dropout_in: float = 0.25
     dropout_out: float = 0.5
     clip_weight: float = 0.5        # blend of clip vs frame_max, applied in LOGIT space
+    attention: str = "linear"       # linear | scaled_tanh | tanh
 
 
 @dataclass(frozen=True)
@@ -360,6 +379,9 @@ def validate_model_config(cfg: ModelConfig) -> None:
             raise ConfigError(f"frontends.{name}.layers must be >= 1, got {fe.layers}")
         if fe.fps <= 0:
             raise ConfigError(f"frontends.{name}.fps must be > 0")
+        if fe.freq_pool.rectifier not in ("softplus", "clamp"):
+            raise ConfigError(
+                f"frontends.{name}.freq_pool.rectifier invalid: {fe.freq_pool.rectifier!r}")
         if fe.freq_pool.kind not in ("gem", "mean", "max", "none"):
             raise ConfigError(f"frontends.{name}.freq_pool.kind invalid: {fe.freq_pool.kind!r}")
         if (fe.freq_pool.kind == "none") != (fe.n_freq is None):
@@ -401,6 +423,9 @@ def validate_model_config(cfg: ModelConfig) -> None:
                 f"branches.{name}.masked_by must be one of {list(MASK_KEYS)} or null")
         if not 0.0 <= br.head.clip_weight <= 1.0:
             raise ConfigError(f"branches.{name}.head.clip_weight must be in [0, 1]")
+        if br.head.attention not in ("linear", "scaled_tanh", "tanh"):
+            raise ConfigError(
+                f"branches.{name}.head.attention invalid: {br.head.attention!r}")
 
     # The five submission columns must be produced exactly once each. This ties the
     # architecture to the already-verified metric contract instead of restating it.

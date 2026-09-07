@@ -66,6 +66,35 @@ settles it per head from data instead of us guessing once for all five. 🔷 We 
 to learn a larger `p` than the presence heads, and **the learned values are a reportable finding**
 for the 2nd-stage 결과 해석 section.
 
+### 🔴 Two defects in the snippet above, found by review after implementing it
+
+**1. `tanh` on the attention logits makes `clip` a mean pool.** Bounding the logits to [−1, 1]
+before the softmax caps the weight any single frame can receive at `1/(1 + (T−1)e⁻²) ≈ 7.4/T`,
+*however well the model learns*. Measured on a head driven to concentrate, T = 3000:
+
+| Activation | Max weight on one frame | vs uniform |
+|---|---|---|
+| `tanh` (the snippet) | 0.00091 | **2.7×** |
+| `linear` | 1.00000 | **3000×** |
+| `scaled_tanh`, scale 20 | 0.99999 | 3000× |
+
+⚠️ So `clip_logits` — *half* the blended score at `clip_weight: 0.5` — is functionally the
+whole-file mean pool this section opens by calling the problem. Only `frame_max` localises.
+And `norm_att` is flat, so the interpretability artifact §8 banks 15 report points on does not
+exist at this scale.
+
+🔴 **Our own `whole_file` decision made it 12× worse.** The snippet comes from a notebook whose
+clips are 5 s (T ≈ 250), where the cap is far less binding; [§6](#6-temporal-coverage-tiling-not-sampling)
+moved us to T ≈ 3000. Default is now `attention: linear`; `tanh` is retained and documented as
+capped.
+
+**2. GeM's clamp discards the negative half of the features.** `x.clamp(min=eps).pow(p)` maps
+every negative entry to eps — measured at **50.7% of entries** on SSL-like features, with exactly
+zero gradient. GeM comes from image retrieval on post-ReLU features, where inputs are
+non-negative and the clamp is a no-op; SSL hidden states are signed. The rectifier is now
+`softplus` by default — monotone, positive, differentiable everywhere — with `clamp` retained
+only so the lossy behaviour can be reproduced deliberately.
+
 ---
 
 ## 3. The loss: clip + frame-max, and why it matches our labels

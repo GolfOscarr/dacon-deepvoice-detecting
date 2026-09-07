@@ -13,6 +13,7 @@ See docs/architecture/04-heads-and-pooling.md.
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from models.config import FreqPoolConfig, SEDHeadConfig
@@ -61,6 +62,7 @@ class FreqPool(nn.Module):
     def __init__(self, cfg: FreqPoolConfig):
         super().__init__()
         self.kind = cfg.kind
+        self.rectifier = cfg.rectifier
         if cfg.kind == "gem":
             p = torch.tensor(float(cfg.p_init))
             self.p = nn.Parameter(p) if cfg.learnable else nn.Buffer(p)
@@ -76,9 +78,15 @@ class FreqPool(nn.Module):
             return x.amax(dim=1)
         if self.kind == "gem":
             p = self.p.clamp(min=1.0)
-            # clamp before pow: a negative base with fractional p is NaN, and SSL
-            # features are not sign-constrained.
-            return x.clamp(min=self.eps).pow(p).mean(dim=1).pow(1.0 / p)
+            # A negative base with fractional p is NaN, so x must be made
+            # positive first. 🔴 `clamp` does that by mapping every negative
+            # entry to eps -- which on SSL hidden states discards ~50% of the
+            # distribution and gives it exactly zero gradient. `softplus` is
+            # monotone, positive and differentiable everywhere, so it costs no
+            # information.
+            base = (F.softplus(x) + self.eps if self.rectifier == "softplus"
+                    else x.clamp(min=self.eps))
+            return base.pow(p).mean(dim=1).pow(1.0 / p)
         raise ValueError(f"FreqPool: nothing to do for kind={self.kind!r}")
 
 
@@ -108,6 +116,10 @@ class SEDHead(nn.Module):
         )
         self.att = nn.Conv1d(cfg.hidden, 1, kernel_size=1)
         self.cla = nn.Conv1d(cfg.hidden, 1, kernel_size=1)
+        # Only `scaled_tanh` needs a parameter: it keeps tanh's bounded shape but
+        # lets the magnitude grow, so the softmax can still concentrate.
+        self.att_scale = (nn.Parameter(torch.ones(())) if cfg.attention == "scaled_tanh"
+                          else None)
 
     def forward(self, x: Tensor, mask: Tensor | None = None) -> SEDOutput:
         """(B, T, D) -> clip (B,), frame (B, T), attention (B, T).
@@ -121,7 +133,13 @@ class SEDHead(nn.Module):
         if x.dim() != 3:
             raise ValueError(f"SEDHead expects (B, T, D), got {tuple(x.shape)}")
         h = self.dense(x).transpose(1, 2)                 # (B, hidden, T)
-        att_logits = torch.tanh(self.att(h)).squeeze(1)    # (B, T)
+        raw_att = self.att(h).squeeze(1)                   # (B, T)
+        if self.cfg.attention == "linear":
+            att_logits = raw_att
+        elif self.cfg.attention == "scaled_tanh":
+            att_logits = torch.tanh(raw_att) * self.att_scale.abs()
+        else:                                              # "tanh" -- capped, legacy
+            att_logits = torch.tanh(raw_att)
         frame_logits = self.cla(h).squeeze(1)              # (B, T)
 
         if mask is not None:
