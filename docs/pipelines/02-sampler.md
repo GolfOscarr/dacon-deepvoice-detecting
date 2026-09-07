@@ -177,9 +177,14 @@ reason.
 
 ⚠️ **An earlier draft of this section failed this check.** A mix of
 `.10 .10 .10 .10 .12 .15 .15 .10 .08` satisfies C1 but gives
-**P(mixed | FAKE) = 0.667 vs P(mixed | REAL) = 0.300**, so *"is a mixed file"* predicted FAKE at
-**0.769 vs 0.417**. That is the composition trap wearing a different hat, and C1 alone does not
+**P(mixed | FAKE) = 0.667 vs P(mixed | REAL) = 0.375**, so *"is a mixed file"* predicted FAKE at
+**0.769 vs 0.500**. That is the composition trap wearing a different hat, and C1 alone does not
 catch it.
+
+⚠️ Those four figures are computed **over cells 1–8**, per the definition above. An earlier draft
+quoted 0.300 and 0.417, which are the cell-9-*inclusive* values — inconsistent with the exclusion
+stated two paragraphs earlier, and caught by the mutation test in `tests/test_audit.py`. The verdict
+is unchanged: the gap is 0.292 rather than 0.367, and still a large violation.
 
 ### The reference cell mix
 
