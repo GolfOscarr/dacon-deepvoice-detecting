@@ -128,19 +128,50 @@ Three options, in preference order:
 here because Phase C is where the constraint becomes visible. Until it is resolved, music-head
 numbers carry an explicit variance caveat in the [experiment ledger](03-decision-protocol.md#5-experiment-ledger).
 
+### 🔴 The table is keyed on components, not on composed files
+
+An earlier version of this section listed `cell` as a plain column, which is not coherent with
+[06](../data/06-augmentation-spec.md): **`cell` is a property of a composition, and compositions are
+generated on the fly and unbounded.** §4 below already says so — the size floor is "a sampling
+decision, not a storage one" — but the schema contradicted it. A component file drawn from pool A
+has no cell; the cell only exists once the sampler has chosen one and drawn the other component.
+
+The manifest therefore holds **two kinds of row**, and every rule in this file applies per row:
+
+| Row kind | Examples | `cell` | How it reaches the model |
+|---|---|:--:|---|
+| **Component** | pools A–E — real/fake voice, real/fake instrumental, noise | `null` | drawn and composed at runtime |
+| **Whole file** | natural songs (5), AI songs (8), scraped voice-only (1/2) | fixed | used as-is |
+
+Split safety is enforced **on the component row**, before composition. `artifact_family`
+disjointness constrains only *fake* components — real files have no family — while `source_name`,
+`speaker_ref_id`, `pair_id` and `dup_group` constrain both. A composed sample draws its voice and
+music components independently within the slice, so a *combination* unseen in TRAIN is expected
+and is not a leak.
+
 ### Stratification within the group constraint
 
-Within the family-disjoint partition, balance folds on: **cell** (1–9, [taxonomy](../data/02-label-taxonomy.md)),
-**source_name**, **duration bucket**, **channel count**. Greedy assignment — take families in
-descending size, place each into the fold whose current composition is furthest from target.
+Within the family-disjoint partition, balance folds on **source_name**, **duration bucket** and
+**channel count**. Greedy assignment — take families in descending size, place each into the fold
+whose current composition is furthest from target.
+
+⚠️ **Cell balance is not achievable here.** It is a property of the sampler's composition policy
+per fold ([06 pipeline order](../data/06-augmentation-spec.md#pipeline-order-per-training-sample)),
+not of a stored assignment, and it can only be balanced for the whole-file rows that carry a cell
+at all. Fold construction balances what it owns; the sampler owns the rest.
 
 Emitted **once** to `folds.parquet` (★ E4 — fold assignment generated once and reused everywhere):
 
 ```
-file_id · slice(train|val|shadow|probe) · shadow_kind(a|b|null) · shadow_of(file_id|null)
-fold(0-4|null) · artifact_family
-source_name · speaker_ref_id · pair_id · dup_group · cell · assigned_at · scheme_version
+file_id · row_kind(component|whole_file) · slice(train|val|shadow|probe)
+shadow_kind(a|b|null) · shadow_of(file_id|null) · fold(0-4|null) · artifact_family
+source_name · speaker_ref_id · pair_id · dup_group · cell(1-9|null)
+domain_key · assigned_at · scheme_version
 ```
+
+`cell` is non-null exactly when `row_kind == whole_file`. `domain_key` is `source × generator`,
+the DOSS capping key ([papers/05](../papers/05-generalization.md)) — carried here rather than
+recomputed per experiment, since it is derived from the same ledger fields as the split keys.
 
 Regenerating it requires bumping `scheme_version`; every experiment records the version it ran
 against, and results across versions are never compared.

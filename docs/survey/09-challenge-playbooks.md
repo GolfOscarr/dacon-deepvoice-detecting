@@ -32,7 +32,7 @@ than one shared fake head.
 |---|---|
 | Frontend | **W2V-BERT 2.0**, 3-member ensemble |
 | Backend | AASIST, AASIST3, Adapter-MFA variants |
-| Training | staged **frozen → LoRA → joint fine-tune**; **AM-Softmax + focal loss** |
+| Training | staged **frozen → LoRA → joint fine-tune**; **AM-Softmax + focal loss** ⚠️ **not evidence for the loss** — no ablation is published, it is confounded with a 3-member W2V-BERT 2.0 ensemble, LoRA staging and six augmentation families, and the metric is **Macro-F1 at a fixed threshold**, which is exactly what margin and focal losses buy ([training/03 §2](../training/03-ruled-out.md#2-focal-loss---provably-zero)) |
 | Augmentation | MUSAN, RIR, codec artifacts, signal perturbation, replay simulation, bonafide segment construction |
 | Inference | logit averaging, fixed threshold |
 

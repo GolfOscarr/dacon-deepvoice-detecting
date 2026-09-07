@@ -114,7 +114,7 @@ Kept visible rather than silently edited, because the reasoning is the deliverab
   "Resolvable?" column, and three entries are marked *decide by argument, do not sweep*.
 - **"Frame-level ground truth is free" is true only of composed files** — i.e. exactly the subset
   where the composition shortcut lives, which makes the frame-loss weight a shortcut-exposure knob
-  ([04 §4](04-heads-and-pooling.md#4-multi-resolution-supervision--and-the-advantage-we-get-for-free)).
+  ([04 §4](04-heads-and-pooling.md#4-multi-resolution-supervision--an-advantage-we-can-produce-but-should-not-lean-on)).
 - Several claims carried ★ (primary-source) marks when their sources are card-level entries in
   [papers/INDEX](../papers/INDEX.md) — including the **layer-truncation result the whole inference
   budget rests on**. All downgraded to ☆. Two model-size figures and one blockquote were our own

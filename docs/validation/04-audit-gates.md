@@ -36,6 +36,14 @@ A9  every cell 1-9 is present in every fold with >=100 samples
 A10 scheme_version recorded on the run matches folds.parquet
 ```
 
+🔴 **A8 and A9 are evaluated against `val_specs.parquet`, not `folds.parquet`.** Both are
+statements about *compositions*, and a component row has no cell — the fold table is keyed on
+source files ([01 §3](01-split-scheme.md#-the-table-is-keyed-on-components-not-on-composed-files)).
+They therefore run at eval-set materialization
+([pipelines/02 §4](../pipelines/02-sampler.md#5-the-eval-sampler-is-the-same-code-run-once)), while
+A1–A7 and A10 run against `folds.parquet`. The gate is unchanged; only where each assertion can be
+computed is.
+
 ⚠️ **A8 is the one that will fail first.** The masked pools mean the Voice pool draws only from
 cells 1,2,5,6,7,8 and the Music pool only from 3,4,5,6,7,8 — sizing VAL by total file count
 under-fills both. See [01 §4](01-split-scheme.md#4-size-floors).

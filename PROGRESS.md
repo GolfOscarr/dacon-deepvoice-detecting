@@ -3,7 +3,7 @@
 **DACON 236749 — 딥보이스 범죄 대응을 위한 AI 탐지 모델 경진대회**
 Updated 2026-09-07 · **22 days to LB close** (2026-09-29 10:00 KST) · 2nd-stage materials 2026-10-05
 
-Docs: 68 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGENTS.md) + [`models/`](models/AGENTS.md) — **247 tests green** on `feat/model-architecture`
+Docs: 87 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGENTS.md) + [`models/`](models/AGENTS.md) — **231 tests green** on `main`
 
 ---
 
@@ -159,7 +159,7 @@ Docs: 68 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGE
 
 **Then (D/E/F)**
 - [ ] Presence heads first (PANNs, cheap, 0.10 weight) → ship a real submission
-- [ ] 🔴 **Three parallel branches on the mixture** (PC-Mix layout) — voice / music / file — with **joint training across branches** (the largest single gain in both component papers)
+- [ ] 🔴 **Three parallel branches on the mixture** (PC-Mix layout) — voice / music / file — with **joint training across branches**. ⚠️ "Largest single gain" is a *thresholded-metric* claim (ACC/F1); the EER deltas from the same ablation are 0.47–0.86 pts, below our resolution threshold ([training/04 §2](docs/training/04-schedule.md#2--s2s-evidence-is-a-thresholded-metric-result--keep-the-stage-drop-the-claim))
 - [ ] Specialist frontends: speech SSL for voice, general-audio SSL for music (CompSpoof: don't reuse the speech encoder on the non-speech head)
 - [ ] Try **codec-aware training phase** (ArtifactNet: FMA hard-negative FPR 98.7% → 8.0%)
 - [ ] If a residual/denoise channel is used, **bound the mask** (unbounded degenerates to passing the input through)

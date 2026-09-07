@@ -83,7 +83,7 @@ on the music head.
 |---|---|
 | **Never separate-then-detect as a pipeline** | CompSpoof 0.668 vs 0.827 · PC-Mix speech 51.38% vs 29.35% EER · hybrid-stems 38–94.7% FPR |
 | Either skip separation (3 branches on the mixture) **or** train it jointly end-to-end | PC-Mix vs CompSpoof — both beat the naive middle |
-| **Joint training across component branches is the largest single gain** in both papers | PC-Mix +15.72 ACC · CompSpoof 0.668→0.908 F1 |
+| Joint training across component branches is the largest gain in both papers **on their metrics** | PC-Mix +15.72 ACC · CompSpoof 0.668→0.908 F1. ⚠️ **Both thresholded.** The EER deltas from the same PC-Mix ablation are **3.59→3.12** and **8.72→7.86**; CompSpoof's delta is measured *inside a separation system* whose no-separation baseline is **0.827** ([training/04 §2](../training/04-schedule.md#2--s2s-evidence-is-a-thresholded-metric-result--keep-the-stage-drop-the-claim)) |
 | Don't reuse a speech SSL encoder for the non-speech component | CompSpoof stated limitation |
 | Multi-resolution frame + utterance supervision is the standard | PC-Mix, PartialSpoof |
 | ⭐ **A third option: use a separator as a residual *teacher*, keeping it out of the inference path** | ArtifactNet distils Demucs v4 residuals in Phase 1 → [02](02-music-detection.md) |
