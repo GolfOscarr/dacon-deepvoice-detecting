@@ -175,6 +175,15 @@ class SamplerConfig:
     gain_db_sigma: float = 4.0
     sequential_prob: float = 0.25
     crossfade_ms_range: tuple[float, float] = (10.0, 200.0)
+    #: 🔴 A-A8 (±0.5 s temporal misalignment) and A-A11 (silence edits), as
+    #: *draws* rather than step-4 augments -- they move audio along the timeline
+    #: `frame_intervals` describe, and only a draw is recorded in the spec
+    #: (docs/pipelines/03 §4). Both are the same mechanism: the components
+    #: occupy `duration_s - lead - tail`, starting at `lead`.
+    #: ⚠️ Default 0.0. Switching them on changes the drawn stream and needs an
+    #: I1b re-run; at 0.0 no RNG draw happens, so the stream is unchanged.
+    silence_lead_s: float = 0.0
+    silence_tail_s: float = 0.0
     scheme_version: str = "synthetic-v1"
 
     def __post_init__(self) -> None:
@@ -183,6 +192,9 @@ class SamplerConfig:
             raise ValueError(f"duration_range must be 0 < lo < hi, got {self.duration_range}")
         if self.domain_cap < 1:
             raise ValueError(f"domain_cap must be >= 1, got {self.domain_cap}")
+        for name in ("silence_lead_s", "silence_tail_s"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
         if not 0.0 <= self.sequential_prob <= 1.0:
             raise ValueError(f"sequential_prob must be in [0, 1], got {self.sequential_prob}")
         composed_fractions(                       # validates the knobs
@@ -337,14 +349,32 @@ class Sampler:
         # 🔴 A no-op on the shipped stream: `single_composed_rate = 0.0` emits no
         # composed voice-only samples at all, so only `a`/`b` sweeps change.
         is_ratio = len(wanted) > 1
+        # 🔴 A-A8 (temporal misalignment, ±0.5 s) and A-A11 (leading/trailing
+        # silence) are drawn HERE, not applied as step-4 augments. They move
+        # audio along the timeline, and `frame_intervals` are intervals on that
+        # timeline: an augment returns only a waveform, so it has no way to say
+        # the timeline moved, and the frame labels would silently describe audio
+        # that is no longer there (docs/pipelines/03 §4). Drawn, they are just a
+        # placement -- the spec records it and the frame targets follow it for
+        # free, because they are computed from the placement.
+        # ⚠️ Both default to 0.0: switching them on changes the drawn stream, so
+        # it needs an I1b re-run rather than a default flip. At 0.0 no RNG draw
+        # happens at all, so the shipped stream is byte-identical.
+        lead = float(rng.uniform(0.0, cfg.silence_lead_s)) if cfg.silence_lead_s else 0.0
+        tail = float(rng.uniform(0.0, cfg.silence_tail_s)) if cfg.silence_tail_s else 0.0
+        if lead + tail > 0.5 * duration:          # never silence half the sample
+            scale = 0.5 * duration / (lead + tail)
+            lead, tail = lead * scale, tail * scale
+        span = duration - lead - tail
+
         draws: list[ComponentDraw] = []
         for i, (role, fake) in enumerate(wanted):
             row = self._draw_component(rng, role, fake)
             if sequential:
-                span = duration / len(wanted)
-                start, take = i * span, span
+                seg = span / len(wanted)
+                start, take = lead + i * seg, seg
             else:
-                start, take = 0.0, duration
+                start, take = lead, span
             take = min(take, float(row.duration_s))
             draws.append(ComponentDraw(
                 file_id=str(row.file_id), role=role,

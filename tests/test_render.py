@@ -259,6 +259,60 @@ def test_frame_intervals_track_a_moved_component(corpus):
 
 
 # --------------------------------------------------------------------------- #
+# 🔴 A warp that lives in the draw moves the audio AND the frame targets
+#
+# A-A8 and A-A11 are not step-4 augments; they are `target_start_s`. That is the
+# whole payoff of the contract: the frame targets are *computed from* the
+# placement, so they cannot disagree with it.
+
+
+def _first_overlap_spec(sampler, limit=200):
+    for i in range(limit):
+        spec = sampler.sample_spec(i)
+        if spec.render_mode == "composed" and spec.structure == "overlap":
+            return spec
+    raise AssertionError("no composed overlap spec drawn")   # pragma: no cover
+
+
+def test_a_drawn_silence_lead_moves_the_audio_and_the_frame_targets_together(corpus, cfg):
+    """A-A11/A-A8 as a draw. The head of the waveform is silent for exactly the
+    drawn lead, and `frame_intervals` start there -- not because the renderer
+    tracked a warp, but because both come from `target_start_s`."""
+    from training.sampler import Sampler, SamplerConfig
+    _, manifest, index = corpus
+    sr = AudioConfig().sample_rate
+
+    quiet = Sampler(manifest, SamplerConfig(duration_range=(4.0, 6.0),
+                                            silence_lead_s=0.5), slice_="train")
+    spec = _first_overlap_spec(quiet)
+    lead = spec.components[0].target_start_s
+    assert lead > 0.05, "this draw should have produced a lead"
+
+    out = render(spec, index, cfg)
+    head = out.wav[:, :int(lead * sr) - 8]
+    body = out.wav[:, int(lead * sr) + 8:]
+    assert float(head.abs().max()) == 0.0        # silence, in the audio
+    assert float(body.abs().max()) > 0.0
+    assert out.frame_intervals["file"][0][0] == pytest.approx(lead)
+
+
+def test_without_the_draw_there_is_no_lead_to_find(corpus, cfg):
+    """Mutation test for the check above: at the shipped default the head is
+    *not* silent, so the assertion is measuring the draw and not a constant."""
+    from training.sampler import Sampler, SamplerConfig
+    _, manifest, index = corpus
+    sr = AudioConfig().sample_rate
+
+    plain = Sampler(manifest, SamplerConfig(duration_range=(4.0, 6.0)),
+                    slice_="train")
+    spec = _first_overlap_spec(plain)
+    assert spec.components[0].target_start_s == 0.0
+    out = render(spec, index, cfg)
+    assert float(out.wav[:, :int(0.5 * sr)].abs().max()) > 0.0
+    assert out.frame_intervals["file"][0][0] == 0.0
+
+
+# --------------------------------------------------------------------------- #
 # The sample contract
 
 
