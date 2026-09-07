@@ -191,3 +191,69 @@ def test_file_fake_ignores_absent_components():
     assert file_fake_label([1], [0], [1], [0]).tolist() == [1]
     assert file_fake_label([1], [1], [0], [1]).tolist() == [1]
     assert file_fake_label([1], [1], [0], [0]).tolist() == [0]
+
+
+# --- submission writer --------------------------------------------------
+def test_write_submission_round_trips(tmp_path):
+    from metrics.submission import validate_submission, write_submission
+
+    rng = np.random.default_rng(0)
+    ids = [f"TEST_{i:04d}" for i in range(1200)]
+    preds = {c: rng.random(1200) for c in PREDICTION_COLUMNS}
+    write_submission(ids, preds, tmp_path / "submission.csv")
+    back = validate_submission(tmp_path / "submission.csv", reference_ids=ids)
+    assert len(back) == 1200
+    assert np.allclose(back["FILE_FAKE_PROB"], preds["FILE_FAKE_PROB"])
+
+
+def test_write_submission_preserves_full_float64_precision(tmp_path):
+    from metrics.submission import write_submission
+
+    ids = [f"TEST_{i:04d}" for i in range(1200)]
+    base = np.linspace(0.1, 0.9, 1200) + 1e-13 * np.arange(1200)
+    preds = {c: base for c in PREDICTION_COLUMNS}
+    write_submission(ids, preds, tmp_path / "s.csv")
+    back = pd.read_csv(tmp_path / "s.csv")
+    assert len(np.unique(back["FILE_FAKE_PROB"].to_numpy())) == 1200
+
+
+@pytest.mark.parametrize("saturate", [0.6, 0.8])
+def test_vg5_rejects_saturated_columns(tmp_path, saturate):
+    from metrics.submission import VG5Error, write_submission
+
+    n = 1000
+    ids = [f"TEST_{i:04d}" for i in range(n)]
+    v = np.linspace(0, 1, n)
+    k = int(saturate * n / 2)
+    v[:k] = 0.0
+    v[-k:] = 1.0
+    preds = {c: v for c in PREDICTION_COLUMNS}
+    with pytest.raises(VG5Error, match="Ranking resolution"):
+        write_submission(ids, preds, tmp_path / "s.csv")
+
+
+def test_vg5_rejects_constant_and_nonfinite(tmp_path):
+    from metrics.submission import VG5Error, write_submission
+
+    ids = [f"TEST_{i:04d}" for i in range(100)]
+    ok = np.linspace(0, 1, 100)
+
+    preds = {c: ok for c in PREDICTION_COLUMNS}
+    preds["FILE_FAKE_PROB"] = np.full(100, 0.5)
+    with pytest.raises(VG5Error, match="constant"):
+        write_submission(ids, preds, tmp_path / "a.csv")
+
+    preds = {c: ok.copy() for c in PREDICTION_COLUMNS}
+    preds["VOICE_FAKE_PROB"][3] = np.nan
+    with pytest.raises(VG5Error, match="non-finite"):
+        write_submission(ids, preds, tmp_path / "b.csv")
+
+
+def test_validate_submission_catches_id_mismatch(tmp_path):
+    from metrics.submission import VG5Error, validate_submission, write_submission
+
+    ids = [f"TEST_{i:04d}" for i in range(50)]
+    preds = {c: np.linspace(0, 1, 50) for c in PREDICTION_COLUMNS}
+    write_submission(ids, preds, tmp_path / "s.csv")
+    with pytest.raises(VG5Error, match="rows|ID set"):
+        validate_submission(tmp_path / "s.csv", reference_ids=ids[:49])
