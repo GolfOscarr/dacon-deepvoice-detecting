@@ -67,7 +67,7 @@ MUTATION_TESTS = {
     "I7_eval_size_floors": "test_I7_size_floors_run_when_asked",
     "I8_C1_positive_rates": "test_I8_catches_the_naive_6_7_heavy_mix",
     "I9_C2_present_count_floor": "test_I9_catches_a_starved_masked_head",
-    "I10_generator_diversity": "test_I10_catches_generator_monoculture",
+    "I21_generator_diversity": "test_I21_catches_generator_monoculture",
 }
 
 #: The one invariant that legitimately does not run on a TRAINING stream. VG1
@@ -627,7 +627,7 @@ def test_I5_checks_the_fold_not_only_the_slice(manifest):
     assert "fold=1" in report.results["I5_split_safety"][1]
 
 
-def test_I10_catches_generator_monoculture(manifest):
+def test_I21_catches_generator_monoculture(manifest):
     """🔴 domain_cap is a weight over what is PRESENT.
 
     A fold split leaving TRAIN generator-poor reproduces the DOSS failure with a
@@ -638,13 +638,13 @@ def test_I10_catches_generator_monoculture(manifest):
     mono.loc[~keep, "slice"] = "val"
     report = run_audit(Sampler(mono), n=4000, manifest=mono)
     assert not report.ok
-    assert "I10_generator_diversity" in report.failures
-    assert "POOR" in report.results["I10_generator_diversity"][1]
+    assert "I21_generator_diversity" in report.failures
+    assert "POOR" in report.results["I21_generator_diversity"][1]
 
 
-def test_I10_passes_on_a_diverse_slice(manifest):
+def test_I21_passes_on_a_diverse_slice(manifest):
     report = run_audit(Sampler(manifest), n=4000, manifest=manifest)
-    passed, why = report.results["I10_generator_diversity"]
+    passed, why = report.results["I21_generator_diversity"]
     assert passed, why
     assert "effective" in why, "the measured diversity must be visible in the report"
 

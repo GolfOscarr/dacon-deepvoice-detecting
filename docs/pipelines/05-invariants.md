@@ -28,7 +28,7 @@ These run over 10⁵ generated `SampleSpec`s in seconds, because sampling is sep
 | ~~**I6**~~ | ❌ **Removed.** "Labels come from the cell" is a property of the **type**, asserted in `tests/test_spec.py` (`SampleSpec` has no label fields). A per-spec loop over derived properties can only ever pass | The `docs/pipelines/05` opening warning, applied to itself |
 | **I7** | `val_specs.parquet` meets ≥1,200 per class per **masked head pool** per fold, and ≥100 per cell per fold | [VG1](../validation/04-audit-gates.md#vg1--split-integrity) A8/A9, which can only be evaluated here — a component row has no cell. ⚠️ Implemented behind `eval_floors=True`; on a *training* stream it reports **SKIP**, never PASS. It previously printed PASS while existing nowhere |
 | **I7a** | Cells 6/7 are never rendered whole-file | ⚠️ Defense-in-depth only — `SampleSpec` refuses to construct one, so it cannot fail today. It used to occupy I7's key |
-| **I10** | 🔴 Realized **generator diversity** in the drawn stream: ≥3 artifact families per fake role, with the effective count reported | `domain_cap` is a weight over what is *present*, so a fold split leaving TRAIN generator-poor reproduces the DOSS failure (6.4k h naive **3.29%** vs 0.2k h balanced **2.77%**) with a green audit. ⚠️ An **absolute** floor: a monoculture slice trivially realizes 100% of its own two families |
+| **I21** | 🔴 Realized **generator diversity** in the drawn stream: ≥3 artifact families per fake role, with the effective count reported | `domain_cap` is a weight over what is *present*, so a fold split leaving TRAIN generator-poor reproduces the DOSS failure (6.4k h naive **3.29%** vs 0.2k h balanced **2.77%**) with a green audit. ⚠️ An **absolute** floor: a monoculture slice trivially realizes 100% of its own two families |
 | **I8** | Every head's positive rate, **computed after masking**, lies in **[0.2, 0.8]** | **C1** — removes BCE's imbalance pathology, which is the only reason any ranking/AUC-surrogate term would be worth adding ([02 §4](02-sampler.md#4--constraints-the-objective-imposes--c1-and-c2)). ⚠️ A naive 6/7-heavy cell mix **fails this** at 0.820 on both presence heads |
 | **I9** | Every batch meets the per-head **present-count floor** | **C2** — `_masked_mean` scales ~1/√n, so `n=2` batches carry 3.9× the gradient norm of `n=32` ones |
 
@@ -39,6 +39,12 @@ by nothing. And a duration shift of opposite sign in mixed vs non-mixed files (A
 stratum interaction, 0.499 marginally) — the pooled probe could not see it, while the model gets the
 interaction for free because it is trained to predict presence. I1b now covers all three; the
 regression tests are in `tests/test_audit.py`.
+
+⚠️ **Invariant numbers are one namespace, not one per section.** `I21` above was numbered `I10`
+until it was noticed that §2 already assigns `I10` to render determinism — two different checks
+under one name, in the doc *and* in `training/audit.py`. It is renumbered past the end (`I20`)
+rather than given a letter suffix, because `I7a`/`I1b`-style suffixes mean "a second check on the
+same statement" and generator diversity is not one.
 
 ⚠️ **I1, I1b, I2b and I3 are the ones that would actually have caught the composition trap**, and neither
 needs a model, a corpus, or a GPU. They should exist before the corpus does.
@@ -70,7 +76,7 @@ in the **submitted probability** while the test asserted on `clip_logits`.
 | **I15** | Collating the same sample into batches of different composition yields identical `wav[:len]`, `lengths` and `targets` | The collator itself |
 | **I16** | Two different pad fillings give the same submitted probability | Already covered for the model; extended to cover pipeline output |
 
-⚠️ **I12 must assert on the quantity that ships.** The `frame_max` violation survived because its
+⚠️ **I16 must assert on the quantity that ships.** The `frame_max` violation survived because its
 test asserted on an adjacent quantity. Any new test here states which submitted number it protects.
 
 ---

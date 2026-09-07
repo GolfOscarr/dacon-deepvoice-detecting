@@ -1,4 +1,4 @@
-"""The spec-level invariants, I1-I9 (docs/pipelines/05 §1).
+"""The spec-level invariants, I1-I9 and I21 (docs/pipelines/05 §1).
 
 🔴 These exist because of a measured pattern in this repo: six defects were
 found in one review session, **none by a green test suite**, and two shapes
@@ -539,7 +539,7 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
         "measured " + ", ".join(f"{h}={v:.3f}" for h, v in rates.items())
         + f"; bounds [{lo}, {hi}]" + (f"; OUT: {out}" if out else ""))
 
-    # -- I10: realized generator diversity in the drawn stream --------------- #
+    # -- I21: realized generator diversity in the drawn stream --------------- #
     # 🔴 `domain_cap` is a weight over what is PRESENT. It cannot create
     # diversity that the slice does not have, so a fold split leaving TRAIN
     # generator-poor reproduces the DOSS failure (6.4k h naive 3.29% vs 0.2k h
@@ -573,12 +573,12 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
             parts_.append(f"{role}: {n_fam} families (effective {eff:.1f})")
             if n_fam < min_families:
                 poor.append(f"{role} has {n_fam} < {min_families}")
-        r["I10_generator_diversity"] = (
+        r["I21_generator_diversity"] = (
             not poor,
             "; ".join(parts_) + f"; floor {min_families} per fake role"
             + (f"; POOR: {'; '.join(poor)}" if poor else ""))
     else:
-        r["I10_generator_diversity"] = (True, AuditReport.SKIP + "no manifest given")
+        r["I21_generator_diversity"] = (True, AuditReport.SKIP + "no manifest given")
 
     # -- I9 (C2): per-head present-count floor per batch --------------------- #
     # ⚠️ Two stated assumptions. Batches are cut in DRAW order, which is the
