@@ -6,11 +6,17 @@ labels, so a voice-fake loss on a music-only file trains the model to fit
 something that will never be scored (docs/architecture/01 §3.3). PC-Mix does
 exactly this masking with its component losses.
 
-Each head is trained on both `clip` and `frame_max`, because `frame_max` is the
-"any part of this file is fake" operator and `clip` the "overall character"
-one, and our labels decompose the same way. ⚠️ Note this is the *loss* blend;
-averaging the two losses and averaging the two scores are different operations,
-and only the second one had the saturation defect (see models.outputs).
+Each head can be trained on `clip`, on `frame_max`, or on a blend of the two,
+via `SEDHeadConfig.clip_weight` -- the same field inference blends with, so the
+two cannot diverge. 🔴 The default is **1.0 (clip only)**: supervising the
+utterance and frame levels through one shared head measured 0.71-3.63 EER points
+worse than utterance-only, and our head is that configuration because
+`clip_logits` is a pooled function of the same `frame_logits` (docs/training/02
+§3). ⚠️ Pending ablation T1.
+
+⚠️ Note this is the *loss* blend; averaging the two losses and averaging the two
+scores are different operations, and only the second one had the saturation
+defect (see models.outputs).
 """
 
 from __future__ import annotations
@@ -30,7 +36,7 @@ __all__ = ["TRAIN_CONSUMED_ELSEWHERE", "TARGET_FOR_COLUMN", "multitask_loss",
 #: missed `LossConfig.frame_resolutions_ms`, which was accepted, defaulted,
 #: round-tripped and read nowhere. The guard now walks TrainConfig too.
 TRAIN_CONSUMED_ELSEWHERE = {
-    "stage":        "the training script -- selects the S1..S4 schedule",
+    "stage":        "the training script -- selects the S1..S3 schedule (S4 dropped)",
     "teachers":     "the training script -- frozen teachers, never shipped",
     "epochs":       "the training script",
     "batch_size":   "the training script",
@@ -64,10 +70,24 @@ WEIGHT_KEY_FOR_COLUMN = {
 def _masked_mean(per_sample: Tensor, mask: Tensor | None) -> Tensor:
     """Mean over the *masked* samples.
 
-    🔴 Normalising by `mask.sum()` rather than by batch size is load-bearing.
-    Dividing by the batch size would make a head's effective learning rate move
-    with how many present-component files happened to land in the batch, which
-    turns batch composition into a silent hyperparameter.
+    🔴 Normalising by `mask.sum()` rather than by batch size is load-bearing --
+    but not for the reason an earlier version of this docstring gave. It claimed
+    batch-size normalisation "would make a head's effective learning rate move
+    with how many present-component files happened to land in the batch". Both
+    schemes move with that count, in opposite directions: measured gradient norm
+    scales as ~1/sqrt(n) under subset normalisation and ~sqrt(n) under batch
+    normalisation (16x apart at n=2 in a batch of 32).
+
+    What subset normalisation actually fixes is the *loss scale*: a head's
+    contribution per batch is then independent of how prevalent its component
+    is, so `LossConfig.weights` means what it says. Under batch normalisation
+    the cell mix -- a sampler knob (docs/pipelines/02) -- would silently reweight
+    the heads. The Freesound-2019 winner chose batch normalisation; we do not,
+    for that reason.
+
+    ⚠️ The cost is variance: at small `n` the per-sample influence is 1/n, so
+    rare-component batches take large, noisy steps. Constraint C2 puts a floor
+    on the per-head present-count per batch.
     """
     if mask is None:
         return per_sample.mean()
@@ -83,9 +103,24 @@ def _masked_mean(per_sample: Tensor, mask: Tensor | None) -> Tensor:
 def pairwise_ranking_loss(scores: Tensor, labels: Tensor, mask: Tensor | None = None) -> Tensor:
     """RankNet-style logistic loss over positive/negative pairs.
 
-    EER is a pure ranking metric, so a pairwise loss optimises it directly --
-    independently arrived at by TFPARN and by the LLM-Detect-AI winner
-    (docs/papers/09). Returns 0 when a batch has only one class.
+    🔴 Kept, but DEFAULT OFF (`LossConfig.ranking_weight = 0.0`), and the
+    justification this docstring used to carry was wrong.
+
+    It read: "EER is a pure ranking metric, so a pairwise loss optimises it
+    directly -- independently arrived at by TFPARN and by the LLM-Detect-AI
+    winner." TFPARN's own ablation refutes that for EER: adding the pairwise
+    branch moves EER 12.91 -> 12.92 while lowering minDCF/Cllr/actDCF, and the
+    paper says so outright -- "the ranking term acts on the decision cost and
+    score ordering rather than on the equal-error point" (arXiv:2606.02980
+    Table VI). Every gain it buys is calibration, which a ranking metric cannot
+    read.
+
+    A pairwise term is only worth something when it repairs BCE's vanishing
+    gradient on negatives under severe class imbalance, and we choose our own
+    class balance in the sampler instead (constraint C1, docs/pipelines/02).
+    See docs/training/03 for the full reading.
+
+    Returns 0 when a batch has only one class.
     """
     if mask is not None:
         keep = mask.bool()

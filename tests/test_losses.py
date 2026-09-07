@@ -73,11 +73,16 @@ def test_masked_mean_normalises_by_mask_not_batch_size():
     one = _targets([1, 0], [0, 1], voice_fake=[1, 0])
     _, half = multitask_loss(out, one, cfg, LossConfig())
 
-    per_sample = torch.nn.functional.binary_cross_entropy_with_logits(
-        out["voice"]["clip_logits"], torch.tensor([1.0, 0.0]), reduction="none")
+    # Derive the blend from the config rather than hardcoding it: clip_weight is
+    # a tunable default (1.0 = clip-only, docs/training/02 §3) and this test is
+    # about the *normaliser*, not the blend.
+    cw = cfg.branches["voice"].head.clip_weight
+    y = torch.tensor([1.0, 0.0])
+    clip_bce = torch.nn.functional.binary_cross_entropy_with_logits(
+        out["voice"]["clip_logits"], y, reduction="none")
     fmax = out["voice"]["frame_logits"].amax(-1)
-    per_sample = 0.5 * per_sample + 0.5 * torch.nn.functional.binary_cross_entropy_with_logits(
-        fmax, torch.tensor([1.0, 0.0]), reduction="none")
+    frame_bce = torch.nn.functional.binary_cross_entropy_with_logits(fmax, y, reduction="none")
+    per_sample = cw * clip_bce + (1.0 - cw) * frame_bce
     assert half["voice"] == pytest.approx(float(per_sample[0]), abs=1e-5)
     assert full["voice"] == pytest.approx(float(per_sample.mean()), abs=1e-5)
 
@@ -95,15 +100,22 @@ def test_batch_with_no_present_component_is_not_nan():
 # weights and blend
 
 def test_per_head_weights_are_applied():
-    """The metric weights File .45 / Music .27 / Voice .18 while the default
-    config weights them equally -- so this knob must actually work (09 B11)."""
+    """The knob must work, and the default must be the metric weights.
+
+    The metric weights File .45 / Music .27 / Voice .18 / presence .05 each. An
+    earlier default weighted all five equally, inherited from PC-Mix whose metric
+    weighted its components equally and ours does not (docs/training/02 §4).
+    """
     model, cfg = _model()
     out = model(torch.randn(3, SR * 4))
     targets = _targets([1, 1, 1], [1, 1, 1], voice_fake=[1, 0, 1], music_fake=[0, 1, 1])
 
-    equal, _ = multitask_loss(out, targets, cfg, LossConfig())
-    metric_shaped, _ = multitask_loss(out, targets, cfg, LossConfig(
-        weights={"voice": 0.18, "music": 0.27, "file": 0.45, "v_pres": 0.05, "m_pres": 0.05}))
+    assert LossConfig().weights == {
+        "voice": 0.18, "music": 0.27, "file": 0.45, "v_pres": 0.05, "m_pres": 0.05}
+
+    metric_shaped, _ = multitask_loss(out, targets, cfg, LossConfig())
+    equal, _ = multitask_loss(out, targets, cfg, LossConfig(
+        weights={"voice": 1.0, "music": 1.0, "file": 1.0, "v_pres": 1.0, "m_pres": 1.0}))
     assert float(equal) != pytest.approx(float(metric_shaped))
 
 
@@ -146,11 +158,13 @@ def test_ranking_loss_ranks_what_inference_ranks():
     _, ranked = multitask_loss(out, targets, cfg, LossConfig(ranking_weight=1.0))
     assert ranked["voice"] > plain["voice"], "the ranking term must contribute"
 
-    # The term is computed on the blended logit, which is what branch_logit returns.
-    br = cfg.branches["voice"]
-    blended = branch_logit(out["voice"], br.head)
+    # The term is computed on the blended logit, which is what branch_logit
+    # returns. Force the blend on: clip_weight defaults to 1.0 (clip-only), where
+    # "blend" and "clip" coincide and the assertion would be vacuous.
+    br_head = dataclasses.replace(cfg.branches["voice"].head, clip_weight=0.5)
+    blended = branch_logit(out["voice"], br_head)
     assert not torch.allclose(blended, out["voice"]["clip_logits"]), \
-        "with clip_weight 0.5 the blend must differ from clip alone"
+        "at clip_weight 0.5 the blend must differ from clip alone"
 
 
 def test_loss_is_differentiable():

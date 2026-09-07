@@ -27,6 +27,26 @@ def model(request):
     return _model(request.param)
 
 
+def _with_blend(cfg, w=0.5):
+    """Force the clip/frame_max blend on.
+
+    🔴 The rule-2.4 guards must not inherit `SEDHeadConfig.clip_weight`, which is
+    a tunable defaulting to 1.0 (clip-only, docs/training/02 §3). At 1.0 the
+    submitted score ignores `frame_max` entirely, so every frame_max guard passes
+    **vacuously** -- measured: reintroducing the original unmasked-`frame_max`
+    defect moves the submitted logit by 1.83 at w=0.5 and by 0.000 at w=1.0.
+    """
+    branches = {n: dataclasses.replace(b, head=dataclasses.replace(b.head, clip_weight=w))
+                for n, b in cfg.branches.items()}
+    return dataclasses.replace(cfg, branches=branches)
+
+
+@pytest.fixture(params=["a_stub", "b_stub"])
+def blended_model(request):
+    """A model whose submitted score actually depends on `frame_max`."""
+    return DeepVoiceNet(_with_blend(_cfg(request.param))).eval()
+
+
 # --------------------------------------------------------------------------- #
 # shape and structure
 
@@ -66,7 +86,7 @@ def test_submission_is_padding_invariant_when_frontends_disagree_on_fps():
     align_time entirely -- so this property was untested until a review found
     the alignment interpolating over the padded axis.
     """
-    cfg = _cfg("b_stub")
+    cfg = _with_blend(_cfg("b_stub"))      # frame_max must reach the submitted score
     fes = dict(cfg.frontends)
     fes["speech"] = dataclasses.replace(fes["speech"], fps=25.0)
     torch.manual_seed(0)
@@ -135,7 +155,7 @@ def test_ranking_over_a_canned_set_is_batch_invariant(model):
     assert torch.equal(solo.argsort(), together.argsort())
 
 
-def test_padding_content_cannot_leak_into_a_score(model):
+def test_padding_content_cannot_leak_into_a_score(blended_model):
     """Same file, two different pad fillings -> identical score.
 
     🔴 Asserted on the **submitted probabilities**, not on clip_logits. An
@@ -147,23 +167,23 @@ def test_padding_content_cannot_leak_into_a_score(model):
     torch.manual_seed(2)
     x = torch.randn(1, SR * 4)
     lengths = torch.tensor([SR * 4])
-    quiet = model.submission_probs(model(torch.nn.functional.pad(x, (0, SR * 4)), lengths))
+    quiet = blended_model.submission_probs(blended_model(torch.nn.functional.pad(x, (0, SR * 4)), lengths))
     loud = torch.cat([x, torch.randn(1, SR * 4) * 50], dim=-1)
-    noisy = model.submission_probs(model(loud, lengths))
+    noisy = blended_model.submission_probs(blended_model(loud, lengths))
     for column in quiet:
         assert torch.allclose(quiet[column], noisy[column], atol=1e-9), column
 
 
-def test_submitted_probabilities_are_batch_invariant(model):
+def test_submitted_probabilities_are_batch_invariant(blended_model):
     """The end-to-end contract: what we upload must not move with the batch."""
     torch.manual_seed(3)
     solo = torch.randn(1, SR * 4)
-    alone = model.submission_probs(model(solo, torch.tensor([SR * 4])))
+    alone = blended_model.submission_probs(blended_model(solo, torch.tensor([SR * 4])))
 
     others = torch.randn(7, SR * 9) * 10
     batch = torch.cat([torch.nn.functional.pad(solo, (0, SR * 5)), others])
     lengths = torch.tensor([SR * 4] + [SR * 9] * 7)
-    together = model.submission_probs(model(batch, lengths))
+    together = blended_model.submission_probs(blended_model(batch, lengths))
 
     for column in alone:
         assert torch.allclose(alone[column], together[column][:1], atol=1e-6), column
@@ -376,3 +396,36 @@ def test_submission_probs_returns_five_float64_columns(model):
     for col, p in probs.items():
         assert p.dtype == torch.float64 and p.shape == (3,)
         assert (p > 0).all() and (p < 1).all()
+
+
+def test_clip_only_default_makes_frame_max_guards_vacuous():
+    """🔴 Why the guards above force the blend on, asserted rather than commented.
+
+    `SEDHeadConfig.clip_weight` defaults to 1.0 (clip-only). At that value the
+    submitted score is a function of `clip_logits` alone, so reintroducing the
+    original rule-2.4 defect -- `frame_max` taken without the head's mask, which
+    moved a submitted probability from 0.519 to 0.847 -- changes nothing and any
+    guard written against it passes for the wrong reason.
+
+    If this test ever fails, the blend is back on by default and `_with_blend`
+    can be retired. Until then, do not "simplify" the guards to use `model`.
+    """
+    from models.outputs import branch_logit
+
+    torch.manual_seed(0)
+    cfg = _cfg("b_stub")
+    m = DeepVoiceNet(cfg).eval()
+    n = SR * 4
+    x = torch.cat([torch.randn(1, n), 25.0 * torch.randn(1, SR * 5)], dim=-1)
+    out = m(x, torch.tensor([n]))
+
+    unmasked = torch.ones_like(out["voice"]["frame_logits"], dtype=torch.bool)
+
+    def drift(w):
+        head = dataclasses.replace(cfg.branches["voice"].head, clip_weight=w)
+        return float((branch_logit(out["voice"], head)
+                      - branch_logit(out["voice"], head, mask=unmasked)).abs().max())
+
+    assert cfg.branches["voice"].head.clip_weight == 1.0
+    assert drift(1.0) == pytest.approx(0.0, abs=1e-9), "clip-only: the defect is invisible"
+    assert drift(0.5) > 1e-3, "at a real blend the defect must be visible"

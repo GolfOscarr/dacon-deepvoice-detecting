@@ -140,7 +140,16 @@ class SEDHeadConfig:
     hidden: int = 512
     dropout_in: float = 0.25
     dropout_out: float = 0.5
-    clip_weight: float = 0.5        # blend of clip vs frame_max, applied in LOGIT space
+    #: 🔴 1.0 = clip only. Committed in docs/training/02 §3: supervising the
+    #: utterance and frame levels through ONE shared head measured 0.71-3.63 EER
+    #: points WORSE than utterance-only (Zhang et al., ASVspoof 2021 Workshop,
+    #: Table 5), and our head is exactly that configuration -- `clip_logits` is a
+    #: pooled function of the `frame_logits` the frame loss also touches.
+    #: ⚠️ Pending ablation T1; the transfer caveats are in docs/training/02 §3.
+    #: ⚠️ At 1.0 the submitted score ignores `frame_max` entirely, which makes the
+    #: rule-2.4 frame_max guards vacuous -- the tests force the blend on rather
+    #: than inheriting this default. Do not "simplify" them back.
+    clip_weight: float = 1.0        # blend of clip vs frame_max, applied in LOGIT space
     attention: str = "linear"       # linear | scaled_tanh | tanh
 
 
@@ -253,12 +262,22 @@ class ModelConfig:
 class LossConfig:
     """Per-head weights and the loss blend (docs/architecture/08 §2).
 
-    ⚠️ `weights` defaults to PC-Mix's equal weighting, which is inherited rather
-    than chosen -- our metric weights File .45 / Music .27 / Voice .18. This is a
-    flagged open knob (09 B11), not a settled default.
+    ✅ `weights` is metric-proportional. 09 B11 is closed: it was rated "probably
+    not resolvable individually -- set by argument", a targeted search found no
+    study testing loss-weights against metric-weights, and the argument is in
+    docs/training/02 §4.
     """
+    #: 🔴 Metric-proportional, per docs/training/02 §4. The effective weights are
+    #: File .45 / Music .27 / Voice .18 / presence .05 each; an earlier default of
+    #: all-1.0 was inherited from PC-Mix, whose metric weighted its components
+    #: equally and ours does not. No study tests loss-weights ∝ metric-weights, so
+    #: this is set by argument (09 B11 predicted it would be); every adaptive
+    #: alternative (GradNorm/PCGrad/DWA/uncertainty) has strong negative results
+    #: against well-tuned constants.
+    #: ⚠️ The weight in effect is `w_c / p_c`, not `w_c` -- `_masked_mean` divides
+    #: by the present-count. Log both before tuning.
     weights: dict[str, float] = field(default_factory=lambda: {
-        "voice": 1.0, "music": 1.0, "file": 1.0, "v_pres": 1.0, "m_pres": 1.0})
+        "voice": 0.18, "music": 0.27, "file": 0.45, "v_pres": 0.05, "m_pres": 0.05})
     ranking_weight: float = 0.0
     distill_weight: float = 1.0
     label_smoothing: float = 0.0

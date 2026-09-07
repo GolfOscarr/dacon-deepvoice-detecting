@@ -143,14 +143,22 @@ voice-fake loss is never taken on a music-only file — mirroring the official m
 computes Voice EER only over voice-present files. `parts` is a per-head breakdown for the
 experiment ledger.
 
-⚠️ `LossConfig().weights` are all `1.0`, inherited from PC-Mix whose metric weighted components
-equally. Ours weights File .45 / Music .27 / Voice .18. This is a flagged open knob
-([09 B11](../docs/architecture/09-open-questions.md)), and the default is currently *wrong*
-rather than neutral.
+✅ `LossConfig().weights` is **metric-proportional** — File `.45` / Music `.27` / Voice `.18` /
+presence `.05` each. An earlier default weighted all five equally, inherited from PC-Mix whose
+metric weighted its components equally and ours does not. Set by argument, not sweep
+([training/02 §4](../docs/training/02-the-loss.md#4-per-head-weights--metric-proportional-by-argument));
+[09 B11](../docs/architecture/09-open-questions.md) is closed.
+
+⚠️ The weight *in effect* is `w_c / p_c`, not `w_c` — `_masked_mean` divides by the present-count,
+so a masked head is amplified by how rare its component is. Log both before tuning.
 
 🔴 **The clip-vs-`frame_max` blend is not a loss knob.** It is `SEDHeadConfig.clip_weight`, in
 the *model* config, and the loss reads that same field — so training and inference cannot
-disagree about the objective. A separate loss-side `frame_weight` used to exist and was
+disagree about the objective. ⚠️ It now defaults to **1.0 (clip only)**: supervising the utterance
+and frame levels through one shared head measured 0.71–3.63 EER points worse than utterance-only
+([training/02 §3](../docs/training/02-the-loss.md#3--clipweight--10--the-one-change-worth-engineer-days)).
+At 1.0 `frame_max` does not reach the submitted score, which makes the rule-2.4 `frame_max` guards
+vacuous — the tests force the blend on rather than inheriting the default. A separate loss-side `frame_weight` used to exist and was
 documented as the frame-*supervision* weight of `04 §4`, a different quantity; anyone tuning it
 per that section was tuning the blend.
 
