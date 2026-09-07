@@ -13,12 +13,12 @@ This file is how to *use* it.
 | Module | Use it for |
 |---|---|
 | `models.config` | Loading and validating a config. Rejects unknown keys |
-| `models.frontends` | SSL encoders, normalised to one `(B, T, D)` contract |
+| `models.frontends` | Encoder wrappers, normalised to one `(B, T, D)` contract. ⚠️ Only `stub` is wired |
 | `models.heads` | The SED head and frequency pooling |
 | `models.model` | `DeepVoiceNet`, checkpoint save/load |
 | `models.losses` | The masked multi-task objective |
 | `models.outputs` | Logits → probabilities; cross-window pooling |
-| `models.audio` | Channel policy and band restriction |
+| `models.audio` | Channel policy and band restriction (pass `lengths`) |
 
 ---
 

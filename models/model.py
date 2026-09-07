@@ -113,7 +113,7 @@ class DeepVoiceNet(nn.Module):
     def forward(self, wav: Tensor, lengths: Tensor | None = None) -> dict:
         """``wav`` is (B, S) mono at 16 kHz. Returns one SEDOutput per branch,
         plus any training-only auxiliary outputs under ``_aux``."""
-        wav = bandpass(wav, self.cfg.audio)
+        wav = bandpass(wav, self.cfg.audio, lengths)
         encoded = {name: fe(wav, lengths) for name, fe in self.frontends.items()}
 
         # 🔴 The stop-gradient of the borrowed distillation recipe: the branch
