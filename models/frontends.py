@@ -30,18 +30,27 @@ from torch import Tensor, nn
 from models.config import AudioConfig, FrontendConfig
 from models.heads import FreqPool
 
-__all__ = ["Frontend", "StubFrontend", "build_frontend", "frames_for"]
+__all__ = ["Frontend", "StubFrontend", "build_frontend", "frames_for", "hop_length"]
+
+
+def hop_length(sample_rate: int, fps: float) -> int:
+    """Samples per frame."""
+    return max(1, round(sample_rate / fps))
 
 
 def frames_for(n_samples: Tensor | int, sample_rate: int, fps: float) -> Tensor | int:
     """How many frames a frontend emits for a given number of samples.
 
     Defined once, because the frame mask, the time alignment between two
-    frontends, and the stub's own pooling must all agree on it.
+    frontends, and the stub's own framing must all agree on it. 🔴 Frame *i*
+    must correspond to a fixed sample range regardless of how long the rest of
+    the batch is -- otherwise padding shifts a file's content and both the mask
+    and rule-2.4 batch invariance become meaningless.
     """
+    hop = hop_length(sample_rate, fps)
     if isinstance(n_samples, Tensor):
-        return torch.clamp((n_samples.double() * fps / sample_rate).round().long(), min=1)
-    return max(1, round(n_samples * fps / sample_rate))
+        return torch.clamp(-(-n_samples // hop), min=1)          # ceil division
+    return max(1, -(-int(n_samples) // hop))
 
 
 class Frontend(nn.Module):
@@ -87,25 +96,31 @@ class Frontend(nn.Module):
 class StubFrontend(Frontend):
     """A small deterministic encoder with no pretrained weights.
 
-    Deliberately cheap: a strided conv over the waveform, then an exact resample
-    to the frame count `frames_for` predicts. Exactness matters more than realism
-    -- the whole point is that masks and time alignment can be tested.
+    🔴 Frames are **absolutely positioned**: the waveform is cut into fixed
+    `hop`-sample frames, so frame *i* always covers samples [i*hop, (i+1)*hop)
+    no matter how long the rest of the batch is. An earlier version pooled
+    adaptively to the frame count, which *stretched* a short file's content
+    across the whole padded width -- that makes the frame mask describe the
+    wrong frames and quietly breaks rule-2.4 batch invariance. Real SSL
+    frontends are strided convolutions and behave the absolute way; the stub
+    must too, or it tests a property the real model will not have.
     """
 
     def __init__(self, cfg: FrontendConfig, audio: AudioConfig):
         super().__init__(cfg, audio)
         self.n_freq = cfg.n_freq or 1
+        self.hop = hop_length(audio.sample_rate, cfg.fps)
         width = 64
-        self.conv = nn.Sequential(
-            nn.Conv1d(1, width, kernel_size=25, stride=8, padding=12), nn.GELU(),
-            nn.Conv1d(width, width, kernel_size=9, stride=4, padding=4), nn.GELU(),
-        )
-        self.proj = nn.Linear(width, self.n_freq * cfg.output_dim)
+        self.frame = nn.Linear(self.hop, width)
+        self.proj = nn.Sequential(nn.GELU(), nn.Linear(width, self.n_freq * cfg.output_dim))
 
     def _encode(self, wav: Tensor) -> Tensor:
-        t = frames_for(wav.shape[-1], self.audio.sample_rate, self.fps)
-        h = self.conv(wav.unsqueeze(1))                       # (B, width, T')
-        h = F.adaptive_avg_pool1d(h, t).transpose(1, 2)       # (B, T, width)
+        b, n = wav.shape
+        t = frames_for(n, self.audio.sample_rate, self.fps)
+        pad = t * self.hop - n
+        if pad:
+            wav = F.pad(wav, (0, pad))
+        h = self.frame(wav.view(b, t, self.hop))              # (B, T, width)
         h = self.proj(h)                                      # (B, T, F*D)
         if self.cfg.n_freq is None:
             return h
