@@ -184,6 +184,102 @@ def test_I2_catches_a_marginally_balanced_within_stratum_shortcut():
     assert "= 1.0000 in 'voice-only'" in why, why
 
 
+def _voice_only_stream(gap, n=1000, base=0.5):
+    """`n` FAKE and `n` REAL voice-only specs whose composed rates differ by `gap`.
+
+    Cells 1 and 2 are the same presence stratum, so this is exactly the
+    within-stratum shortcut I2 exists to catch, at a controllable effect size.
+    """
+    specs, sid = [], 0
+    for cell, rate in ((2, base + gap / 2), (1, base - gap / 2)):
+        composed = int(round(rate * n))
+        for i in range(n):
+            specs.append(_spec(cell, composed=i < composed, sample_id=sid))
+            sid += 1
+    return specs
+
+
+@pytest.mark.parametrize("gap", [0.25, 0.15])
+def test_I2_still_fires_on_a_real_gap_under_the_noise_aware_bound(gap):
+    """🔴 The bound must not have bought stability with blindness.
+
+    At n = 1,000 a side and a composed rate near 0.5 the gap's standard error is
+    0.022, so the noise-aware tolerance is 0.089 -- and a 0.15 gap is still 6.7
+    SE of signal. The tolerance widens to cover the estimator, not to cover a
+    leak.
+    """
+    passed, why = audit_specs(
+        _voice_only_stream(gap)).results["I2_stratified_composedness"]
+    assert not passed, why
+    assert "'voice-only'" in why, why
+
+
+def test_I2_is_stable_across_seeds_on_a_clean_corpus(manifest):
+    """🔴 The flakiness this bound was written for. A guardrail that fails at
+    random on a clean corpus gets switched off, and then it does not catch the
+    composition trap it exists for.
+
+    Measured before the fix, over 16 seeds on this manifest: at
+    `single_composed_rate = 0.5` the flat `tol = 0.02` tripped I2 on 2 of 4 seeds
+    at n = 8,000 and again at n = 20,000, and even at the shipped `a = 0.0` the
+    `mixed` stratum reached a gap of 0.0471 -- twice the tolerance -- because
+    that is the one stratum with any variance at the shipped config. The suite
+    passed only because it draws seed 0.
+
+    ⚠️ Deliberately more than one seed and more than one config. A single-seed
+    assertion is how this went unnoticed.
+    """
+    for a in (0.0, 0.5):
+        for seed in range(4):
+            specs = list(Sampler(manifest, SamplerConfig(single_composed_rate=a))
+                         .epoch_specs(6_000, seed=seed))
+            report = audit_specs(specs, manifest=manifest, slice_="train")
+            for key in ("I2_stratified_composedness", "I2c_marginal_composedness"):
+                passed, why = report.results[key]
+                assert passed, f"a={a} seed={seed} {key}: {why}"
+
+
+def test_the_noise_aware_tolerance_keeps_the_floor_where_the_estimate_is_exact():
+    """⚠️ Widening must be earned by variance, not applied everywhere.
+
+    The shipped `single_composed_rate = 0.0` leaves the two single-component
+    strata with no composed samples on either side: p = 0, so the standard error
+    is 0 and the full 0.02 floor still binds. Only strata that actually vary pay
+    for their own noise.
+    """
+    from training.audit import NOISE_K, _gap_tolerance
+
+    exact, noise = _gap_tolerance(0, 500, 0, 500, floor=0.02)
+    assert (exact, noise) == (0.02, 0.0)
+
+    # a stratum that varies pays for it, and the price falls as 1/sqrt(n)
+    small_tol, small_noise = _gap_tolerance(250, 500, 250, 500, floor=0.02)
+    big_tol, big_noise = _gap_tolerance(2_500, 5_000, 2_500, 5_000, floor=0.02)
+    assert small_tol > big_tol > 0.02
+    assert small_noise == pytest.approx(big_noise * np.sqrt(10), rel=0.02)
+    assert small_noise == pytest.approx(NOISE_K * np.sqrt(0.25 * (2 / 500)), rel=1e-6)
+
+
+def test_an_unresolvable_stratum_reports_a_skip_not_a_pass():
+    """🔴 A stream too thin to resolve anything must not read as green.
+
+    The ceiling is derived rather than picked: for a binary feature
+    `AUC = 0.5 + gap / 2`, so the E-S2 shortcut gate of 0.60 is a gap of 0.20. A
+    stratum whose noise floor exceeds that cannot see a leak the pipeline would
+    act on, so the check reports SKIP -- which `AuditReport.skipped` keeps
+    distinct from a pass.
+    """
+    from training.audit import RESOLVABLE_GAP
+
+    assert RESOLVABLE_GAP == pytest.approx(0.20)
+
+    thin = _voice_only_stream(0.0, n=12)          # 4 SE ~ 0.41, far over 0.20
+    report = audit_specs(thin)
+    assert "I2_stratified_composedness" in report.skipped, report.results
+    assert "SKIP  I2_stratified_composedness" in str(report)
+    assert "PASS  I2_stratified_composedness" not in str(report)
+
+
 def test_I1_catches_a_label_dependent_transform():
     """If only fakes get a transform, the model learns the transform."""
     specs = ([_spec(2, sample_id=i, transforms=(("codec", {}),)) for i in range(500)] +

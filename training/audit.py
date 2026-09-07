@@ -74,6 +74,45 @@ def _fraction(num: float, den: float) -> float:
     return num / den if den else float("nan")
 
 
+#: How many standard errors of the gap a difference must clear before it counts
+#: as real. ★ Chosen from measurement, not taste: over 16 seeds the max-over-
+#: strata |z| had mean 1.36 and p95 2.89, topping out at 3.62 on a clean corpus.
+#: At k = 4 the per-audit false-alarm rate is ~2e-4 over the three strata, and
+#: every mutation test in the suite still fires at 11-31 sigma.
+NOISE_K = 4.0
+
+#: Above this the estimator cannot see anything worth acting on, so the check
+#: reports SKIP rather than a pass it did not earn. 🔴 Derived, not picked: for a
+#: binary feature `AUC = 0.5 + gap / 2`, so the E-S2 shortcut gate of 0.60 is a
+#: gap of 0.20. A stratum whose noise floor exceeds that cannot resolve a leak
+#: this pipeline would act on.
+RESOLVABLE_GAP = 2.0 * (SHORTCUT_AUC_GATE - 0.5)
+
+
+def _gap_tolerance(x1: int, n1: int, x0: int, n0: int, floor: float,
+                   k: float = NOISE_K) -> tuple[float, float]:
+    """`(effective tolerance, noise floor)` for `|x1/n1 - x0/n0|`.
+
+    🔴 The flat tolerance this replaces was below its own estimator's noise. Both
+    proportions are binomial, so under H0 the gap has
+    ``se = sqrt(p(1-p)(1/n1 + 1/n0))`` with `p` pooled -- measured to fit: mean
+    |z| 0.72-0.95 against the 0.798 of a standard normal. At `tol = 0.02` and the
+    ~1,200 specs cell 3 gets in a 20k draw, `se` is 0.017, so the check tripped
+    on 2 of 4 seeds on a corpus with nothing wrong with it. A guardrail that
+    cries wolf gets switched off, and then it does not catch the composition
+    trap it exists for (docs/pipelines/05).
+
+    ⚠️ The floor still binds wherever the estimate is sharp enough to honour it.
+    In particular a stratum with no composed samples on either side has `p = 0`,
+    hence `se = 0`, hence the full `tol` -- which is exactly the shipped
+    `single_composed_rate = 0.0` case for the two single-component strata.
+    """
+    n = n1 + n0
+    p = (x1 + x0) / n if n else 0.0
+    se = float(np.sqrt(p * (1.0 - p) * (1.0 / n1 + 1.0 / n0))) if n1 and n0 else float("inf")
+    return max(floor, k * se), k * se
+
+
 def _feature_frame(specs: Sequence[SampleSpec]) -> tuple[np.ndarray, list[str]]:
     """Every structural knob the sampler controls, as a numeric matrix.
 
@@ -250,21 +289,40 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
     # -- I2: composedness label-independent WITHIN each presence stratum ----- #
     # ⚠️ The stratified form. A marginal balance can hold while composedness
     # predicts the label inside a stratum (docs/pipelines/02 §3).
+    # ⚠️ The tolerance is per stratum and noise-aware (`_gap_tolerance`): the
+    # thin strata cannot resolve a flat 0.02 at the draw budgets we use, and a
+    # check that fails at random on a clean corpus gets switched off. Strata are
+    # ranked by how far each EXCEEDS its own tolerance, not by raw gap, because
+    # the tolerances now differ between them.
     strat: dict[tuple[str, int], list[int]] = defaultdict(list)
     for s in specs:
         strat[(s.stratum, s.file_fake)].append(int(s.render_mode == "composed"))
-    worst, worst_where = 0.0, "-"
+    scored_gaps: list[tuple[float, float, float, str]] = []
+    unresolvable: list[str] = []
     for stratum in ("voice-only", "music-only", "mixed"):
         f1, f0 = strat.get((stratum, 1)), strat.get((stratum, 0))
         if not f1 or not f0:
             continue
+        eff_tol, noise = _gap_tolerance(sum(f1), len(f1), sum(f0), len(f0), tol)
         gap = abs(sum(f1) / len(f1) - sum(f0) / len(f0))
-        if gap > worst:
-            worst, worst_where = gap, stratum
-    r["I2_stratified_composedness"] = (
-        worst <= tol,
-        f"worst within-stratum |P(composed|FAKE) - P(composed|REAL)| = {worst:.4f} "
-        f"in {worst_where!r}, tol {tol}")
+        if noise > RESOLVABLE_GAP:
+            unresolvable.append(f"{stratum} (needs {noise:.3f}, "
+                                f"n={len(f1)}/{len(f0)})")
+            continue
+        scored_gaps.append((gap - eff_tol, gap, eff_tol, stratum))
+    if not scored_gaps:
+        r["I2_stratified_composedness"] = (
+            True, AuditReport.SKIP + "no stratum can resolve a gap of "
+            f"{RESOLVABLE_GAP:.2f} at these counts: {'; '.join(unresolvable) or 'none drawn'}"
+            "; draw more specs")
+    else:
+        _, worst, worst_tol, worst_where = max(scored_gaps)
+        r["I2_stratified_composedness"] = (
+            worst <= worst_tol,
+            f"worst within-stratum |P(composed|FAKE) - P(composed|REAL)| = {worst:.4f} "
+            f"in {worst_where!r}, tol {worst_tol:.4f} (floor {tol}, "
+            f"{NOISE_K:g} SE of the gap at these counts)"
+            + (f"; unresolvable: {'; '.join(unresolvable)}" if unresolvable else ""))
 
     # -- I2c: the MARGINAL composedness residual ----------------------------- #
     # 🔴 Measured, not asserted. The stratified constraint leaves a marginal gap
@@ -273,12 +331,19 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
     # ("composedness is uninformative given presence, and the model is
     # supervised on presence") is sound but lived in three docstrings and was
     # measured nowhere.
-    m_f = _fraction(sum(s.render_mode == "composed" for s in fake), len(fake))
-    m_r = _fraction(sum(s.render_mode == "composed" for s in real), len(real))
+    x_f = sum(s.render_mode == "composed" for s in fake)
+    x_r = sum(s.render_mode == "composed" for s in real)
+    m_f = _fraction(x_f, len(fake))
+    m_r = _fraction(x_r, len(real))
+    # Same noise-aware bound as I2. This pool is the whole stream, so the floor
+    # binds at any realistic draw budget -- but it is the same estimator, and
+    # hard-coding a tolerance below its noise is the defect either way.
+    marg_tol, marg_noise = _gap_tolerance(x_f, len(fake), x_r, len(real), marginal_tol)
     r["I2c_marginal_composedness"] = (
-        abs(m_f - m_r) <= marginal_tol,
+        abs(m_f - m_r) <= marg_tol,
         f"P(composed|FAKE) = {m_f:.4f} vs P(composed|REAL) = {m_r:.4f} over ALL "
-        f"cells, gap {abs(m_f - m_r):.4f}, tol {marginal_tol}")
+        f"cells, gap {abs(m_f - m_r):.4f}, tol {marg_tol:.4f} (floor "
+        f"{marginal_tol}, {NOISE_K:g} SE = {marg_noise:.4f})")
 
     # -- I2b: mixedness label-independent, over cells 1-8 -------------------- #
     # Cell 9 excluded: a file with no components cannot be fake, so the
