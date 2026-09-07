@@ -10,7 +10,8 @@ import dataclasses
 import numpy as np
 import pytest
 
-from training.audit import audit_specs, run_audit
+from training.audit import (SHORTCUT_AUC_GATE, _metadata_shortcut,
+                            audit_specs, run_audit)
 from training.sampler import (REFERENCE_MIX, CellMix, Sampler, SamplerConfig,
                               composed_fractions, head_positive_rates,
                               mixedness_balance)
@@ -43,24 +44,84 @@ def _spec(cell, composed=True, sample_id=0, transforms=(), file_id="A00001"):
 # --------------------------------------------------------------------------- #
 # the reference configuration passes
 
+#: Every invariant `audit_specs` emits, mapped to the test **in this module**
+#: that proves it can go RED.
+#:
+#: 🔴 `report.ok` on the reference stream is worth exactly as much as the checks
+#: behind it can fail. A review found this file greening a bag of invariants of
+#: which several could not go red, and a skipped check reads as a pass on the
+#: `.ok` property. This map is the fix: adding an invariant without a mutation
+#: test, renaming one, or silently dropping one, all fail
+#: `test_reference_sampler_passes_every_invariant`.
+MUTATION_TESTS = {
+    "I1_transform_name_independence": "test_I1_catches_a_label_dependent_transform",
+    "I1b_metadata_shortcut_auc": "test_I1b_catches_a_duration_shortcut",
+    "I2_stratified_composedness":
+        "test_I2_catches_a_marginally_balanced_within_stratum_shortcut",
+    "I2b_mixedness_balance": "test_I2b_catches_mixedness_predicting_fakeness",
+    "I2c_marginal_composedness": "test_I2c_catches_the_marginal_composedness_residual",
+    "I3_real_components_on_both_sides": "test_I3_can_actually_fail",
+    "I4_component_pools_imply_the_labels": "test_I4_is_falsifiable",
+    "I5_split_safety": "test_I5_catches_a_file_drawn_from_outside_the_slice",
+    "I7a_cells_6_7_always_composed": "test_I7a_fires_on_a_scraped_cell_6",
+    "I7_eval_size_floors": "test_I7_size_floors_run_when_asked",
+    "I8_C1_positive_rates": "test_I8_catches_the_naive_6_7_heavy_mix",
+    "I9_C2_present_count_floor": "test_I9_catches_a_starved_masked_head",
+    "I10_generator_diversity": "test_I10_catches_generator_monoculture",
+}
+
+#: The one invariant that legitimately does not run on a TRAINING stream. VG1
+#: A8/A9 bind on an evaluation stream, so it reports SKIP rather than PASS.
+EXPECTED_SKIPS = {"I7_eval_size_floors"}
+
+
 def test_reference_sampler_passes_every_invariant(manifest, specs):
+    """🔴 And every invariant is one that could have failed.
+
+    Three things, because "the reference config is green" alone is compatible
+    with a suite of unfalsifiable checks and silent skips:
+    """
     report = audit_specs(specs, manifest=manifest, slice_="train")
     assert report.ok, str(report)
 
+    # 1. nothing ran that we do not know about, and nothing we expect vanished
+    assert set(report.results) == set(MUTATION_TESTS), (
+        f"unmapped: {sorted(set(report.results) - set(MUTATION_TESTS))}; "
+        f"missing: {sorted(set(MUTATION_TESTS) - set(report.results))}")
+
+    # 2. the green came from checks that RAN. `.ok` counts a skip as a pass, so
+    #    a check that quietly stopped running would otherwise be invisible here.
+    assert set(report.skipped) == EXPECTED_SKIPS, report.skipped
+    assert set(report.ran) == set(MUTATION_TESTS) - EXPECTED_SKIPS
+
+    # 3. each of them is mutation-tested, by a test that exists
+    missing = sorted(t for t in MUTATION_TESTS.values() if t not in globals())
+    assert not missing, f"mutation test(s) named but not defined: {missing}"
+
 
 def test_measured_rates_match_the_designed_mix(specs):
-    """The stream must reproduce the arithmetic, not just agree with itself."""
+    """The stream must reproduce the arithmetic, not just agree with itself.
+
+    ⚠️ All FIVE of C1's quantities. The earlier version checked
+    `file`/`voice`/`music` and skipped `v_pres`/`m_pres` -- the two the naive
+    6/7-heavy mix actually breaks (`test_I8_catches_the_naive_6_7_heavy_mix`),
+    so the presence rates were designed, gated, and never measured.
+    """
     designed = head_positive_rates(CellMix())
     report = audit_specs(specs)
     assert report.results["I8_C1_positive_rates"][0]
-    measured = {}
-    for head, pool, pred in (
-            ("file", specs, lambda s: s.file_fake == 1),
-            ("voice", [s for s in specs if s.voice_present], lambda s: s.voice_fake == 1),
-            ("music", [s for s in specs if s.music_present], lambda s: s.music_fake == 1)):
-        measured[head] = sum(1 for s in pool if pred(s)) / len(pool)
-    for head, want in ((h, designed[h]) for h in measured):
-        assert abs(measured[head] - want) < 0.03, f"{head}: {measured[head]} vs {want}"
+    pools = {
+        "file": (specs, lambda s: s.file_fake == 1),
+        "voice": ([s for s in specs if s.voice_present], lambda s: s.voice_fake == 1),
+        "music": ([s for s in specs if s.music_present], lambda s: s.music_fake == 1),
+        "v_pres": (specs, lambda s: s.voice_present == 1),
+        "m_pres": (specs, lambda s: s.music_present == 1),
+    }
+    assert set(pools) == set(designed), "every designed rate must be measured"
+    for head, (pool, pred) in pools.items():
+        measured = sum(1 for s in pool if pred(s)) / len(pool)
+        assert abs(measured - designed[head]) < 0.03, \
+            f"{head}: {measured} vs {designed[head]}"
 
 
 # --------------------------------------------------------------------------- #
@@ -115,8 +176,12 @@ def test_I2_catches_a_marginally_balanced_within_stratum_shortcut():
     specs = ([_spec(1, composed=True, sample_id=i) for i in range(500)] +
              [_spec(2, composed=False, sample_id=500 + i) for i in range(500)])
     report = audit_specs(specs)
-    assert not report.results["I2_stratified_composedness"][0]
-    assert "1.0" in report.results["I2_stratified_composedness"][1]
+    passed, why = report.results["I2_stratified_composedness"]
+    assert not passed
+    # ⚠️ WHICH stratum, not just the size of the gap. `"1.0" in why` matched the
+    # tolerance, the sample count, any float -- so a mutation that tripped the
+    # wrong stratum still passed.
+    assert "= 1.0000 in 'voice-only'" in why, why
 
 
 def test_I1_catches_a_label_dependent_transform():
@@ -142,10 +207,30 @@ def test_I9_catches_a_starved_masked_head():
     assert not report.results["I9_C2_present_count_floor"][0]
 
 
-def test_I7_catches_a_scraped_cell_6(monkeypatch):
-    """Cells 6/7 cannot be scraped; SampleSpec refuses to build one at all."""
+@pytest.mark.parametrize("cell", [6, 7])
+def test_I7a_fires_on_a_scraped_cell_6(cell):
+    """Cells 6/7 cannot be scraped. Two layers, and the test must exercise both.
+
+    🔴 The earlier version was named for I7 and never called the audit: it
+    asserted only that `SampleSpec.__post_init__` refuses to construct such a
+    spec, which is `test_spec.py`'s job, and carried an unused `monkeypatch`
+    fixture. I7a is declared defense-in-depth precisely *because* the type
+    refuses first -- so the only way to know it works is to defeat the type and
+    hand the audit a spec that should never exist.
+    """
     with pytest.raises(ValueError, match="only be composed"):
-        _spec(6, composed=False)
+        _spec(cell, composed=False)               # layer 1: the type refuses
+
+    scraped = _spec(cell, composed=True)          # layer 2: forced past the type
+    object.__setattr__(scraped, "render_mode", "whole_file")
+    assert scraped.render_mode == "whole_file"
+
+    report = audit_specs([scraped])
+    passed, why = report.results["I7a_cells_6_7_always_composed"]
+    assert not passed, why
+    assert "1 spec(s)" in why, why
+    assert audit_specs([_spec(cell, composed=True)]).results[
+        "I7a_cells_6_7_always_composed"][0], "a composed cell 6/7 is fine"
 
 
 # --------------------------------------------------------------------------- #
@@ -172,12 +257,30 @@ def test_strict_policy_is_the_f8_equals_one_endpoint(manifest):
 
 
 def test_conditional_policy_keeps_genuine_whole_file_audio(manifest):
-    """f8 = 0 is primary precisely because it does."""
+    """f8 = 0 is primary precisely because it does.
+
+    🔴 The quantity the docs mean by "~13.8% of the corpus genuine whole-file
+    audio" is the MIXED-stratum whole-file mass: cells 5 (natural songs) and 8
+    (AI songs), the two `f8` decides. The earlier version measured
+    `len(whole) / len(specs)` -- 0.588, because cells 1/2/3/4/9 are whole-file at
+    `a = b = 0`, an unrelated knob. It cleared its 0.10 bar six times over while
+    saying nothing about the policy, and would have kept clearing it with the
+    cell-5/8 mass at zero.
+    """
     specs = list(Sampler(manifest, SamplerConfig(f8=0.0)).epoch_specs(N))
     whole = [s for s in specs if s.render_mode == "whole_file"]
-    assert len(whole) / len(specs) > 0.10, "conditional must retain real whole files"
-    assert any(s.cell == 8 for s in whole), "AI songs must be usable as-is"
-    assert any(s.cell == 5 for s in whole), "natural songs must be usable as-is"
+    genuine = [s for s in whole if s.cell in (5, 8)]
+    mass = len(genuine) / len(specs)
+    assert 0.115 <= mass <= 0.160, (
+        f"cells 5+8 whole-file mass is {mass:.4f}; docs/data/02 says ~0.138")
+    assert any(s.cell == 8 for s in genuine), "AI songs must be usable as-is"
+    assert any(s.cell == 5 for s in genuine), "natural songs must be usable as-is"
+
+    # ⚠️ And it is `f8` that produces it: the strict endpoint drives the same
+    # quantity to exactly zero. Without this, `mass` could come from anywhere.
+    strict = list(Sampler(manifest, SamplerConfig(f8=1.0)).epoch_specs(3_000))
+    assert not [s for s in strict
+                if s.render_mode == "whole_file" and s.cell in (5, 8)]
 
 
 @pytest.mark.parametrize("bad", [-0.1, 1.1])
@@ -201,29 +304,34 @@ def test_I1b_excludes_cell_9_and_why(manifest):
     """🔴 Cell 9 is always REAL and never composed, so it contributes an
     unfixable "not composed => REAL" correlation.
 
-    Including it, the strict policy scores 0.6003 and fails the 0.60 gate --
-    a false alarm blocking a policy we deliberately support.
+    Including it, the strict policy fails the gate -- a false alarm blocking a
+    policy we deliberately support.
+
+    ⚠️ Measured with the audit's OWN feature matrix and AUC estimator. The
+    earlier version pasted a copy of `_feature_frame`'s feature list inline and
+    fit its own in-sample logistic regression. When the audit dropped
+    `source_offset_s` and moved to cross-validated AUC, this test kept passing
+    against the stale copy -- it was testing a reimplementation, not the audit.
     """
-    import numpy as np
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import roc_auc_score
-    from sklearn.preprocessing import StandardScaler
+    from training.audit import _auc_or_none, _feature_frame
 
     specs = list(Sampler(manifest, SamplerConfig(f8=1.0)).epoch_specs(8000))
 
-    def auc(pool):
-        y = np.array([s.file_fake for s in pool])
-        X = np.array([[s.duration_s, float(s.render_mode == "composed"),
-                       float(s.structure == "sequential"), float(len(s.components)),
-                       float(np.mean([c.gain_db for c in s.components])), s.crossfade_ms,
-                       float(np.mean([c.source_offset_s for c in s.components]))]
-                      for s in pool])
-        Xs = StandardScaler().fit_transform(X)
-        return roc_auc_score(y, LogisticRegression(max_iter=2000).fit(Xs, y)
-                             .predict_proba(Xs)[:, 1])
+    def pooled_auc(pool):
+        X, _ = _feature_frame(pool)
+        return _auc_or_none(X, np.array([s.file_fake for s in pool]))
 
-    assert auc(specs) > 0.59, "including cell 9, the strict policy sits at the gate"
-    assert auc([s for s in specs if s.cell != 9]) < 0.56, "cells 1-8 must have headroom"
+    with_9 = pooled_auc(specs)
+    without_9 = pooled_auc([s for s in specs if s.cell != 9])
+    assert with_9 >= SHORTCUT_AUC_GATE, (
+        f"including cell 9 the strict policy must trip the gate, got {with_9:.4f}")
+    assert without_9 < SHORTCUT_AUC_GATE - 0.04, (
+        f"cells 1-8 must have headroom, got {without_9:.4f}")
+
+    # ...and the audit is on the right side of that line, because it excludes it.
+    passed, why = _metadata_shortcut(specs)
+    assert passed, why
+    assert f"gate < {SHORTCUT_AUC_GATE}" in why, why
 
 
 def test_I1b_catches_a_duration_shortcut():
