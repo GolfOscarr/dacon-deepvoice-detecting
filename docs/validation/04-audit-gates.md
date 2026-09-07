@@ -24,25 +24,44 @@ Pure assertions over `folds.parquet` joined to the [provenance ledger](../data/0
 Cheap, and catches the class of bug that silently inflates every number downstream.
 
 ```
-A1  artifact_family appears in exactly one of {train, val, probe}
-A2  no source_name spans train and val
-A3  no speaker_ref_id / artist_id spans train and val
-A4  every pair_id's members share a slice
-A5  every dup_group is wholly within one slice
-A6  PROBE families appear in neither train nor val
-A7  every SHADOW row with shadow_kind='a' has shadow_of pointing at a real VAL file_id
+A1  artifact_family is sealed into PROBE, or rotates in exactly one fold
+A2  no source_name spans two folds or straddles the PROBE seal
+A3  no speaker_ref_id / artist_id does either
+A4  every pair_id's members share one (slice, fold) cell
+A5  every dup_group is wholly within one (slice, fold) cell
+A6  PROBE is non-empty and none of its families rotate through train or val
+A7  every SHADOW row with shadow_kind='a' has shadow_of pointing at a rotating file in its own fold
 A8  every VAL fold meets the per-class size floor (>=1,200) for BOTH masked pools
 A9  every cell 1-9 is present in every fold with >=100 samples
 A10 scheme_version recorded on the run matches folds.parquet
 ```
+
+🔴 **A1 was reworded when the split scheme was settled.** It read "appears in exactly one of
+{train, val, probe}", which presumes a *static* TRAIN/VAL assignment. Under the chosen scheme
+([01 §3](01-split-scheme.md#-the-reading-that-was-rejected-and-what-it-would-have-cost)) PROBE is
+sealed and every other family **rotates** — TRAIN in four folds, VAL in the fifth — so the static
+form would fail on a correct split. A1–A5 are now one statement over five keys: **the value
+resolves to exactly one `(slice, fold)` cell.** Two cells means the key is on both sides of some
+fold's TRAIN/VAL boundary, or sealed and rotating at once. The static reading is coherent but needs
+~40 voice / ~16 music families to give two per validation fold; it was rejected on that cost.
+
+🔴 **A6's non-empty clause is the load-bearing one.** "PROBE families appear in neither" is
+entailed by A1; that PROBE *exists* is not, and it is what fails in practice — a builder that
+sealed nothing leaves A1 green over an empty slice.
 
 🔴 **A8 and A9 are evaluated against `val_specs.parquet`, not `folds.parquet`.** Both are
 statements about *compositions*, and a component row has no cell — the fold table is keyed on
 source files ([01 §3](01-split-scheme.md#-the-table-is-keyed-on-components-not-on-composed-files)).
 They therefore run at eval-set materialization
 ([pipelines/02 §4](../pipelines/02-sampler.md#5-the-eval-sampler-is-the-same-code-run-once)), while
-A1–A7 and A10 run against `folds.parquet`. The gate is unchanged; only where each assertion can be
-computed is.
+A1–A7 and A10 run against `folds.parquet`, in `training.folds.check_split_integrity`. The gate is
+unchanged; only where each assertion can be computed is.
+
+⚠️ A3 is keyed on the **bare** `speaker_ref_id`, not on `(source_name, speaker_ref_id)`.
+[01 §1](01-split-scheme.md#1-grouping-keys) says "disjoint *within* `source_name`", but A2 already
+pins a `source_name` to one cell, so the within-source form is entailed by A2 and could never fail
+on its own. The bare id is the falsifiable statement, and it is the one that matters: a LibriTTS
+speaker reappearing under a `gen_hifigan` resynthesis is exactly the leak.
 
 ⚠️ **A8 is the one that will fail first.** The masked pools mean the Voice pool draws only from
 cells 1,2,5,6,7,8 and the Music pool only from 3,4,5,6,7,8 — sizing VAL by total file count

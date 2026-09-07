@@ -135,37 +135,57 @@ and only the stream catches that.
 
 ## Building `folds.parquet`
 
+**Sealed PROBE, rotating TRAIN/VAL.** A family is either sealed into PROBE —
+never TRAIN, never VAL, in any fold — or it rotates: VAL in exactly one fold,
+TRAIN in all the others. That is docs/validation/01 §3's music option 1 read
+literally ("5 TRAIN / 2 VAL rotating / 1 sealed PROBE"), and it is why the family
+floors stay at ≥20 voice / ≥8 music.
+
 ```python
 from training.folds import FoldConfig, apply_folds, build_folds, check_split_integrity
 from training.synthetic import synthetic_manifest
 
-corpus = synthetic_manifest(n_per_pool=200, n_whole_file=200, n_families=24)
+corpus = synthetic_manifest(n_per_pool=240, n_whole_file=200,
+                            n_families=24, n_sources=8)
 plan = build_folds(corpus, FoldConfig(n_folds=5))
 
-print(plan)                       # slice counts, then one line per caveat
+print(plan)                       # slice counts, VAL rows per fold, then caveats
 report = check_split_integrity(plan.frame, run_scheme_version="synthetic-v1")
 report.raise_for_status()         # VG1 A1-A7 and A10
 
-split = apply_folds(corpus, plan.frame)     # the manifest the pipeline reads
+fold0 = apply_folds(corpus, plan.frame, fold=0)      # the manifest for one fold
+assert set(fold0["slice"]) <= {"train", "val", "shadow", "probe"}
 ```
 
+🔴 `folds.parquet` holds `slice ∈ {train_val, shadow, probe}` and a `fold`, not a
+TRAIN/VAL label. **`apply_folds(..., fold=k)` is what resolves it** — `train_val`
+becomes `val` for the families assigned to fold `k` and `train` for every other
+one. Calling `Sampler` on the raw fold table would train on the validation set.
+
 ⚠️ `plan.caveats` is the part people skip. It is where the music-head variance
-warning lives — at 5 music families a 5-fold puts **one family in each
-validation fold** and PROBE cannot be carved out at all
+warning lives, with the *realized* families-per-validation-fold rather than a
+mean — at 8 music families a 5-fold leaves one sealed and the rest rotating, so
+some fold validates on exactly one family
 ([`docs/validation/01 §3`](../docs/validation/01-split-scheme.md#-the-music-head-cannot-support-the-planned-split)).
 `plan.write()` drops them in `folds.caveats.txt` beside the parquet so they
 travel with the table.
 
-### Three things it refuses to do
+### Four things it refuses to do
 
 `build_folds` raises `FoldInfeasible` rather than quietly returning a worse
 split. Each of these is a real corpus property, not a bug in the caller:
 
 | Refusal | Why |
 |---|---|
-| too few VAL families for `n_folds` | a validation fold with no family of its own validates nothing |
-| a slice with no PROBE families | the sealed slice is the only check on "VAL became a training set". Pass `allow_no_probe=True` to accept the blind spot deliberately |
-| a slice the sampler cannot draw from | no real voice components ⇒ cells 1/5/6 cannot be composed, and `Sampler` only finds out at draw time |
+| fewer rotating families than `n_folds` | a fold that validates on no family of its own validates nothing |
+| nothing sealed into PROBE | the sealed slice is the only check on "VAL became a training set". Pass `allow_no_probe=True` to accept the blind spot deliberately |
+| a fold side the sampler cannot draw from | no real voice components ⇒ cells 1/5/6 cannot be composed, and `Sampler` only finds out at draw time |
+| a `pair_id` that fuses the whole corpus | see below |
+
+🔴 **Under rotation the fold count is bounded by the number of real source
+corpora per role, not only by the family count.** Every one of the `k` VAL sides
+needs its own real voice, real music and noise source, and PROBE needs one more —
+so `k = 5` wants ≥6 of each. That is why the snippet above passes `n_sources=8`.
 
 ```python
 import pytest
@@ -173,12 +193,11 @@ import pytest
 from training.folds import FoldConfig, FoldInfeasible, build_folds
 from training.synthetic import synthetic_manifest
 
-narrow = synthetic_manifest(n_per_pool=60, n_whole_file=60)   # 8 families/pool
-with pytest.raises(FoldInfeasible, match="cannot fill 5"):
-    build_folds(narrow, FoldConfig(n_folds=5))
+thin = synthetic_manifest(n_per_pool=240, n_whole_file=200, n_families=24)
+with pytest.raises(FoldInfeasible, match="real source corpora"):
+    build_folds(thin, FoldConfig(n_folds=5))          # only 3 corpora per role
 
-plan = build_folds(narrow, FoldConfig(n_folds=2))             # 2 is feasible
-assert any("per validation fold" in c for c in plan.caveats)
+plan = build_folds(thin, FoldConfig(n_folds=2))       # 2 is feasible
 ```
 
 ### 🔴 The five grouping keys are one constraint, not five
@@ -195,6 +214,10 @@ key. It is also why `training.synthetic` twins only the (corpus, vocoder)
 combinations in `_TWIN_COMBINATIONS` — the earlier random pairing fused 1,088 of
 1,200 rows into one inseparable group.
 
+VG1 A1–A5 are all the same statement over different keys: **the value resolves to
+exactly one `(slice, fold)` cell.** Two cells means two roles in the same fold —
+TRAIN and VAL at once, or sealed and rotating at once.
+
 ### Where A8 and A9 are
 
 Not here. They are statements about **compositions**, and a component row has no
@@ -207,10 +230,11 @@ from training.folds import FoldConfig, apply_folds, build_folds
 from training.sampler import Sampler
 from training.synthetic import synthetic_manifest
 
-corpus = synthetic_manifest(n_per_pool=200, n_whole_file=200, n_families=24)
-split = apply_folds(corpus, build_folds(corpus, FoldConfig()).frame)
+corpus = synthetic_manifest(n_per_pool=240, n_whole_file=200,
+                            n_families=24, n_sources=8)
+fold0 = apply_folds(corpus, build_folds(corpus, FoldConfig()).frame, fold=0)
 
-report = run_audit(Sampler(split, slice_="val"), n=1500, manifest=corpus,
+report = run_audit(Sampler(fold0, slice_="val"), n=1500, manifest=corpus,
                    eval_floors=True)
 print(report.results["I7_eval_size_floors"])     # VG1 A8/A9, measured
 ```

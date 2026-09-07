@@ -12,7 +12,7 @@ field to exactly one of `feature` / `split key` / `leakage risk` **before** any 
 
 | Key | Ledger source | Rule |
 |---|---|---|
-| **`artifact_family`** | derived from `generator_model` + `generator_version` | Disjoint across slices. **Assigned before generation.** |
+| **`artifact_family`** | derived from `generator_model` + `generator_version` | Sealed into PROBE, or VAL in exactly one fold and TRAIN in the rest ([§3](#3-fold-construction)). **Assigned before generation.** |
 | **`source_name`** | `source_name` | Disjoint — no MUSDB18 track, Jamendo artist or LibriTTS speaker on both sides |
 | **`speaker_ref_id`** / `artist_id` | `speaker_ref_id` | Disjoint within `source_name` |
 | **`pair_id`** | `pair_id` (T1/T2/T3 twins) | A real file and its resynthesized twin land in the **same** slice |
@@ -49,13 +49,15 @@ weak evidence; a *bad* score is still real evidence).
 
 | Slice | Purpose | Composition | Opened |
 |---|---|---|---|
-| **TRAIN** | fitting | ~65% of artifact families, disjoint sources | freely |
-| **VAL** | every tuning decision, model selection | ~25% of families, disjoint sources | freely |
-| **SHADOW** | domain-shift stress test only | **VAL generators × unseen acoustic conditions** | per milestone |
-| **PROBE** | final sanity before a submission decision | ~10% of families, seen in **neither** TRAIN nor VAL | **≤3 times total** |
+| **TRAIN** | fitting | the rotating families **not** validated in this fold — ~72% at k=5 | freely |
+| **VAL** | every tuning decision, model selection | the rotating families validated in **this** fold — ~18% at k=5 | freely |
+| **SHADOW** | domain-shift stress test only | **this fold's VAL generators × unseen acoustic conditions** | per milestone |
+| **PROBE** | final sanity before a submission decision | ~10% of families, **sealed** — never TRAIN, never VAL, in any fold | **≤3 times total** |
 
-The three generator-partitioned slices sum to 100%; SHADOW is not a generator partition and draws
-its files from VAL's families (see below), so it does not consume budget from the other three.
+🔴 **TRAIN and VAL are roles, not slices.** PROBE is sealed once; every other family *rotates*,
+and which side it is on depends on the fold. So the TRAIN and VAL shares above are not knobs —
+they follow from `k`: VAL is `(1 − probe_share) / k` of the families. SHADOW is not a generator
+partition and draws its files from VAL's families (see below), so it consumes no family budget.
 
 ★ `[BirdCLEF playbook 2026]` E3: keep a shadow split *purely* for domain-shift stress testing,
 distinct from the tuning split. The reason to keep SHADOW separate from VAL is that VAL gets
@@ -149,6 +151,31 @@ disjointness constrains only *fake* components — real files have no family —
 music components independently within the slice, so a *combination* unseen in TRAIN is expected
 and is not a leak.
 
+### 🔴 The reading that was rejected, and what it would have cost
+
+An earlier implementation read `slice` as **static** — a family assigned to TRAIN *or* VAL once and
+for good, which is the literal reading of [VG1 A1](04-audit-gates.md#vg1--split-integrity) as it was
+originally worded ("appears in exactly one of {train, val, probe}"). It is internally coherent, but
+it makes VAL a fixed ~25% of families rather than a rotating `1/k`, so a 5-fold with **two**
+families per validation fold needs **~40 voice and ~16 music families** — roughly double what
+[08 volume targets](../data/08-build-plan.md#volume-targets) is budgeted for.
+
+Rotation was chosen: it is what the option-1 row above literally describes, and it keeps the floors
+at ≥20 / ≥8. A1 was reworded to match. Recorded here so the conflict is not rediscovered and
+re-decided per experiment.
+
+### ⚠️ `k` is bounded by the source count too, not only by the family count
+
+Every one of the `k` VAL sides needs its own **real** voice, **real** music and noise source —
+`source_name` is disjoint across the TRAIN/VAL boundary ([§1](#1-grouping-keys)), so a real corpus
+sits in exactly one fold like any other group — and PROBE needs one more. A 5-fold therefore wants
+**≥6 real corpora per role**, or the sampler cannot compose cells 1/5/6 on some fold's VAL side.
+
+Recording `source_name` at **track / artist / speaker** granularity — which is what §1's own
+examples describe — raises that count by orders of magnitude and makes the bound non-binding.
+Recording it at corpus granularity does not. `training.folds` refuses to build a split whose folds
+cannot be drawn from, rather than discovering it at draw time.
+
 ### Stratification within the group constraint
 
 Within the family-disjoint partition, balance folds on **source_name**, **duration bucket** and
@@ -163,11 +190,17 @@ at all. Fold construction balances what it owns; the sampler owns the rest.
 Emitted **once** to `folds.parquet` (★ E4 — fold assignment generated once and reused everywhere):
 
 ```
-file_id · row_kind(component|whole_file) · slice(train|val|shadow|probe)
+file_id · row_kind(component|whole_file) · slice(train_val|shadow|probe)
 shadow_kind(a|b|null) · shadow_of(file_id|null) · fold(0-4|null) · artifact_family
 source_name · speaker_ref_id · pair_id · dup_group · cell(1-9|null)
 domain_key · assigned_at · scheme_version
 ```
+
+🔴 `slice` holds `train_val`, not `train` or `val`: the table is **fold-independent**, and the
+TRAIN/VAL role is resolved per fold by `training.folds.apply_folds(manifest, folds, fold=k)` —
+`train_val` becomes `val` where `fold == k` and `train` everywhere else. `fold` is null exactly on
+PROBE rows, which never rotate. A SHADOW row carries the fold of the file it was re-rendered from
+and is invisible in every other fold.
 
 `cell` is non-null exactly when `row_kind == whole_file`. `domain_key` is `source × generator`,
 the DOSS capping key ([papers/05](../papers/05-generalization.md)) — carried here rather than

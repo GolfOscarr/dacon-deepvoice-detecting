@@ -47,7 +47,26 @@ _FAKE_FAMILIES = {"B": ("hifigan", "bigvgan", "encodec", "vocos", "dac",
 _TWIN_COMBINATIONS = (("B", "A", 0, 0), ("B", "A", 1, 1), ("D", "C", 0, 0))
 
 
-def _assign_twins(rows: list[dict], fam_names: dict[str, tuple[str, ...]]) -> None:
+def _widen(names: tuple[str, ...], n: int | None, what: str) -> tuple[str, ...]:
+    """`names`, cycled with a numeric suffix out to `n` entries. `None` = as-is.
+
+    ⚠️ Exists so a test can build a corpus that *can* support the fold count it
+    asks for -- never so the builder can assume one does. Under the rotating
+    scheme (docs/validation/01 §3) the fold count is bounded by the number of
+    real source corpora per role as well as by the family count: each of the k
+    VAL sides needs its own, and PROBE needs one more.
+    """
+    if n is None:
+        return names
+    if n < 1:
+        raise ValueError(f"{what} must be >= 1, got {n}")
+    return tuple(names[i % len(names)]
+                 + ("" if i < len(names) else f"_v{i // len(names) + 1}")
+                 for i in range(n))
+
+
+def _assign_twins(rows: list[dict], fam_names: dict[str, tuple[str, ...]],
+                  src_names: dict[str, tuple[str, ...]]) -> None:
     """Give each resynthesis twin the same `pair_id` as the real file it came from.
 
     A twin is one real component and the fake component generated *from it*, so
@@ -59,7 +78,7 @@ def _assign_twins(rows: list[dict], fam_names: dict[str, tuple[str, ...]]) -> No
             by_pool.setdefault(row["pool"], []).append(row)
 
     for fake_pool, real_pool, fam_i, src_i in _TWIN_COMBINATIONS:
-        fams, srcs = fam_names[fake_pool], _REAL_SOURCES[real_pool]
+        fams, srcs = fam_names[fake_pool], src_names[real_pool]
         if fam_i >= len(fams) or src_i >= len(srcs):
             continue
         fam, src = fams[fam_i], srcs[src_i]
@@ -77,13 +96,7 @@ def _family_names(pool: str, n_families: int | None) -> tuple[str, ...]:
     a test can build a corpus that *can* support the requested fold count --
     never so the builder can assume one does.
     """
-    base = _FAKE_FAMILIES[pool]
-    if n_families is None:
-        return base
-    if n_families < 1:
-        raise ValueError(f"n_families must be >= 1, got {n_families}")
-    return tuple(base[i % len(base)] + ("" if i < len(base) else f"_v{i // len(base) + 1}")
-                 for i in range(n_families))
+    return _widen(_FAKE_FAMILIES[pool], n_families, "n_families")
 
 
 def synthetic_manifest(
@@ -92,6 +105,7 @@ def synthetic_manifest(
     seed: int = 0,
     scheme_version: str = "synthetic-v1",
     n_families: int | None = None,
+    n_sources: int | None = None,
     duration_range: tuple[float, float] = (5.0, 240.0),
 ) -> pd.DataFrame:
     """A manifest with the shape and the pathologies of the real thing.
@@ -101,13 +115,15 @@ def synthetic_manifest(
     7 are deliberately absent from the whole-file rows: they cannot be scraped,
     which is the entire reason two fake heads exist.
 
-    ``n_families`` widens each fake pool beyond its default eight generators.
+    ``n_families`` widens each fake pool beyond its default eight generators, and
+    ``n_sources`` each real pool beyond its default three corpora.
     ``duration_range`` bounds the declared source durations -- shrink it before
     calling `write_synthetic_corpus`, which writes real audio for every row.
     """
     rng = np.random.default_rng(seed)
     rows: list[dict] = []
     fam_names = {p: _family_names(p, n_families) for p in ("B", "D")}
+    src_names = {p: _widen(v, n_sources, "n_sources") for p, v in _REAL_SOURCES.items()}
 
     def add(file_id, row_kind, pool, cell, labels, family, source, domain, extra=None):
         vp, mp, vf, mf = labels
@@ -151,7 +167,7 @@ def synthetic_manifest(
             weights /= weights.sum()
             picks = rng.choice(len(fams), size=n_per_pool, p=weights)
         else:
-            srcs = _REAL_SOURCES[pool]
+            srcs = src_names[pool]
             picks = rng.integers(0, len(srcs), size=n_per_pool)
 
         for i in range(n_per_pool):
@@ -185,11 +201,12 @@ def synthetic_manifest(
             fam = str(rng.choice(fam_names[pool_for_fam]))
             src, dom = f"gen_{fam}", f"gen_{fam}::{fam}"
         else:
-            fam, src, dom = None, str(rng.choice(("jamendo", "fma", "aihub_kr"))), None
+            fam, src, dom = None, str(rng.choice(
+                src_names["C"][:2] + src_names["A"][2:3])), None
         add(f"W{i:05d}", "whole_file", None, cell, (vp, mp, vf, mf), fam, src, dom,
             {"speaker": None, "pair": None, "dup": None})
 
-    _assign_twins(rows, fam_names)
+    _assign_twins(rows, fam_names, src_names)
 
     df = pd.DataFrame(rows, columns=list(REQUIRED_COLUMNS))
     df["cell"] = df["cell"].astype("Int64")
