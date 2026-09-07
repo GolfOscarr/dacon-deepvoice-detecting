@@ -1,5 +1,6 @@
 """The manifest schema, and the two row kinds it exists to keep apart."""
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -17,14 +18,26 @@ def test_synthetic_manifest_validates(df):
     assert len(df) == 60 * 5 + 40
 
 
-def test_component_rows_have_a_pool_and_no_cell(df):
-    """🔴 A component has no cell until the sampler composes one."""
+def test_the_generator_emits_component_rows_with_a_pool_and_no_cell(df):
+    """🔴 A component has no cell until the sampler composes one.
+
+    ⚠️ This is a statement about `synthetic.py`, not about `validate_manifest`.
+    The *enforcement* is asserted separately, once per direction, in
+    `test_rejects_a_component_row_carrying_a_cell` and
+    `test_rejects_a_component_row_without_a_pool` -- a generator that happens to
+    produce well-formed rows proves nothing about what validation would reject.
+    """
     comp = df[df.row_kind == "component"]
     assert comp.pool.notna().all()
     assert comp.cell.isna().all()
 
 
-def test_whole_file_rows_have_a_cell_and_no_pool(df):
+def test_the_generator_emits_whole_file_rows_with_a_cell_and_no_pool(df):
+    """The mirror of the above, and equally a generator test.
+
+    Enforcement lives in `test_rejects_a_whole_file_row_without_a_cell` and
+    `test_rejects_a_whole_file_row_carrying_a_pool`.
+    """
     whole = df[df.row_kind == "whole_file"]
     assert whole.cell.notna().all()
     assert whole.pool.isna().all()
@@ -77,9 +90,36 @@ def test_real_components_have_no_artifact_family(df):
 
 
 def test_the_synthetic_corpus_is_imbalanced_on_purpose(df):
-    """A balanced generator would make the DOSS audit vacuous."""
-    counts = df.domain_key.value_counts()
-    assert counts.max() >= 2 * counts.min(), "domains should be unevenly sized"
+    """A balanced generator would make the DOSS audit vacuous.
+
+    🔴 Measured *per fake pool* and against the UNIFORM share, not against the
+    smallest domain. `max >= 2 * min` is met by almost any random assignment and
+    says nothing about there being a head to flatten; the generator draws family
+    sizes from a Zipf, which puts ~2.3x the uniform share on the top family and
+    costs ~1.3 of the 8 available effective domains.
+
+    ⚠️ This asserts the corpus has an imbalance. Whether that imbalance is large
+    enough for the *shipped* `domain_cap` to bind is a different question, and it
+    is asserted where it belongs, on a production-sized corpus:
+    `tests/test_sampler.py::test_doss_flattens_over_represented_domains`.
+    """
+    for pool in ("B", "D"):
+        counts = df.loc[(df.row_kind == "component") & (df.pool == pool),
+                        "domain_key"].value_counts()
+        n_domains = len(counts)
+        assert n_domains >= 8, f"{pool}: {n_domains} domains is too few to be a corpus"
+
+        share = counts / counts.sum()
+        uniform = 1.0 / n_domains
+        assert share.max() >= 2.0 * uniform, (
+            f"{pool}: top domain holds {share.max():.3f}, barely above the uniform "
+            f"{uniform:.3f} -- nothing for DOSS to flatten")
+        assert counts.max() >= 5 * counts.min(), (
+            f"{pool}: head/tail ratio {counts.max() / counts.min():.1f} is too flat")
+
+        n_eff = float(np.exp(-(share * np.log(share)).sum()))
+        assert n_eff <= 0.875 * n_domains, (
+            f"{pool}: {n_eff:.2f} effective domains out of {n_domains} is near-uniform")
 
 
 # --------------------------------------------------------------------------- #
@@ -97,6 +137,15 @@ def test_rejects_a_component_row_carrying_a_cell(df):
     bad = df.copy()
     bad.loc[comp_idx, "cell"] = 5
     with pytest.raises(ValueError, match="cell = null"):
+        validate_manifest(bad)
+
+
+def test_rejects_a_component_row_without_a_pool(df):
+    """The fourth direction: a component row must carry the pool it came from."""
+    comp_idx = df.index[df.row_kind == "component"][0]
+    bad = df.copy()
+    bad.loc[comp_idx, "pool"] = None
+    with pytest.raises(ValueError, match="must carry a pool"):
         validate_manifest(bad)
 
 
