@@ -19,9 +19,11 @@ Why each choice was made: [`docs/pipelines/`](../docs/pipelines/README.md) and
 | `training.sampler` | Drawing specs. C1 / C3 / DOSS live here |
 | `training.audit` | **I1–I9** over a drawn stream. No corpus, no model, no GPU |
 | `training.folds` | Building `folds.parquet`, and **VG1 A1–A7 / A10** over it |
-| `training.synthetic` | A manifest with the real corpus's pathologies |
+| `training.synthetic` | A manifest with the real corpus's pathologies, and the audio it names |
+| `training.registries` | The three transform contracts. **I14** lives here |
+| `training.render` | `SampleSpec` → audio. All the I/O, and `render(spec) == render(spec)` |
 
-⬜ `registries` · `render` · `collate` · `dataset` · `loop` — milestones M3–M5.
+⬜ `collate` · `dataset` · `loop` — milestones M4–M5.
 
 ---
 

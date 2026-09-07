@@ -1,4 +1,4 @@
-"""A synthetic manifest, and later a synthetic corpus.
+"""A synthetic manifest, and the synthetic corpus it names.
 
 🔴 Not test scaffolding -- a first-class deliverable. The corpus does not exist
 and will not for days (docs/data/08), while the sampler, the audit and the fold
@@ -13,12 +13,15 @@ make the audit vacuous.
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
 from training.manifest import POOL_IS_FAKE, REQUIRED_COLUMNS, validate_manifest
 
-__all__ = ["synthetic_manifest"]
+__all__ = ["synthetic_manifest", "write_synthetic_corpus"]
 
 _CONTAINERS = ("wav", "mp3", "flac")
 _REAL_SOURCES = {"A": ("libritts", "commonvoice", "aihub_kr"),
@@ -89,6 +92,7 @@ def synthetic_manifest(
     seed: int = 0,
     scheme_version: str = "synthetic-v1",
     n_families: int | None = None,
+    duration_range: tuple[float, float] = (5.0, 240.0),
 ) -> pd.DataFrame:
     """A manifest with the shape and the pathologies of the real thing.
 
@@ -98,6 +102,8 @@ def synthetic_manifest(
     which is the entire reason two fake heads exist.
 
     ``n_families`` widens each fake pool beyond its default eight generators.
+    ``duration_range`` bounds the declared source durations -- shrink it before
+    calling `write_synthetic_corpus`, which writes real audio for every row.
     """
     rng = np.random.default_rng(seed)
     rows: list[dict] = []
@@ -105,17 +111,21 @@ def synthetic_manifest(
 
     def add(file_id, row_kind, pool, cell, labels, family, source, domain, extra=None):
         vp, mp, vf, mf = labels
+        container = str(rng.choice(_CONTAINERS))
         rows.append({
             "file_id": file_id,
-            "path": f"pools/{pool or 'whole'}/{file_id}.wav",
+            # ⚠️ The extension agrees with `container` here, but nothing in the
+            # pipeline may rely on that: P-S1 says "never assume the extension",
+            # and the eval server hands us mixed containers.
+            "path": f"pools/{pool or 'whole'}/{file_id}.{container}",
             "sha256": f"{abs(hash(file_id)) & 0xFFFFFFFFFFFF:012x}",
             "row_kind": row_kind,
             "pool": pool,
             "cell": cell,
-            "duration_s": float(rng.uniform(5.0, 240.0)),
+            "duration_s": float(rng.uniform(*duration_range)),
             "orig_sr": int(rng.choice([16_000, 22_050, 44_100, 48_000])),
             "orig_channels": int(rng.choice([1, 2])),
-            "container": str(rng.choice(_CONTAINERS)),
+            "container": container,
             "label_voice_present": vp, "label_music_present": mp,
             "label_voice_fake": vf, "label_music_fake": mf,
             "artifact_family": family,
@@ -188,3 +198,69 @@ def synthetic_manifest(
               "label_voice_fake", "label_music_fake"):
         df[c] = df[c].astype("Int64")
     return validate_manifest(df)
+
+
+# --------------------------------------------------------------------------- #
+# A synthetic *corpus* -- the audio the manifest promises exists
+#
+# 🔴 Same reason as the manifest: `render`, the collator and the rule-2.4 suite
+# are all buildable now, and the corpus will not exist for days (docs/data/08).
+# Without this, every render test would be a mock, and a mock cannot catch a
+# decode, resample or codec defect -- which is where the failures actually are.
+
+
+def _tone_bank(rng: np.random.Generator, n: int, sr: int, kind: str) -> np.ndarray:
+    """One channel of plausible audio for a pool, deterministic given ``rng``."""
+    t = np.arange(n, dtype=np.float64) / sr
+    if kind == "voice":
+        # A harmonic stack with vibrato and an amplitude envelope: enough
+        # structure that a composition or a fade is visible in the waveform.
+        f0 = float(rng.uniform(90.0, 240.0))
+        vib = 1.0 + 0.01 * np.sin(2 * np.pi * float(rng.uniform(3.0, 7.0)) * t)
+        x = sum((1.0 / k) * np.sin(2 * np.pi * f0 * k * t * vib) for k in range(1, 8))
+        env = 0.5 + 0.5 * np.sin(2 * np.pi * float(rng.uniform(0.3, 1.5)) * t)
+        x = x * env
+    elif kind == "music":
+        root = float(rng.uniform(110.0, 330.0))
+        x = sum(np.sin(2 * np.pi * root * r * t + float(rng.uniform(0, 6.28)))
+                for r in (1.0, 1.26, 1.5, 2.0))
+    else:                                            # noise
+        x = np.cumsum(rng.standard_normal(n))        # pink-ish, not flat
+        x = x - x.mean()
+    x = x + 0.02 * rng.standard_normal(n)
+    peak = float(np.max(np.abs(x))) or 1.0
+    return (0.2 * x / peak).astype(np.float32)
+
+
+def write_synthetic_corpus(manifest: pd.DataFrame, root: Path | str,
+                           seed: int = 0) -> Path:
+    """Write every file the manifest names, at its declared sr/channels/container.
+
+    Deterministic per ``file_id``, so two runs produce byte-identical corpora and
+    a reproducibility test is testing the pipeline rather than the fixture.
+    ⚠️ Sizes follow ``duration_s``: pass ``synthetic_manifest(duration_range=...)``
+    something small before calling this.
+    """
+    import soundfile as sf
+
+    from training.spec import CELL_TABLE
+
+    root = Path(root)
+    kind_for_pool = {"A": "voice", "B": "voice", "C": "music", "D": "music",
+                     "E": "noise"}
+    for row in manifest.to_dict(orient="records"):
+        path = root / str(row["path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.blake2b(f"{seed}:{row['file_id']}".encode(),
+                                 digest_size=8).digest()
+        rng = np.random.default_rng(int.from_bytes(digest, "big"))
+        sr, n = int(row["orig_sr"]), int(round(float(row["duration_s"]) * int(row["orig_sr"])))
+        if row["row_kind"] == "component":
+            kind = kind_for_pool[str(row["pool"])]
+        else:
+            vp, mp, _, _ = CELL_TABLE[int(row["cell"])]
+            kind = "voice" if vp else "music" if mp else "noise"
+        channels = int(row["orig_channels"])
+        data = np.stack([_tone_bank(rng, n, sr, kind) for _ in range(channels)], axis=1)
+        sf.write(str(path), data, sr, format=str(row["container"]).upper())
+    return root

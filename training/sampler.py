@@ -325,6 +325,18 @@ class Sampler:
             wanted.append(("noise", False))
 
         sequential = len(wanted) > 1 and rng.random() < cfg.sequential_prob
+        # ⚠️ `gain_db` is the voice/music LEVEL RATIO (docs/data/02, A-A3) -- the
+        # quantity G2Net's low-SNR-generalisation result is about. It is only
+        # meaningful against something, so it is drawn only when both components
+        # are present. Applied to a solo voice component it silently became an
+        # absolute level shift: that is A-A7 gain jitter, a label-independent
+        # augment which belongs in the augment registry, not in the component
+        # draw, and which nothing renormalises (`render._normalize` models the
+        # test chain only -- there is no loudness stage), so it reached the
+        # waveform as a composedness cue inside the voice-only stratum.
+        # 🔴 A no-op on the shipped stream: `single_composed_rate = 0.0` emits no
+        # composed voice-only samples at all, so only `a`/`b` sweeps change.
+        is_ratio = len(wanted) > 1
         draws: list[ComponentDraw] = []
         for i, (role, fake) in enumerate(wanted):
             row = self._draw_component(rng, role, fake)
@@ -339,7 +351,7 @@ class Sampler:
                 source_offset_s=float(rng.uniform(
                     0.0, max(0.0, float(row.duration_s) - take))),
                 duration_s=take, target_start_s=start,
-                gain_db=self._gain_db(rng) if role == "voice" else 0.0))
+                gain_db=self._gain_db(rng) if (is_ratio and role == "voice") else 0.0))
 
         return SampleSpec(
             sample_id=sample_id, epoch=epoch, seed=seed,

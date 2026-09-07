@@ -325,16 +325,19 @@ def test_gain_is_skewed_toward_the_quiet_end(sampler):
     assert lo <= gains.min() and gains.max() <= hi
 
 
-def test_gain_applies_to_composed_voice_in_every_stratum(manifest):
-    """⚠️ Filtering to the mixed stratum hid what the sampler actually does.
+def test_gain_is_the_voice_music_ratio_not_a_level_shift(manifest):
+    """⚠️ Filtering to the mixed stratum hid what the sampler used to do.
 
-    `_gain_db` is applied to every component whose role is "voice", so a composed
-    voice-only sample (cells 1/2, reachable whenever `single_composed_rate > 0`)
-    is gained too -- there is no music for it to sit under, so it is a level
-    shift rather than a voice/music ratio. That is the shipped behaviour; pin it
-    here so a change to it is a test failure rather than a surprise.
+    `gain_db` is the voice/music level ratio (docs/data/02, A-A3). It was applied
+    to every component whose role is "voice", so a composed voice-only sample
+    (cells 1/2, reachable whenever `single_composed_rate > 0`) was gained with no
+    music to be relative to -- an absolute level shift, which is A-A7 jitter and
+    belongs in the augment registry. Nothing renormalises it either
+    (`render._normalize` models the test chain; there is no loudness stage), so
+    it reached the waveform as a composedness cue inside the voice-only stratum.
 
-    Whole-file rows are the documented exception: one row used as-is, gain 0.
+    Two exceptions, both deliberate: a whole-file row is used as-is at gain 0,
+    and a cell-9 noise draw has no voice component to gain.
     """
     cfg = SamplerConfig(single_composed_rate=1.0)
     by_stratum: dict[str, list[float]] = {}
@@ -349,12 +352,36 @@ def test_gain_applies_to_composed_voice_in_every_stratum(manifest):
                 whole_file_gains.append(c.gain_db)
 
     assert set(by_stratum) == {"voice-only", "mixed"}, sorted(by_stratum)
-    for stratum, gains in by_stratum.items():
-        g = np.array(gains)
-        assert len(g) > 400, (stratum, len(g))
-        assert abs(g.mean() - cfg.gain_db_mean) < 0.6, (stratum, g.mean())
-        assert (g < 0).mean() > 0.72, (stratum, (g < 0).mean())
+
+    solo = np.array(by_stratum["voice-only"])
+    assert len(solo) > 400, len(solo)
+    assert not solo.any(), (
+        f"a solo voice component has nothing to be relative to, so it carries no "
+        f"ratio; {int((solo != 0).sum())} of {len(solo)} were gained")
+
+    mixed = np.array(by_stratum["mixed"])
+    assert len(mixed) > 400, len(mixed)
+    assert abs(mixed.mean() - cfg.gain_db_mean) < 0.6, mixed.mean()
+    assert (mixed < 0).mean() > 0.72, (mixed < 0).mean()
+
     assert whole_file_gains and not any(whole_file_gains), "whole files are ungained"
+
+
+def test_restricting_gain_to_the_ratio_does_not_move_the_shipped_stream(manifest):
+    """🔴 The change is a no-op at `single_composed_rate = 0.0`.
+
+    That is why it was cheap to make: the shipped config emits no composed
+    voice-only samples, so every gain the shipped stream draws is a genuine
+    voice/music ratio and the drawn specs are byte-identical either way. Pin the
+    premise, so a future change to `single_composed_rate`'s default has to
+    confront it.
+    """
+    specs = list(Sampler(manifest, SamplerConfig()).epoch_specs(4000))
+    solo_composed = [s for s in specs
+                     if s.render_mode == "composed" and s.stratum == "voice-only"]
+    assert not solo_composed, (
+        f"{len(solo_composed)} composed voice-only specs at the shipped default; "
+        f"the ratio restriction is no longer a no-op")
 
 
 @pytest.mark.parametrize("bad", [{"duration_range": (60.0, 4.0)},
