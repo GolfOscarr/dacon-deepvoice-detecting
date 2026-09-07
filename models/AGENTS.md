@@ -148,6 +148,12 @@ equally. Ours weights File .45 / Music .27 / Voice .18. This is a flagged open k
 ([09 B11](../docs/architecture/09-open-questions.md)), and the default is currently *wrong*
 rather than neutral.
 
+🔴 **The clip-vs-`frame_max` blend is not a loss knob.** It is `SEDHeadConfig.clip_weight`, in
+the *model* config, and the loss reads that same field — so training and inference cannot
+disagree about the objective. A separate loss-side `frame_weight` used to exist and was
+documented as the frame-*supervision* weight of `04 §4`, a different quantity; anyone tuning it
+per that section was tuning the blend.
+
 ## Inspecting what you built
 
 ```python

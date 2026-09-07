@@ -22,7 +22,23 @@ from torch import Tensor
 from models.config import LossConfig, ModelConfig
 from models.heads import frame_max
 
-__all__ = ["TARGET_FOR_COLUMN", "multitask_loss", "pairwise_ranking_loss"]
+__all__ = ["TRAIN_CONSUMED_ELSEWHERE", "TARGET_FOR_COLUMN", "multitask_loss",
+           "pairwise_ranking_loss"]
+
+#: TrainConfig fields the loss deliberately does not read, with who owns them.
+#: ⚠️ This exists because the ModelConfig-only version of the ignored-field guard
+#: missed `LossConfig.frame_resolutions_ms`, which was accepted, defaulted,
+#: round-tripped and read nowhere. The guard now walks TrainConfig too.
+TRAIN_CONSUMED_ELSEWHERE = {
+    "stage":        "the training script -- selects the S1..S4 schedule",
+    "teachers":     "the training script -- frozen teachers, never shipped",
+    "epochs":       "the training script",
+    "batch_size":   "the training script",
+    "lr":           "the training script",
+    "weight_decay": "the training script",
+    "precision":    "the training script",
+    "seed":         "the training script",
+}
 
 #: Which ground-truth key each submission column is trained against. Keyed by
 #: column rather than by branch name, because the column is what config
@@ -116,15 +132,23 @@ def multitask_loss(
 
         clip_bce = F.binary_cross_entropy_with_logits(clip, y, reduction="none")
         frame_bce = F.binary_cross_entropy_with_logits(fmax, y, reduction="none")
-        fw = loss_cfg.frame_weight
-        per_sample = (1.0 - fw) * clip_bce + fw * frame_bce
+        # 🔴 The same blend weight inference uses, read from the head's own
+        # config. A separate loss-side knob could drift from it silently, and
+        # then the model would be trained on one objective and scored on another.
+        cw = br_cfg.head.clip_weight
+        per_sample = cw * clip_bce + (1.0 - cw) * frame_bce
 
         sample_mask = None if br_cfg.masked_by is None else targets[br_cfg.masked_by].bool()
         head_loss = _masked_mean(per_sample, sample_mask)
 
         if loss_cfg.ranking_weight:
+            # 🔴 Rank the *blended* logit -- the quantity inference actually ranks
+            # (models.outputs.branch_logit). Ranking `clip` alone would optimise
+            # the ordering of half the submitted score, which defeats the point
+            # of a loss whose entire justification is that EER is pure ranking.
+            blended = cw * clip + (1.0 - cw) * fmax
             head_loss = head_loss + loss_cfg.ranking_weight * pairwise_ranking_loss(
-                clip, y, sample_mask)
+                blended, y, sample_mask)
 
         weight = loss_cfg.weights.get(WEIGHT_KEY_FOR_COLUMN[br_cfg.column], 1.0)
         contribution = weight * head_loss

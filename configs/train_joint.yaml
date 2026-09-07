@@ -15,7 +15,7 @@ loss:
   # ⚠️ Equal weights are INHERITED from PC-Mix, not chosen. Our metric weights
   # File .45 / Music .27 / Voice .18. Flagged open knob: docs/architecture/09 B11.
   weights: {voice: 1.0, music: 1.0, file: 1.0, v_pres: 1.0, m_pres: 1.0}
-  frame_weight: 0.5        # shortcut-exposure knob — frame labels exist only on composed files
   ranking_weight: 0.0      # raise for the S4 rank-polish stage
   distill_weight: 1.0
-  frame_resolutions_ms: [40, 80, 160, 320, 640]
+  # The clip-vs-frame_max blend is SEDHeadConfig.clip_weight, in the *model*
+  # config, and the loss reads that same field so the two cannot diverge.
