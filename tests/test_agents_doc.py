@@ -1,4 +1,4 @@
-"""Execute every Python snippet in metrics/AGENTS.md and models/AGENTS.md.
+"""Execute every Python snippet in metrics/, models/ and training/ AGENTS.md.
 
 A usage guide that has drifted from the code is worse than no guide, and these
 snippets are the first thing anyone copies. Running them is cheap; leaving them

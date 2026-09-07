@@ -68,5 +68,5 @@ the corpus lands.
 | Sampler | ✅ designed; ⬜ blocked on `folds.parquet`, which is blocked on the corpus |
 | Transform registries | ✅ designed; ⚠️ parameters blocked on **G1** `signal_chain.yaml` |
 | Collation | ✅ designed |
-| Invariants | ✅ specified (**I1–I20**); ⬜ not implemented |
+| Invariants | ✅ specified (**I1–I21**); ✅ I1–I21 implemented in `training/` (I16 at the model boundary) |
 | Any of it in code | ⬜ **none** |

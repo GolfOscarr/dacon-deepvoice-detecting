@@ -86,9 +86,17 @@ composition**, and bucketing may be chosen purely for padding efficiency.
   is run, it must run **unbucketed or loosely bucketed**, or it will measure the bucketing rather
   than the loss.
 - 🔴 Bucketing must not fight **C2** ([02 §4](02-sampler.md#4--constraints-the-objective-imposes--c1-and-c2)):
-  a duration bucket is still a batch, and it must meet the per-head present-count floor. Duration
-  and cell are not independent — sequential compositions run long — so bucketing by duration
-  reshapes the per-batch cell mix, and with it `π` and `n_present`.
+  a duration bucket is still a batch, and it must meet the per-head present-count floor. ✅ It does,
+  and for a structural reason rather than a lucky one — **`sample_spec` draws `duration_s` first,
+  from the test distribution `U(4, 60)`, then fits the components into that timeline.** Length
+  cannot depend on the cell because the cell is not drawn yet, so a duration bucket cannot act as a
+  cell filter. Measured over 2,000 specs in four quantile buckets: voice presence
+  0.682 / 0.678 / 0.676 / 0.694, music presence 0.656 / 0.678 / 0.674 / 0.688.
+  ⚠️ This corrects an earlier claim here that "sequential compositions run long", which is false
+  against the shipped sampler: a sequential draw *reuses* the drawn duration rather than
+  concatenating two, so its mean length is 30.85 s against overlap's 30.38 s. Keep the C2 check as
+  cheap insurance — and run it on the **plan**, `audit_specs(specs, batches=training_batches(...))`,
+  since a `batch_size` alone cuts the stream in draw order and bucketing is what changed that.
 
 ⚠️ Bucketing also interacts with the duration-vs-score check that
 [architecture/04 §6.1](../architecture/04-heads-and-pooling.md#61--cross-window-aggregation-and-the-duration-trap)

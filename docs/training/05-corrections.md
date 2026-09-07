@@ -55,7 +55,7 @@ and is not requested by this file.
 | # | Where | What |
 |---|---|---|
 | **A-1** | [`pipelines/02 §4`](../pipelines/02-sampler.md#4--constraints-the-objective-imposes--c1-and-c2) | ✅ **APPLIED.** C1 and C2 added, with the per-head `π` formulas, the derived presence-head bound `p3+p4+p9 ≥ 0.2` / `p1+p2+p9 ≥ 0.2`, and a reference cell mix. 🔴 Applying it **found a defect**: the previous "over-weight cells 6 and 7" guidance violates C1 at 0.820 on both presence heads |
-| **A-2** | [`pipelines/05`](../pipelines/05-invariants.md) | ✅ **APPLIED** as **I8** (C1) and **I9** (C2); the suite renumbered to I1–I20 |
+| **A-2** | [`pipelines/05`](../pipelines/05-invariants.md) | ✅ **APPLIED** as **I8** (C1) and **I9** (C2); the suite renumbered to I1–I20, and later **I1–I21** when generator diversity was moved off I10 ([`pipelines/05 §1`](../pipelines/05-invariants.md)) |
 | **A-3** | [`validation/03`](../validation/03-decision-protocol.md) | ⚠️ Record the **model-selection warning** from ASVspoof 5: the one-class arm produced the *best dev* EER (12.32) and a **+9.24 pt** dev→progress collapse, against softmax's +1.12. We select on VAL; our ±1.7 floor cannot catch a failure of that shape. This is what the sealed PROBE slice is for |
 | **A-4** | [`metrics/breakdown.py`](../../metrics/breakdown.py) | Log `w_c / p_c` per head as a standing diagnostic — the weight in effect is not the weight configured ([02 §4](02-the-loss.md#-the-weight-you-set-is-not-the-weight-in-effect)) |
 

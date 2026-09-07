@@ -42,9 +42,12 @@ regression tests are in `tests/test_audit.py`.
 
 ⚠️ **Invariant numbers are one namespace, not one per section.** `I21` above was numbered `I10`
 until it was noticed that §2 already assigns `I10` to render determinism — two different checks
-under one name, in the doc *and* in `training/audit.py`. It is renumbered past the end (`I20`)
-rather than given a letter suffix, because `I7a`/`I1b`-style suffixes mean "a second check on the
-same statement" and generator diversity is not one.
+under one name, in the doc *and* in `training/audit.py`. It is renumbered past the end of the
+suite rather than given a letter suffix, because `I7a`/`I1b`-style suffixes mean "a second check on
+the same statement" and generator diversity is not one. ⚠️ **`I21` is now the end**, so anything
+that still says the suite tops out at I20 is stale — that phrasing was itself what defined the end,
+and two documents were left behind by it
+([`pipelines/README`](README.md), [`training/05`](../training/05-corrections.md), both corrected).
 
 ⚠️ **I1, I1b, I2b and I3 are the ones that would actually have caught the composition trap**, and neither
 needs a model, a corpus, or a GPU. They should exist before the corpus does.
