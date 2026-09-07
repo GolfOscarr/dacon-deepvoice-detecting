@@ -19,7 +19,7 @@ from models.audio import prepare_waveform
 from models.config import AudioConfig, LossConfig, load_model_config
 from models.losses import TARGET_FOR_COLUMN, multitask_loss
 from models.model import DeepVoiceNet
-from training.collate import collate
+from training.collate import bucket_edges, bucket_of, collate, spec_durations
 from training.dataset import (SpecDataset, eval_batches, fold_manifest,
                               frozen_eval_specs, training_batches)
 from training.folds import FoldConfig, build_folds
@@ -88,7 +88,8 @@ def test_the_frozen_eval_set_is_the_same_rows_every_epoch(corpus):
     root, manifest, index = corpus
     sampler = Sampler(manifest, DRAW, slice_="train")
     specs = frozen_eval_specs(sampler, 6, seed=0)
-    ds = SpecDataset.frozen(specs, index, RenderConfig(root=root), slice_="train")
+    ds = SpecDataset.frozen(specs, index, RenderConfig(root=root), slice_="train",
+                            fold=None)   # this corpus is unfolded; see below
 
     assert ds.is_frozen
     assert ds.specs == specs
@@ -119,7 +120,7 @@ def test_the_eval_plan_is_unbucketed_in_order_and_drops_nothing(corpus):
     root, manifest, index = corpus
     sampler = Sampler(manifest, DRAW, slice_="train")
     ds = SpecDataset.frozen(frozen_eval_specs(sampler, 7, seed=0), index,
-                            RenderConfig(root=root), slice_="train")
+                            RenderConfig(root=root), slice_="train", fold=None)
 
     plan = eval_batches(ds, 3)
     assert [i for b in plan for i in b] == list(range(7)), \
@@ -128,9 +129,84 @@ def test_the_eval_plan_is_unbucketed_in_order_and_drops_nothing(corpus):
         training_batches(ds, 3)
 
 
+def test_the_eval_plan_refuses_a_training_dataset(corpus):
+    """🔴 The mirror of `training_batches` refusing a frozen list.
+
+    A training dataset's specs are redrawn by `set_epoch`, so an eval plan built
+    over it goes stale silently: the indices stay valid and the length is
+    unchanged, so the validation curve keeps plotting while the rows underneath
+    it are a different sample. Nothing downstream can notice.
+    """
+    # ⚠️ Its own dataset, not the module fixture: this test calls `set_epoch`,
+    # and mutating shared state would make every later test depend on ordering.
+    root, manifest, index = corpus
+    own = SpecDataset.from_sampler(Sampler(manifest, DRAW, slice_="train"), 6,
+                                   index, RenderConfig(root=root))
+    with pytest.raises(ValueError, match="redrawn by `set_epoch`"):
+        eval_batches(own, 3)
+
+    # Non-vacuity: the indices really do survive the redraw and come to mean
+    # something else, which is what makes the silent version dangerous.
+    before = own.specs
+    own.set_epoch(own.epoch + 1)
+    assert len(own.specs) == len(before) and own.specs != before
+    assert [s.sample_id for s in own.specs] == [s.sample_id for s in before]
+
+
 def test_the_training_plan_is_bucketed(dataset):
+    """🔴 Asserts the four things a bucketer must satisfy, not just its shape.
+
+    The first version checked `plan and all(len(b) == 2 for b in plan)`, which a
+    plan that ignored the durations, ignored `seed`, or dropped half the stream
+    would pass.
+    """
+    d = spec_durations(dataset.specs)
     plan = training_batches(dataset, 2, n_buckets=2, seed=0)
-    assert plan and all(len(b) == 2 for b in plan)
+    edges = bucket_edges(d, 2)
+
+    assert plan and all(len(b) == 2 for b in plan)             # full batches
+    flat = [i for b in plan for i in b]
+    assert len(flat) == len(set(flat)) and set(flat) <= set(range(len(dataset)))
+    for b in plan:                                             # within one bucket
+        assert len({bucket_of(d[i], edges) for i in b}) == 1
+    assert training_batches(dataset, 2, n_buckets=2, seed=0) == plan   # deterministic
+
+
+def test_the_training_plan_actually_reads_its_seed(dataset):
+    """Mutation: `training_batches` dropping its `seed=` on the floor passed
+    every other test, so every epoch would draw the identical batching."""
+    plans = {tuple(tuple(b) for b in training_batches(dataset, 2, n_buckets=2,
+                                                     seed=k))
+             for k in range(6)}
+    assert len(plans) > 1, "the seed changes nothing -- it is not being read"
+
+
+def test_audit_measures_the_plan_the_optimiser_will_see(dataset, corpus):
+    """Finding 5 at the dataset boundary: `audit(batches=)` reaches I9.
+
+    `training/audit.py` says "audit the same order you train in", and M4 made
+    that order bucketed -- so the argument has to exist and be forwarded.
+    """
+    _, manifest, _ = corpus
+    plan = training_batches(dataset, 2, n_buckets=2, seed=0)
+
+    why = dataset.audit(manifest, batches=plan, min_present=0).results[
+        "I9_C2_present_count_floor"][1]
+    assert f"{len(plan)} batch(es)" in why and "supplied plan" in why
+
+    draw_order = dataset.audit(manifest, batch_size=2, min_present=0).results[
+        "I9_C2_present_count_floor"][1]
+    assert "draw order" in draw_order
+
+
+def test_the_audit_batch_size_is_not_a_silent_default(dataset, corpus):
+    """`batch_size` used to be set by `kw.setdefault(...)` and read by nothing:
+    changing 32 to 2 passed the whole suite."""
+    _, manifest, _ = corpus
+    for size in (2, 4):
+        why = dataset.audit(manifest, batch_size=size, min_present=0).results[
+            "I9_C2_present_count_floor"][1]
+        assert f"batch_size={size}" in why, why
 
 
 # --------------------------------------------------------------------------- #
@@ -196,6 +272,11 @@ def test_the_fold_containment_is_measured_by_I5_not_rebuilt(folded):
     docs/pipelines/05 §5: do not rebuild a check that exists. The dataset's job
     is to wire the arguments so the existing check can see the stream -- and
     called without a manifest, I5 must report SKIP, never PASS.
+
+    ⚠️ On a frame that `fold_manifest` has already resolved, `fold=None` is the
+    *honest* argument and I5 passes -- but the report has to say why, because the
+    same argument on an unresolved frame means the fold clause never ran. The
+    next test is that half.
     """
     corpus, folds = folded
     train = fold_manifest(corpus, folds, fold=0)
@@ -206,9 +287,72 @@ def test_the_fold_containment_is_measured_by_I5_not_rebuilt(folded):
     ok, why = ds.audit(train).results["I5_split_safety"]
     assert ok, why
     assert not why.startswith("SKIPPED")
+    assert "vacuous" in why, \
+        "a PASS with no fold given must say why the fold clause added nothing"
 
     blind = ds.audit().results["I5_split_safety"]
     assert blind[1].startswith("SKIPPED"), "a check with no manifest must not pass"
+
+
+def test_an_unresolved_frame_without_a_fold_reports_skip_not_pass(folded):
+    """🔴 The frozen eval set is the instrument this project trusts over the
+    leaderboard, and it defaulted to `fold=None` -- so I5's fold clause did not
+    run and the report said PASS. `AuditReport.SKIP` exists precisely for this,
+    and the convention existing while being violated here is worse than the gap.
+
+    An *unresolved* frame spans several folds, so `fold=None` leaves half of a
+    two-clause invariant unevaluated. It must read SKIP.
+    """
+    corpus, folds = folded
+    keyed = folds.set_index("file_id")
+    unresolved = corpus.assign(
+        slice=keyed["slice"].reindex(corpus.file_id.astype(str)).to_numpy(),
+        fold=keyed["fold"].reindex(corpus.file_id.astype(str)).to_numpy())
+    assert unresolved.loc[unresolved["slice"] == "train_val", "fold"].nunique() > 1
+
+    resolved = fold_manifest(corpus, folds, fold=0)
+    sampler = Sampler(resolved, SamplerConfig(), slice_="train")
+    specs = list(sampler.epoch_specs(200, seed=0))
+
+    blind = SpecDataset.frozen(specs, ManifestIndex.from_frame(resolved),
+                               slice_="train_val", fold=None)
+    passed, why = blind.audit(unresolved).results["I5_split_safety"]
+    assert why.startswith("SKIPPED"), why
+    assert "fold half of I5 did not run" in why
+
+    # Non-vacuity: naming the fold makes the same check run and report.
+    named = SpecDataset.frozen(specs, ManifestIndex.from_frame(resolved),
+                               slice_="train_val", fold=0)
+    _, ran = named.audit(unresolved).results["I5_split_safety"]
+    assert not ran.startswith("SKIPPED") and "fold=0" in ran
+
+
+def test_an_omitted_fold_is_not_the_same_as_a_stated_one(folded):
+    """🔴 "I decided the clause is vacuous" and "I never thought about it" must
+    not be the same argument.
+
+    `None` is a *meaningful* value for `fold` -- on a `fold_manifest`-resolved
+    frame the clause genuinely has nothing to add -- so a plain `None` default
+    made the two indistinguishable, and the frozen eval set took the PASS. The
+    sentinel splits them: stated `None` passes and says the clause was vacuous,
+    an omitted `fold` reports SKIP no matter how the manifest looks.
+    """
+    corpus, folds = folded
+    resolved = fold_manifest(corpus, folds, fold=0)
+    specs = list(Sampler(resolved, SamplerConfig(), slice_="train").epoch_specs(200,
+                                                                               seed=0))
+    index = ManifestIndex.from_frame(resolved)
+
+    omitted = SpecDataset.frozen(specs, index, slice_="train")
+    stated = SpecDataset.frozen(specs, index, slice_="train", fold=None)
+    assert omitted.fold == stated.fold is None, "the two must agree on the value"
+
+    why_omitted = omitted.audit(resolved).results["I5_split_safety"][1]
+    why_stated = stated.audit(resolved).results["I5_split_safety"][1]
+    assert why_omitted.startswith("SKIPPED"), why_omitted
+    assert "not a decision" in why_omitted
+    assert not why_stated.startswith("SKIPPED"), why_stated
+    assert "vacuous" in why_stated
 
 
 def test_the_containment_check_can_fail(folded):
@@ -300,7 +444,8 @@ def test_a_batch_with_no_present_component_still_gives_a_finite_loss(corpus, mod
         duration_s=4.5, cell=9, render_mode="composed", structure="overlap",
         components=(ComponentDraw(str(fid), "noise", 0.0, 4.5, 0.0, 0.0),))
         for i, fid in enumerate(noise_ids[:2])]
-    ds = SpecDataset.frozen(specs, index, RenderConfig(root=root), slice_="train")
+    ds = SpecDataset.frozen(specs, index, RenderConfig(root=root), slice_="train",
+                            fold=None)
     batch = collate([ds[i] for i in range(len(ds))])
 
     assert float(batch["targets"]["voice_present"].sum()) == 0.0

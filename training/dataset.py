@@ -33,9 +33,26 @@ from training.sampler import Sampler
 from training.spec import SampleSpec
 
 __all__ = [
-    "SpecDataset", "eval_batches", "fold_manifest", "frozen_eval_specs",
-    "training_batches",
+    "UNSET", "SpecDataset", "eval_batches", "fold_manifest",
+    "frozen_eval_specs", "training_batches",
 ]
+
+
+class _Unset:
+    """Sentinel type: "this argument was never passed", distinct from ``None``.
+
+    🔴 Needed because ``None`` is a *meaningful* value for ``fold`` -- it says
+    "the frame is fold-resolved, the clause is vacuous" -- so a plain ``None``
+    default would make "I decided" and "I never thought about it" the same
+    argument, which is how the frozen eval set came to report a PASS it had not
+    earned.
+    """
+
+    def __repr__(self) -> str:                                # pragma: no cover
+        return "UNSET"
+
+
+UNSET = _Unset()
 
 
 def fold_manifest(manifest: pd.DataFrame, folds: pd.DataFrame, *,
@@ -101,6 +118,10 @@ class SpecDataset(Dataset):
         self.slice_, self.fold = slice_, fold
         self._sampler, self._n = sampler, n
         self.seed, self.epoch = seed, epoch
+        #: Whether a fold was named. `__init__` takes `fold` positionally in the
+        #: keyword sense -- it is required there -- so anything built this way
+        #: has stated one; `frozen` is where it can be omitted.
+        self._fold_stated = True
         if not self._specs:
             raise ValueError("SpecDataset needs at least one spec")
 
@@ -120,9 +141,29 @@ class SpecDataset(Dataset):
     def frozen(cls, specs: Sequence[SampleSpec],
                index: ManifestIndex | pd.DataFrame,
                cfg: RenderConfig | None = None, *,
-               slice_: str = "val", fold: int | None = None) -> SpecDataset:
-        """The evaluation mode: this exact spec list, for as long as it lives."""
-        return cls(specs, index, cfg, slice_=slice_, fold=fold)
+               slice_: str = "val", fold: int | None | _Unset = UNSET) -> SpecDataset:
+        """The evaluation mode: this exact spec list, for as long as it lives.
+
+        🔴 ``fold`` distinguishes **stated** from **omitted**, and that is the
+        whole point. It used to default to ``None``, and a review found the
+        consequence: the frozen evaluation set -- the instrument this project
+        trusts over the leaderboard -- audited with the fold half of I5 inactive
+        and reported PASS, in a module whose own convention is that a skipped
+        check must never read as a pass.
+
+        * ``fold=k`` -- the specs were drawn under fold ``k``; I5 checks both of
+          its clauses.
+        * ``fold=None`` **explicitly** -- "the frame is already fold-resolved
+          (`fold_manifest`), so the clause has nothing to add". I5 passes and
+          says the clause was vacuous.
+        * omitted -- nobody decided. `audit` reports I5 as **SKIP**, whatever the
+          manifest looks like. Not passing an argument is not an assertion.
+        """
+        stated = not isinstance(fold, _Unset)
+        ds = cls(specs, index, cfg, slice_=slice_,
+                 fold=None if not stated else fold)
+        ds._fold_stated = stated
+        return ds
 
     # -- the dataset protocol ------------------------------------------------ #
 
@@ -169,16 +210,35 @@ class SpecDataset(Dataset):
 
     # -- the audits ---------------------------------------------------------- #
 
-    def audit(self, manifest: pd.DataFrame | None = None, **kw: Any) -> AuditReport:
+    def audit(self, manifest: pd.DataFrame | None = None, *,
+              batches: Sequence[Sequence[int]] | None = None,
+              **kw: Any) -> AuditReport:
         """`audit_specs` over this dataset's specs, with slice and fold wired in.
 
         🔴 Forwarding `slice_`/`fold` is what makes **I5** run rather than SKIP.
         Called without a manifest it reports SKIP for I4, I5 and I21 -- which is
         the `AuditReport.SKIP` convention, never a pass.
+
+        🔴 Pass ``batches`` -- the plan from `training_batches` -- to audit **C2
+        on the batches the optimiser will actually see**. `audit_specs` otherwise
+        cuts the stream in draw order, and M4 made the training order bucketed by
+        duration, so draw-order slices are batches that never get stepped on.
+        `training/audit.py`'s own note says "audit the same order you train in";
+        this is the argument that makes that possible.
         """
-        kw.setdefault("batch_size", 32)
-        return audit_specs(self._specs, manifest=manifest,
-                           slice_=self.slice_, fold=self.fold, **kw)
+        report = audit_specs(self._specs, manifest=manifest, slice_=self.slice_,
+                             fold=self.fold, batches=batches, **kw)
+        if not self._fold_stated:
+            # 🔴 No fold was ever named, so I5's second clause rests on nothing a
+            # caller decided. Downgrade rather than report a PASS: the
+            # `AuditReport.SKIP` convention exists because a review found I7
+            # printing PASS for a check that existed nowhere.
+            passed, why = report.results["I5_split_safety"]
+            if not why.startswith(AuditReport.SKIP):
+                report.results["I5_split_safety"] = (passed, AuditReport.SKIP + (
+                    f"{why}; but no fold was ever passed to SpecDataset.frozen, "
+                    f"so the fold half of I5 rests on a default, not a decision"))
+        return report
 
 
 # --------------------------------------------------------------------------- #
@@ -211,6 +271,13 @@ def eval_batches(dataset: SpecDataset, batch_size: int) -> list[list[int]]:
     buckets it. In order, so a run is comparable row by row with the previous
     one; nothing dropped, because every eval row must be scored.
     """
+    if not dataset.is_frozen:
+        raise ValueError(
+            "refusing to build an eval plan over a training dataset: its spec "
+            "list is redrawn by `set_epoch`, so the plan would silently start "
+            "scoring a different set at the same length -- a validation curve "
+            "whose rows change underneath it. Freeze it with "
+            "SpecDataset.frozen(frozen_eval_specs(...))")
     n = len(dataset)
     return [list(range(start, min(start + batch_size, n)))
             for start in range(0, n, batch_size)]

@@ -268,7 +268,8 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
                 slice_: str | None = None, fold: int | None = None,
                 tol: float = 0.02, batch_size: int = 32, min_present: int = 8, marginal_tol: float = 0.02,
                 eval_floors: bool = False, class_floor: int = 1_200,
-                cell_floor: int = 100, min_families: int = 3) -> AuditReport:
+                cell_floor: int = 100, min_families: int = 3,
+                batches: Sequence[Sequence[int]] | None = None) -> AuditReport:
     """Run I1-I9 over a drawn stream."""
     if not specs:
         raise ValueError("audit_specs needs at least one spec")
@@ -471,10 +472,33 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
         leaked = {c.file_id for s in specs for c in s.components
                   if c.file_id not in allowed}
         where = f"slice={slice_!r}" + (f" fold={fold!r}" if fold is not None else "")
-        r["I5_split_safety"] = (
-            not leaked,
-            f"{len(leaked)} file(s) drawn from outside {where}"
-            + (f": {sorted(leaked)[:3]}" if leaked else ""))
+
+        # 🔴 I5 is a TWO-clause statement ("outside the active slice *and*
+        # fold"), so a run with `fold=None` must not report a bare PASS for the
+        # half it did not evaluate -- `AuditReport.SKIP` exists for exactly this
+        # and a review found the frozen evaluation set, the instrument this
+        # project trusts over the leaderboard, passing that way.
+        #
+        # ⚠️ Whether the fold clause is live is MEASURED, not assumed. After
+        # `folds.apply_folds(..., fold=k)` the fold is baked into `slice` and the
+        # frame's `fold` column is uniformly `k`, so the clause has nothing left
+        # to say and PASS is honest. On an unresolved frame the column spans
+        # several folds, the clause is real, and skipping it silently is the
+        # failure mode.
+        spanned = sorted(manifest.loc[sel, "fold"].dropna().unique().tolist()) \
+            if "fold" in manifest.columns else []
+        if fold is None and len(spanned) > 1:
+            r["I5_split_safety"] = (True, AuditReport.SKIP + (
+                f"slice={slice_!r} checked and clean ({len(leaked)} leak(s)), but "
+                f"no fold given for a manifest spanning folds {spanned}: the fold "
+                f"half of I5 did not run"))
+        else:
+            resolved = "" if fold is not None else \
+                f"; fold clause vacuous (the frame is one fold: {spanned})"
+            r["I5_split_safety"] = (
+                not leaked,
+                f"{len(leaked)} file(s) drawn from outside {where}"
+                + (f": {sorted(leaked)[:3]}" if leaked else "") + resolved)
     else:
         r["I5_split_safety"] = (True, AuditReport.SKIP + "no manifest/slice given")
 
@@ -581,12 +605,13 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
         r["I21_generator_diversity"] = (True, AuditReport.SKIP + "no manifest given")
 
     # -- I9 (C2): per-head present-count floor per batch --------------------- #
-    # ⚠️ Two stated assumptions. Batches are cut in DRAW order, which is the
-    # training order only if the DataLoader does not reshuffle -- audit the same
-    # order you train in. And the final partial batch IS included: it is the
-    # smallest and therefore the likeliest to starve a head.
-    starved: Counter = Counter()
-    n_batches = 0
+    # 🔴 "Audit the same order you train in" is the whole assumption, and M4
+    # changed the training order: `training.dataset.training_batches` buckets by
+    # duration, so contiguous draw-order slices are batches the optimiser never
+    # sees. Pass `batches=` -- the index plan itself -- and this measures what is
+    # actually stepped on. Without it the check still cuts draw order, which is
+    # correct for an unbucketed loader and is what the eval path uses.
+    #
     # ⚠️ The trailing partial batch is EXCLUDED, and that is a reversal. It was
     # included on the argument that it is smallest and likeliest to starve a
     # head -- but C2's floor is absolute (the gradient norm scales as 1/sqrt(n),
@@ -594,10 +619,21 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
     # a seed sweep found 1/188 batches failing on a clean corpus for exactly
     # this reason. Training uses `drop_last=True`, so that batch is never
     # stepped on; auditing it measures a batch the optimiser will not see.
-    dropped_tail = n % batch_size
-    for start in range(0, n - batch_size + 1, batch_size):
-        batch = specs[start:start + batch_size]
-        n_batches += 1
+    starved: Counter = Counter()
+    if batches is None:
+        groups = [specs[start:start + batch_size]
+                  for start in range(0, n - batch_size + 1, batch_size)]
+        dropped_tail = n % batch_size
+        plan = f"draw order, batch_size={batch_size}"
+    else:
+        bad = [i for b in batches for i in b if not 0 <= i < n]
+        if bad:
+            raise ValueError(f"batches index outside the spec list: {bad[:3]}")
+        groups = [[specs[i] for i in b] for b in batches]
+        dropped_tail = n - len({i for b in batches for i in b})
+        sizes = sorted({len(b) for b in batches})
+        plan = f"supplied plan, {len(batches)} batch(es) of {sizes}"
+    for batch in groups:
         for head, key in (("voice", "voice_present"), ("music", "music_present")):
             if sum(getattr(s, key) for s in batch) < min_present:
                 starved[head] += 1
@@ -606,8 +642,9 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
     # accepts exactly the case C2 exists to prevent.
     r["I9_C2_present_count_floor"] = (
         not starved,
-        f"{sum(starved.values())}/{n_batches} batch(es) below {min_present} present "
-        f"samples for a masked head" + (f": {dict(starved)}" if starved else "")
+        f"{sum(starved.values())}/{len(groups)} batch(es) below {min_present} present "
+        f"samples for a masked head ({plan})"
+        + (f": {dict(starved)}" if starved else "")
         + (f"; {dropped_tail} trailing spec(s) excluded (drop_last)" if dropped_tail else ""))
     return AuditReport(r)
 
