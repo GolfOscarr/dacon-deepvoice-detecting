@@ -327,3 +327,101 @@ def test_source_offset_is_not_a_feature():
     from training.audit import _feature_frame
     _, names = _feature_frame([_spec(1, sample_id=i) for i in range(50)])
     assert not any("offset" in n for n in names), names
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 review findings 2 and 4: checks that could not fail, and one that lied
+
+def test_I4_is_falsifiable(manifest):
+    """The old I4 compared `s.file_fake` to the expression that defines it.
+
+    A brute force over all nine cells found 0 constructible specs that could
+    trip it. It now cross-checks against the component's POOL, an independent
+    source: pool B is fake voice, so it must not back a cell-1 (voice REAL)
+    sample.
+    """
+    real_voice = str(manifest[manifest.pool == "A"].file_id.iloc[0])
+    fake_voice = str(manifest[manifest.pool == "B"].file_id.iloc[0])
+
+    def composed_cell1(sample_id, file_id):
+        return SampleSpec(
+            sample_id=sample_id, epoch=0, seed=0, scheme_version="v1",
+            duration_s=10.0, cell=1, render_mode="composed", structure="overlap",
+            components=(ComponentDraw(file_id=file_id, role="voice",
+                                      source_offset_s=0.0, duration_s=10.0,
+                                      target_start_s=0.0, gain_db=0.0),))
+
+    clean = [composed_cell1(i, real_voice) for i in range(300)]
+    assert audit_specs(clean, manifest=manifest,
+                       slice_="train").results["I4_component_pools_imply_the_labels"][0]
+
+    trapped = [composed_cell1(i, fake_voice) for i in range(300)]
+    passed, why = audit_specs(trapped, manifest=manifest,
+                              slice_="train").results["I4_component_pools_imply_the_labels"]
+    assert not passed, "a fake-voice component backing cell 1 must be caught"
+    assert "cell 1" in why, why
+
+
+def test_I6_is_gone_not_silently_passing():
+    """"Labels come from the cell" is a property of the TYPE, not of a stream.
+
+    It is asserted in tests/test_spec.py (SampleSpec has no label fields). A
+    per-spec loop over derived properties can only ever pass.
+    """
+    report = audit_specs([_spec(1, sample_id=i) for i in range(300)])
+    assert not any(k.startswith("I6") for k in report.results), report.results.keys()
+
+
+def test_I7_reports_a_skip_not_a_pass_for_the_size_floors(manifest, specs):
+    """🔴 It used to print PASS for a check implemented nowhere."""
+    report = audit_specs(specs, manifest=manifest, slice_="train")
+    assert "I7_eval_size_floors" in report.skipped
+    assert "PASS  I7_eval_size_floors" not in str(report)
+    assert "SKIP  I7_eval_size_floors" in str(report)
+
+
+def test_I7_size_floors_run_when_asked(manifest, specs):
+    """VG1 A8/A9: >=1,200 per class per masked pool, >=100 per cell."""
+    # 6k specs clear the floors; a thin stream must not.
+    ok = audit_specs(specs, manifest=manifest, slice_="train", eval_floors=True)
+    assert ok.results["I7_eval_size_floors"][0], ok.results["I7_eval_size_floors"][1]
+
+    thin = audit_specs(specs[:800], manifest=manifest, slice_="train", eval_floors=True)
+    passed, why = thin.results["I7_eval_size_floors"]
+    assert not passed, "800 specs cannot meet a 1,200-per-class floor"
+    assert "VG1 A8/A9" in why
+
+
+def test_I5_checks_the_fold_not_only_the_slice(manifest):
+    """Documented I5 is slice AND the grouping keys; it implemented only slice."""
+    import numpy as np
+    m = manifest.copy()
+    rng = np.random.default_rng(0)
+    m["fold"] = rng.integers(0, 2, len(m))
+    specs = list(Sampler(m, fold=0).epoch_specs(400))
+    # audited against the OTHER fold: every draw is now out of bounds
+    report = audit_specs(specs, manifest=m, slice_="train", fold=1)
+    assert not report.results["I5_split_safety"][0]
+    assert "fold=1" in report.results["I5_split_safety"][1]
+
+
+def test_I10_catches_generator_monoculture(manifest):
+    """🔴 domain_cap is a weight over what is PRESENT.
+
+    A fold split leaving TRAIN generator-poor reproduces the DOSS failure with a
+    green audit. Nothing measured realized family diversity before.
+    """
+    mono = manifest.copy()
+    keep = mono.artifact_family.isin(["hifigan", "suno_v3"]) | mono.artifact_family.isna()
+    mono.loc[~keep, "slice"] = "val"
+    report = run_audit(Sampler(mono), n=4000, manifest=mono)
+    assert not report.ok
+    assert "I10_generator_diversity" in report.failures
+    assert "POOR" in report.results["I10_generator_diversity"][1]
+
+
+def test_I10_passes_on_a_diverse_slice(manifest):
+    report = run_audit(Sampler(manifest), n=4000, manifest=manifest)
+    passed, why = report.results["I10_generator_diversity"]
+    assert passed, why
+    assert "effective" in why, "the measured diversity must be visible in the report"

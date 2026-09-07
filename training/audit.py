@@ -36,9 +36,23 @@ class AuditReport:
 
     results: dict[str, tuple[bool, str]]
 
+    #: A detail beginning with this marks a check that did not run. 🔴 A skipped
+    #: check must never read as a pass: a review found `I7` printing PASS for a
+    #: size floor that was not implemented anywhere.
+    SKIP = "SKIPPED: "
+
     @property
     def ok(self) -> bool:
         return all(passed for passed, _ in self.results.values())
+
+    @property
+    def skipped(self) -> dict[str, str]:
+        return {k: why for k, (_, why) in self.results.items()
+                if why.startswith(self.SKIP)}
+
+    @property
+    def ran(self) -> dict[str, tuple[bool, str]]:
+        return {k: v for k, v in self.results.items() if k not in self.skipped}
 
     @property
     def failures(self) -> dict[str, str]:
@@ -50,7 +64,9 @@ class AuditReport:
             raise AssertionError(f"spec audit failed:\n{lines}")
 
     def __str__(self) -> str:
-        return "\n".join(f"{'PASS' if p else 'FAIL'}  {k}: {why}"
+        def status(passed: bool, why: str) -> str:
+            return "SKIP" if why.startswith(self.SKIP) else ("PASS" if passed else "FAIL")
+        return "\n".join(f"{status(p, why)}  {k}: {why}"
                          for k, (p, why) in sorted(self.results.items()))
 
 
@@ -161,7 +177,7 @@ def _metadata_shortcut(specs: Sequence[SampleSpec]) -> tuple[bool, str]:
     """
     specs = [s for s in specs if s.cell != 9]
     if not specs:
-        return True, "skipped: no cells 1-8 in the stream"
+        return True, AuditReport.SKIP + "no cells 1-8 in the stream"
 
     y_all = np.array([s.file_fake for s in specs])
     X_all, names = _feature_frame(specs)
@@ -179,7 +195,7 @@ def _metadata_shortcut(specs: Sequence[SampleSpec]) -> tuple[bool, str]:
             scored.append((auc, stratum))
 
     if not scored:
-        return True, "skipped: not enough samples to estimate an AUC"
+        return True, AuditReport.SKIP + "not enough samples to estimate an AUC"
     worst, where = max(scored)
     detail = ", ".join(f"{w}={a:.4f}" for a, w in sorted(scored, key=lambda t: -t[0]))
     return (worst < SHORTCUT_AUC_GATE,
@@ -188,8 +204,10 @@ def _metadata_shortcut(specs: Sequence[SampleSpec]) -> tuple[bool, str]:
 
 
 def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = None,
-                slice_: str | None = None, tol: float = 0.02,
-                batch_size: int = 32, min_present: int = 2) -> AuditReport:
+                slice_: str | None = None, fold: int | None = None,
+                tol: float = 0.02, batch_size: int = 32, min_present: int = 2,
+                eval_floors: bool = False, class_floor: int = 1_200,
+                cell_floor: int = 100, min_families: int = 3) -> AuditReport:
     """Run I1-I9 over a drawn stream."""
     if not specs:
         raise ValueError("audit_specs needs at least one spec")
@@ -281,8 +299,8 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
         if len(eligible) < 20:
             r["I3_real_components_on_both_sides"] = (
                 True,
-                f"skipped: only {len(eligible)} real component(s) drawn twice or more "
-                f"out of {len(drawn_real)}; draw more specs to test this")
+                AuditReport.SKIP + f"only {len(eligible)} real component(s) drawn twice "
+                f"or more out of {len(drawn_real)}; draw more specs to test this")
         else:
             r["I3_real_components_on_both_sides"] = (
                 frac >= 0.5,
@@ -290,38 +308,110 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
                 f"2+ times appear with both FILE_FAKE=0 and =1 "
                 f"({len(drawn_real)} distinct real components drawn)")
     else:
-        r["I3_real_components_on_both_sides"] = (True, "skipped: no manifest given")
+        r["I3_real_components_on_both_sides"] = (True, AuditReport.SKIP + "no manifest given")
 
-    # -- I4: file_fake agrees with metrics.dacon ---------------------------- #
-    bad = [s.sample_id for s in specs
-           if s.file_fake != cell_labels(s.cell)["file_fake"]]
-    r["I4_file_fake_matches_metrics"] = (
-        not bad, f"{len(bad)} spec(s) disagree with metrics.dacon.file_fake_label")
+    # -- I4: the drawn components' POOLS must imply the cell's labels -------- #
+    # 🔴 Rewritten. The old check compared `s.file_fake` to
+    # `cell_labels(s.cell)["file_fake"]` -- but `SampleSpec.file_fake` *is* that
+    # expression, so it was unfalsifiable: a brute force over all nine cells
+    # found 0 constructible specs that could trip it.
+    #
+    # This version cross-checks against an INDEPENDENT source: the pool each
+    # drawn component actually came from. A sampler that drew a fake-voice
+    # component (pool B) for cell 1 (voice-only REAL) would mislabel the sample,
+    # and nothing else in the audit would see it.
+    if manifest is not None:
+        pool_of = manifest.set_index("file_id").pool.to_dict()
+        role_of_pool = {"A": ("voice", 0), "B": ("voice", 1),
+                        "C": ("music", 0), "D": ("music", 1), "E": ("noise", 0)}
+        wrong: list[str] = []
+        for s in specs:
+            if s.render_mode != "composed":
+                continue                      # whole-file rows carry their own cell
+            for c in s.components:
+                pool = pool_of.get(c.file_id)
+                if pool is None or pool not in role_of_pool:
+                    continue
+                role, fake = role_of_pool[pool]
+                if role != c.role:
+                    wrong.append(f"{c.file_id}: pool {pool} used as {c.role!r}")
+                elif role == "voice" and s.voice_fake is not None and fake != s.voice_fake:
+                    wrong.append(f"{c.file_id}: pool {pool} in cell {s.cell} "
+                                 f"(voice_fake={s.voice_fake})")
+                elif role == "music" and s.music_fake is not None and fake != s.music_fake:
+                    wrong.append(f"{c.file_id}: pool {pool} in cell {s.cell} "
+                                 f"(music_fake={s.music_fake})")
+        r["I4_component_pools_imply_the_labels"] = (
+            not wrong,
+            f"{len(wrong)} component(s) whose pool contradicts the cell's labels"
+            + (f": {wrong[:3]}" if wrong else ""))
+    else:
+        r["I4_component_pools_imply_the_labels"] = (
+            True, AuditReport.SKIP + "no manifest given")
 
     # -- I5: no drawn file lies outside the active slice --------------------- #
     if manifest is not None and slice_ is not None:
-        allowed = set(manifest.loc[manifest["slice"] == slice_, "file_id"].astype(str))
+        # 🔴 Now checks the FOLD as well as the slice, and reports which grouping
+        # keys the drawn stream actually spans. The documented I5 is "outside the
+        # active slice; family/source/speaker/pair/dup constraints hold" -- the
+        # first version implemented only the first clause.
+        sel = manifest["slice"] == slice_
+        if fold is not None:
+            sel &= manifest["fold"] == fold
+        allowed = set(manifest.loc[sel, "file_id"].astype(str))
         leaked = {c.file_id for s in specs for c in s.components
                   if c.file_id not in allowed}
+        where = f"slice={slice_!r}" + (f" fold={fold!r}" if fold is not None else "")
         r["I5_split_safety"] = (
             not leaked,
-            f"{len(leaked)} file(s) drawn from outside slice={slice_!r}"
+            f"{len(leaked)} file(s) drawn from outside {where}"
             + (f": {sorted(leaked)[:3]}" if leaked else ""))
     else:
-        r["I5_split_safety"] = (True, "skipped: no manifest/slice given")
+        r["I5_split_safety"] = (True, AuditReport.SKIP + "no manifest/slice given")
 
-    # -- I6: labels are a function of the cell alone ------------------------- #
-    mismatched = [s.sample_id for s in specs
-                  if (s.voice_present, s.music_present, s.voice_fake, s.music_fake)
-                  != CELL_TABLE[s.cell]]
-    r["I6_labels_come_from_the_cell"] = (
-        not mismatched, f"{len(mismatched)} spec(s) whose labels disagree with the cell")
+    # -- I6 is deliberately absent ------------------------------------------- #
+    # 🔴 There used to be an "I6_labels_come_from_the_cell" here comparing the
+    # four label properties to CELL_TABLE[s.cell]. Those properties ARE literal
+    # indexes into CELL_TABLE (spec.py), so it could not fail -- a brute force
+    # over all nine cells found 0 constructible specs that trip it. "Labels are
+    # a function of the cell alone" is a property of the TYPE, and it is
+    # asserted where it belongs: tests/test_spec.py asserts SampleSpec has no
+    # label fields at all. A per-spec loop over derived properties adds nothing
+    # but false confidence.
 
-    # -- I7: cells 6 and 7 are never rendered as whole files ----------------- #
+    # -- I7: the VG1 size floors, and the cheap tripwire that used to squat here #
     scraped = [s.sample_id for s in specs
                if s.cell in (6, 7) and s.render_mode != "composed"]
-    r["I7_cells_6_7_always_composed"] = (
-        not scraped, f"{len(scraped)} spec(s) in cells 6/7 not composed")
+    r["I7a_cells_6_7_always_composed"] = (
+        not scraped,
+        f"{len(scraped)} spec(s) in cells 6/7 not composed. ⚠️ defense-in-depth "
+        f"only: SampleSpec refuses to construct one, so this cannot fail today")
+
+    # 🔴 The real I7. It previously printed PASS for a check that existed
+    # nowhere -- the "adjacent quantity" pattern docs/pipelines/05 opens by
+    # warning about. VG1 A8/A9: >=1,200 per class per masked head pool, and
+    # >=100 per cell. These bind on an EVALUATION stream; a training stream is
+    # not required to meet them, so it is reported as skipped, not as a pass.
+    if eval_floors:
+        short: list[str] = []
+        for head, pool, pred in (
+                ("voice", [s for s in specs if s.voice_present], lambda s: s.voice_fake == 1),
+                ("music", [s for s in specs if s.music_present], lambda s: s.music_fake == 1),
+                ("file", specs, lambda s: s.file_fake == 1)):
+            pos = sum(1 for s in pool if pred(s))
+            neg = len(pool) - pos
+            if min(pos, neg) < class_floor:
+                short.append(f"{head}: {pos} fake / {neg} real (need {class_floor} each)")
+        per_cell = Counter(s.cell for s in specs)
+        thin = {c: per_cell.get(c, 0) for c in CELL_TABLE if per_cell.get(c, 0) < cell_floor}
+        r["I7_eval_size_floors"] = (
+            not short and not thin,
+            f"VG1 A8/A9: {'; '.join(short) if short else 'class floors met'}"
+            + (f"; cells below {cell_floor}: {thin}" if thin else ""))
+    else:
+        r["I7_eval_size_floors"] = (
+            True, AuditReport.SKIP + "VG1 A8/A9 bind on an evaluation stream; "
+            "pass eval_floors=True when auditing val_specs")
 
     # -- I8 (C1): per-head positive rate in [0.2, 0.8], after masking -------- #
     lo, hi = C1_BOUNDS
@@ -339,6 +429,47 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
         not out,
         "measured " + ", ".join(f"{h}={v:.3f}" for h, v in rates.items())
         + f"; bounds [{lo}, {hi}]" + (f"; OUT: {out}" if out else ""))
+
+    # -- I10: realized generator diversity in the drawn stream --------------- #
+    # 🔴 `domain_cap` is a weight over what is PRESENT. It cannot create
+    # diversity that the slice does not have, so a fold split leaving TRAIN
+    # generator-poor reproduces the DOSS failure (6.4k h naive 3.29% vs 0.2k h
+    # balanced 2.77%) with a green audit and superb local CV.
+    #
+    # ⚠️ Measured against an ABSOLUTE floor, not against what the slice happens
+    # to hold: a monoculture slice trivially realizes 100% of its own two
+    # families. Below ~3 families you cannot measure cross-generator
+    # generalization at all, and that is the binding constraint of this
+    # competition -- so the default is deliberately low, catching catastrophe
+    # rather than tuning balance.
+    if manifest is not None:
+        fam_of = manifest.set_index("file_id").artifact_family.to_dict()
+        by_role: dict[str, Counter] = defaultdict(Counter)
+        for spec in specs:
+            for c in spec.components:
+                fam = fam_of.get(c.file_id)
+                if isinstance(fam, str):
+                    by_role[c.role][fam] += 1
+        parts_: list[str] = []
+        poor: list[str] = []
+        for role in ("voice", "music"):
+            counts = by_role.get(role, Counter())
+            n_fam = len(counts)
+            if counts:
+                w = np.array(list(counts.values()), dtype=float)
+                w /= w.sum()
+                eff = float(np.exp(-(w * np.log(w)).sum()))
+            else:
+                eff = 0.0
+            parts_.append(f"{role}: {n_fam} families (effective {eff:.1f})")
+            if n_fam < min_families:
+                poor.append(f"{role} has {n_fam} < {min_families}")
+        r["I10_generator_diversity"] = (
+            not poor,
+            "; ".join(parts_) + f"; floor {min_families} per fake role"
+            + (f"; POOR: {'; '.join(poor)}" if poor else ""))
+    else:
+        r["I10_generator_diversity"] = (True, AuditReport.SKIP + "no manifest given")
 
     # -- I9 (C2): per-head present-count floor per batch --------------------- #
     starved: Counter = Counter()
@@ -360,4 +491,5 @@ def run_audit(sampler: Sampler, n: int = 20_000, epoch: int = 0, seed: int = 0,
               manifest: pd.DataFrame | None = None, **kw) -> AuditReport:
     """Draw `n` specs and audit them. Cheap: no audio is decoded."""
     specs = list(sampler.epoch_specs(n, epoch=epoch, seed=seed))
-    return audit_specs(specs, manifest=manifest, slice_=sampler.slice_, **kw)
+    return audit_specs(specs, manifest=manifest, slice_=sampler.slice_,
+                       fold=sampler.fold, **kw)
