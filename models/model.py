@@ -95,9 +95,11 @@ class DeepVoiceNet(nn.Module):
             return encoded[br.sources[0]]
 
         target_frames = encoded[br.align_to][0].shape[1]
+        fps_tgt = self.frontends[br.align_to].fps
         feats, masks = [], []
         for src in br.sources:
-            f, m = align_time(*encoded[src], target_frames)
+            f, m = align_time(*encoded[src], target_frames,
+                              self.frontends[src].fps, fps_tgt)
             feats.append(f)
             masks.append(m)
         # A frame is valid only where every source has real content.

@@ -59,6 +59,32 @@ def test_handles_the_documented_duration_range(model, seconds):
     assert out["file"]["frame_logits"].shape[1] == seconds * 50
 
 
+def test_submission_is_padding_invariant_when_frontends_disagree_on_fps():
+    """🔴 The multi-frontend path is where batch dependence hid.
+
+    Both shipped configs use 50 fps for both frontends, which short-circuits
+    align_time entirely -- so this property was untested until a review found
+    the alignment interpolating over the padded axis.
+    """
+    cfg = _cfg("b_stub")
+    fes = dict(cfg.frontends)
+    fes["speech"] = dataclasses.replace(fes["speech"], fps=25.0)
+    torch.manual_seed(0)
+    model = DeepVoiceNet(dataclasses.replace(cfg, frontends=fes)).eval()
+
+    n = int(SR * 4.02)                      # inexact frame ratio after ceil()
+    x = torch.randn(1, n)
+    lengths = torch.tensor([n])
+    base = model.submission_probs(model(x, lengths))
+
+    for pad_seconds in (1, 3, 9):
+        padded = torch.nn.functional.pad(x, (0, SR * pad_seconds))
+        got = model.submission_probs(model(padded, lengths))
+        for column in base:
+            assert torch.allclose(base[column], got[column], atol=1e-6), \
+                f"{column} moved with {pad_seconds}s of padding"
+
+
 def test_file_branch_aligns_two_frame_rates():
     """B's file branch reads both frontends, which disagree on fps."""
     cfg = _cfg("b_stub")

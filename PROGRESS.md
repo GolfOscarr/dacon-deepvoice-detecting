@@ -3,7 +3,7 @@
 **DACON 236749 — 딥보이스 범죄 대응을 위한 AI 탐지 모델 경진대회**
 Updated 2026-09-07 · **22 days to LB close** (2026-09-29 10:00 KST) · 2nd-stage materials 2026-10-05
 
-Docs: 68 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGENTS.md) + [`models/`](models/AGENTS.md) — **206 tests green** on `feat/model-architecture`
+Docs: 68 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGENTS.md) + [`models/`](models/AGENTS.md) — **215 tests green** on `feat/model-architecture`
 
 ---
 
@@ -97,6 +97,7 @@ Docs: 68 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGE
 - [x] Frontends normalise two genuinely different output shapes — `(B,T,D)` and an `(F',T')` patch grid — to one contract
 - [x] 🔴 **Default squash changed sigmoid → softsign.** At logit scale 30 a float64 sigmoid keeps 314/500 distinct values and loses the ordering; softsign keeps 500/500 and preserves it
 - [x] 🔴 **Measured the duration bias and it corrected the docs**: spread over 1–12 windows is `max` 1.63 · `top-k mean` 1.18 · `quantile` 1.08 · `mean` 0.004. Top-k mean was recorded as "mild" and is only ~28% better than max — every order statistic inherits the bias. `confidence_gated`'s good showing is an artifact: it equals `mean` on 99.7% of files
+- [x] 🔴 **Fixed a second rule-2.4 violation, found by independent review**: `align_time` interpolated over the *padded* axis, so the source→target mapping was a ratio of two padded frame counts and moved with the batch. Submitted `FILE_FAKE_PROB` drifted **3.5e-4 at 9 s of padding**, monotonically — latent only because both shipped configs use 50 fps for both frontends, which short-circuits the function. Now mapped in absolute time and clamped per sample. Residual 1e-8 is float32 kernel selection
 - [x] 🔴 **Fixed a rule-2.4 violation in the submission path**: `clip_logits` were padding-safe but `frame_max` was not, so the *submitted* probability moved 0.519 → 0.847 for the same file depending on what shared its batch. The mask now travels with the head output. The earlier test passed because it asserted on `clip_logits` rather than on what we upload
 - [x] 🔴 **Fixed 19 silently-ignored config fields** — `freeze` did nothing (the encoder was fully trainable) and all three `file_head.mode` settings produced identical output. Guarded by `test_no_config_field_is_silently_ignored`
 - [x] 🔴 Fixed a stub bug found by writing the batch tests — adaptive pooling *stretched* short files across the padded width, so the frame mask described the wrong frames. Frames are now absolutely positioned
