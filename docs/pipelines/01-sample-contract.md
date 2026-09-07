@@ -133,11 +133,18 @@ SampleSpec(
     transforms=(("rawboost", {"variant": "linear"}),
                 ("gain_jitter", {"db": 2.1}),
                 ("noise", {"partition": "musan_noise", "snr_db": 17.4})),
-    normalize={"resampler": "soxr_vhq", "container": "mp3", "bitrate": 96,
-               "channels": "mono"},
+    normalize={"container": "mp3", "bitrate": 96, "channels": "mono"},
     voice_present=1, music_present=1, voice_fake=0, music_fake=1, file_fake=1,
 )
 ```
+
+⚠️ **No `resampler` field**, though an earlier version of this example carried `"soxr_vhq"`. A
+per-sample resampler *draw* is **A-B2**, which [data/06](../data/06-augmentation-spec.md) records as
+unbuildable as written — none of the kernels it names are installed — and **A-S1** has since settled
+on one fixed resampler. It is therefore a `RenderConfig` injection, swappable in one argument when
+**G1** says which kernel the organizers used, not a field of the draw. A field that round-trips into
+the ledger while changing nothing is the typo'd-knob failure in its most expensive form: it does not
+merely do nothing, it *misdescribes the render* to everyone who reads the spec afterwards.
 
 The voice sits **9.2 dB below** the music — the quiet-vocal case that
 [A-A3](../data/06-augmentation-spec.md) says to over-sample, because detection tracks stem energy

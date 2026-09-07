@@ -54,6 +54,24 @@ respecify it against `resample_poly` window/filter variants.
 used, *matching them* is worth more than kernel quality, and the stage is written with the
 resampler injectable for exactly that reason.
 
+### 🔴 A-A8 and A-A11 belong in the draw, not step 4
+
+Same shape as MixUp above, different invariant. Both **move audio along the timeline** — and
+`frame_intervals` are intervals *on that timeline*, in absolute seconds, computed from the
+placement before any file is opened ([pipelines/01 §4](../pipelines/01-sample-contract.md#4-renderedsample)).
+A step-4 augment returns only a waveform, so it has no way to say the timeline moved, and the frame
+labels would go on describing audio that is no longer there. Silently, with a green suite: the
+`align_time` failure again.
+
+Drawn instead, they are just a **placement**. The spec records it, and the frame targets follow it
+for free because they are computed from it. Nothing is lost — a leading silence *is*
+`target_start_s > 0`, and a temporal misalignment *is* a jittered `target_start_s`.
+
+🔴 This generalises past these two entries, and [pipelines/03 §4](../pipelines/03-transforms.md)
+states the contract and enforces it: **steps 4–5 are time-invariant; every time-warping decision
+lives in the draw.** ⚠️ It also catches one nobody lists — **A-A10 RIR convolution shifts audio by
+its direct-path offset**, and would have desynchronized the frame targets the day it was added.
+
 ### 🔴 MixUp belongs in step 2, not step 4
 
 `A-A1` and `A-A2` were listed below as step-4 augmentation while simultaneously specifying
@@ -126,10 +144,10 @@ and self-compensating, so that leg introduces no shift).
 | **A-A5** | **RawBoost** | ☆ Most effective single augmentation family in a systematic comparison against AWGN / vocoded / RIR ([survey/08](../survey/08-augmentation.md)). Models encoding, transmission, microphone and nonlinear distortion on the raw waveform | Linear, nonlinear and stationary variants. p ≈ 0.5 |
 | **A-A6** | **Additive noise (MUSAN noise + speech partitions)** | ★ `[BC2026]` uses SNR **10–30 dB** at p=0.5. ⚠️ **Never MUSAN's *music* partition** — it flips `MUSIC_PRESENT` to 1 | `AUG_NOISE_SNR_DB_RANGE = (10, 30)`, p=0.5 |
 | **A-A7** | **Gain jitter** | ★ `[BC2026]` ±6 dB, "simulates varying recording distances". Note how **modest** this is — MixUp does the heavy lifting, not signal mangling | `AUG_GAIN_DB_RANGE = (-6, +6)`, p=0.5 |
-| **A-A8** | **Time shift** | ★ `[BC2026]` ±0.5 s, "simulates temporal misalignment" | p=0.5 |
+| **A-A8** | **Time shift** | ★ `[BC2026]` ±0.5 s, "simulates temporal misalignment" | 🔴 **Runs in the draw, not step 4** (see below) — `SamplerConfig.silence_lead_s` → `ComponentDraw.target_start_s`. p=0.5 |
 | **A-A9** | **SpecAugment** | ★ `[BirdCLEF'25 B0]`: 1–3 masks, each 5–20 frames/bins, p=0.5 each for time and frequency. ★ `[Freesound 2019, 1st]`: 2 masks, 15% freq / 20% time, p=0.5 | Either parameterization; ablate |
 | **A-A10** | **RIR convolution** | Standard channel simulation; ☆ birdcall community used p=0.2 with a **dry/wet mix control** | RIRS_NOISES, p ≈ 0.3 |
-| **A-A11** | **Silence / padding edits** | Inoculates the classic ASVspoof silence-statistics shortcut ([survey/01](../survey/01-sota-speech.md)); ★ `[BC2026]` uses "silence insertion" as a segment-level aug | Trim or pad leading/trailing, p ≈ 0.2 |
+| **A-A11** | **Silence / padding edits** | Inoculates the classic ASVspoof silence-statistics shortcut ([survey/01](../survey/01-sota-speech.md)); ★ `[BC2026]` uses "silence insertion" as a segment-level aug | 🔴 **Runs in the draw, not step 4** (see below) — `silence_lead_s` / `silence_tail_s`; components occupy `duration_s − lead − tail`. p ≈ 0.2 |
 
 ---
 

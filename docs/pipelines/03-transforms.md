@@ -137,3 +137,77 @@ but *"is the labelled component still discernible enough for its real/fake statu
 Because we cannot filter the test set, **every filter is a distribution-shift decision**, which is
 why **G3** gates any threshold before it is applied at scale and **G4** fires when a step would
 drop >5% of a pool.
+
+---
+
+## 4. 🔴 Time invariance — the second structural rule
+
+> **Steps 4–5 are time-invariant. Every time-warping decision lives in the draw (steps 0–3),
+> where the spec records it.**
+
+This is the same move as §2's signature rule, applied to a different failure. Labels are kept out
+of augments by giving them nowhere to enter; audio is kept on the timeline by making a warp
+unrepresentable in the stages that run after the draw.
+
+**Why it has to be structural.** `frame_intervals` are intervals in absolute seconds on the
+timeline the sampler drew, computed from `ComponentDraw.target_start_s`
+([01 §4](01-sample-contract.md#4-renderedsample)) before any file is opened. Anything that moves
+audio *after* that point desynchronizes the frame labels from the waveform — silently, with a green
+suite, in exactly the way `align_time` did. ⚠️ The alternative design — let a transform warp time
+and report the true placement back — was rejected because it destroys **spec-as-ledger**: the
+shortcut audit ([05 I1b](05-invariants.md)) would become a frequency table over placements the
+model never saw, and the eval-set freeze would stop being exact.
+
+### The four ways to move audio
+
+| # | Class | Examples | Recognisable by |
+|---|---|---|---|
+| **1** | **Rigid shift** | A-A8 time shift, an encoder's delay, leading silence | one lag, the same everywhere |
+| **2** | **Rate change** | A-C2 time stretch, an uncompensated resample | head and tail lag differ |
+| **3** | **Non-monotonic edit** | A-A11 internal trimming, splicing, packet-loss concealment | head and tail lag differ; length may not |
+| **4** | 🔴 **Group delay** | **A-A10 RIR convolution**, any non-linear-phase filter | one lag — *and nobody looks for it* |
+
+⚠️ **Class 4 is the one that is never on anybody's list**, and it is why this is measured rather
+than reviewed. `models.audio.bandpass` is safe only because it is zero-phase (a brick wall in the
+rFFT domain), and `scipy.signal.resample_poly` only because it is linear phase and compensates its
+own filter delay. Neither of those is a decision anyone recorded — they are **load-bearing
+accidents**, of the same kind that has produced four shipped defects here. A-A10 would introduce a
+shift equal to its direct-path offset and nothing downstream would notice.
+
+### How it is enforced
+
+Registration **probes** the step: it is run on fixed-seed broadband noise, and the output is
+correlated back against the input in two windows.
+
+- A **length change** is refused — length is the timeline.
+- **Head and tail lag disagreeing** is refused: the time base was warped, not moved, and no single
+  number can carry that into `frame_intervals`. 🔴 Two windows, not one — a single lag catches
+  classes 1 and 4 but is blind to 2 and 3, since a 1% stretch and an internal excision both leave
+  the head exactly where it was.
+- A **lag that does not match the step's declared `group_delay`** is refused. The declaration is
+  *checked*, never believed: declare 0 and shift by 137 and it fails; declare 137 and shift by 0
+  and it fails too.
+- An **augment may not declare a delay at all**. A delay it wanted is a draw.
+
+⚠️ The probe uses noise, not a chirp, and that detail is load-bearing: a chirp's head and tail hold
+different frequencies, so a filter with frequency-dependent phase (`pre_emphasis`, a 2-tap
+differencer) reads as head and tail disagreeing and a step that moves nothing gets refused.
+
+⚠️ The probe runs with **default** parameters, so it cannot see a warp that only a drawn parameter
+turns on. `augment_chain` therefore re-checks the length on the real audio, on every sample.
+
+### Where the warps went instead
+
+| Method | Now lives in | As |
+|---|---|---|
+| **A-A8** time shift | the draw | `SamplerConfig.silence_lead_s` → `ComponentDraw.target_start_s` |
+| **A-A11** silence edits | the draw | `silence_lead_s` / `silence_tail_s`; components occupy `duration_s − lead − tail` |
+| **A-S3** codec delay | step 5, cancelled | the encoder's gapless header, with the decoded length asserted ([data/06 A-S3](../data/06-augmentation-spec.md)) |
+| **A-A4** crossfade | step 3, without moving anything | complementary sigmoid tapers at the joint, because an overlapping crossfade would move a component off the drawn timeline |
+| **A-C2** time stretch | not implemented | it needs a rate field on `ComponentDraw`; tier C at p≈0.1, not worth the field yet |
+| **P-S2** resample | `render.load_audio`, once per file | it changes the sample count, and a registry whose steps may change `lengths` cannot be composed |
+
+🔴 **The codec delay is the one warp that happens in a stage the contract covers**, and it escapes
+because step 5 is *conceptually* identity in time: the test chain re-encodes the audio, it does not
+move it. So the delay is an implementation artifact to **cancel and assert**, not a warp to declare
+— which is why `_codec_roundtrip` checks the decoded frame count instead of trusting anything.

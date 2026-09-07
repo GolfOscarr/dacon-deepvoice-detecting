@@ -302,11 +302,49 @@ run at test time?* Getting it wrong is silent in both directions
 
 | Missing | Why |
 |---|---|
-| **A-A8 time shift**, **A-A11 silence edits** | They move audio along the timeline while `frame_intervals` stay put. An augment returns only a waveform, so it cannot tell the renderer the timeline moved. Both belong in the *placement* — jitter `ComponentDraw.target_start_s`, where the spec records it |
+| **A-A8 time shift**, **A-A11 silence edits** | They move audio along the timeline while `frame_intervals` stay put. Now drawn instead: `SamplerConfig.silence_lead_s` / `silence_tail_s` → `ComponentDraw.target_start_s`. See the contract below |
 | **MixUp (A-A1/A-A2)** | Changes which components are present and whether they are generated, so it is a **step-2 component draw**, not a signal transform |
 | **Resample (P-S2)** | Changes the sample count, and a registry whose steps may change `lengths` cannot be composed. It runs once per file in `render.load_audio`, with the resampler injected |
 | **Test-chain normalization (A-S1/S3/S4)** | Not variety but a model of *what the organizers did to the test set* — drawn into `SampleSpec.normalize` and applied by the renderer, always last |
 | **P-A1 loudness, P-A2 silence trimming** | Gate **G6**. `label_evidence` likewise refuses to run without `threshold_version` (**G3**): a default threshold is the hardcoded intuition [docs/data/10 §6](../docs/data/10-preprocessing-and-filtering.md) exists to forbid, and it would be invisible in a green suite |
+
+### 🔴 The second structural rule: steps 4–5 do not move audio
+
+> **Steps 4–5 are time-invariant. Every time-warping decision lives in the draw
+> (steps 0–3), where the spec records it.**
+
+`frame_intervals` are intervals *on the drawn timeline*. Anything that moves audio after the draw
+desynchronizes the frame labels from the waveform — silently, which is how `align_time` shipped.
+So registration **measures** it rather than asking you to promise it:
+
+```python
+from training.registries import PREPROCESS, RegistryError
+
+try:                                   # a step that shifts by 37 samples
+    @PREPROCESS.register("late")
+    def late(wav, sample_rate, lengths):
+        import torch
+        return torch.roll(wav, 37, dims=-1)
+except RegistryError as exc:
+    assert "declares group_delay=0" in str(exc)
+else:                                  # pragma: no cover
+    raise AssertionError("the registry accepted an undeclared time shift")
+
+assert PREPROCESS.group_delay_of("dc_offset") == 0
+```
+
+The step is run on fixed-seed broadband noise and correlated back against the input **in two
+windows**: a length change, a head/tail disagreement (a rate change or an internal edit), or a lag
+that does not match the declared `group_delay` all refuse registration. An augment may not declare
+a delay at all — a delay it wanted is a draw.
+
+⚠️ Declare the *measured* delay, never a guessed one: `group_delay=137` on a step that shifts by 0
+fails too. And 🔴 **class 4 is the one nobody looks for** — `models.audio.bandpass` is safe only
+because it is zero-phase and `resample_poly` only because it is linear phase; A-A10 RIR convolution
+would shift by its direct-path offset. Those were load-bearing accidents until this measured them.
+
+The four classes and where each warp went instead:
+[`docs/pipelines/03 §4`](../docs/pipelines/03-transforms.md).
 
 ---
 
