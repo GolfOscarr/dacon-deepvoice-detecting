@@ -17,13 +17,15 @@ Why each choice was made: [`docs/pipelines/`](../docs/pipelines/README.md) and
 | `training.spec` | `SampleSpec`, `ComponentDraw`, the nine cells, the RNG key |
 | `training.manifest` | Loading and validating the manifest. Rejects the two row kinds' confusions |
 | `training.sampler` | Drawing specs. C1 / C3 / DOSS live here |
-| `training.audit` | **I1–I9** over a drawn stream. No corpus, no model, no GPU |
+| `training.audit` | **I1–I9** and **I21** over a drawn stream. No corpus, no model, no GPU |
 | `training.folds` | Building `folds.parquet`, and **VG1 A1–A7 / A10** over it |
 | `training.synthetic` | A manifest with the real corpus's pathologies, and the audio it names |
 | `training.registries` | The three transform contracts. **I14** lives here |
 | `training.render` | `SampleSpec` → audio. All the I/O, and `render(spec) == render(spec)` |
+| `training.collate` | `list[RenderedSample]` → batch, and duration bucketing. **I15** lives here |
+| `training.dataset` | The torch `Dataset`: specs → render → collate, plus the frozen eval set |
 
-⬜ `collate` · `dataset` · `loop` — milestones M4–M5.
+⬜ `loop` — milestone M5.
 
 ---
 
@@ -427,3 +429,163 @@ rng = spec_rng(sample_id, epoch, seed)          # blake2b, not hash()
 reproducible *within* a run and different across runs — the exact opposite of
 what A-S2 asks for. An epoch is a fixed count of drawn specs; without that,
 `sample_id` is undefined and reproducibility is nominal.
+
+---
+
+## Collating a batch
+
+```python
+import tempfile
+from pathlib import Path
+
+import torch
+
+from models.audio import prepare_waveform
+from models.config import AudioConfig
+from training.collate import BATCH_KEYS, collate
+from training.render import ManifestIndex, RenderConfig, render
+from training.sampler import Sampler, SamplerConfig
+from training.synthetic import synthetic_manifest, write_synthetic_corpus
+
+root = Path(tempfile.mkdtemp())
+corpus = synthetic_manifest(n_per_pool=2, n_whole_file=2, seed=0,
+                            duration_range=(6.0, 8.0))
+write_synthetic_corpus(corpus, root, seed=0)
+index, cfg = ManifestIndex.from_frame(corpus), RenderConfig(root=root)
+sampler = Sampler(corpus, SamplerConfig(duration_range=(4.0, 6.0)))
+
+batch = collate([render(spec, index, cfg) for spec in sampler.epoch_specs(4)])
+assert set(batch) == set(BATCH_KEYS)
+assert batch["wav"].dim() == 3                       # (B, C_max, S_max), not mono
+wav = prepare_waveform(batch["wav"], AudioConfig())  # -> (B, S), the model's input
+```
+
+⚠️ **`batch["wav"]` is `(B, C_max, S_max)`.** The channel policy is applied by
+`prepare_waveform`, at the same call site as inference — the collator does not
+downmix, does not bandpass, does not run the preprocess chain and does not cast
+to the training precision.
+
+🔴 **Rows with fewer channels than the batch are promoted by *repeating their own
+channels*, never by zero-filling.** That is the rule-2.4 surface of the layout:
+`C_max` belongs to the other rows, so the promotion must be invisible at the
+model boundary — and under `downmix` a zero-filled mono row comes back at **half
+amplitude**, i.e. its score would depend on what shared its batch. Cyclic repeat
+is bitwise the identity for every policy in `models.config.CHANNEL_POLICIES`, and
+`tests/test_collate.py` enumerates that tuple rather than restating it, so a new
+policy that breaks the property fails the suite instead of shipping.
+
+⚠️ `collate(..., pad_value=...)` exists for the tests, not for training. §2 of
+[`docs/pipelines/04`](../docs/pipelines/04-collation.md) says the padding value
+must not matter, and the way to know that is to collate twice and compare the
+**submitted probability**.
+
+🔴 Known gap, measured and left open: it does move, by ~1e-3.
+`frontends.frames_for` rounds *up*, so a row whose length is not a multiple of
+the frontend hop has a last valid frame that is part padding, and that frame is
+masked *in*. Every earlier padding test used `lengths = SR * 4`, an exact
+multiple of the 320-sample hop, and could not see it. As shipped it is **not** a
+rule-2.4 violation — training and inference both pad with zeros, so no file's
+score depends on another file, which
+`tests/test_collate.py::test_the_submitted_probability_does_not_move_with_the_batch`
+asserts directly. The fix belongs in `models.frontends.Frontend.forward`.
+
+### Duration bucketing
+
+```python
+from training.collate import bucket_batches, padding_fraction, spec_durations
+from training.sampler import Sampler, SamplerConfig
+from training.synthetic import synthetic_manifest
+
+specs = list(Sampler(synthetic_manifest(n_per_pool=60, n_whole_file=60, seed=0),
+                     SamplerConfig()).epoch_specs(512))
+d = spec_durations(specs)                       # from the SPEC -- no audio decoded
+
+loose = bucket_batches(d, 32, n_buckets=1, seed=0)
+tight = bucket_batches(d, 32, n_buckets=4, seed=0)
+assert padding_fraction(d, tight) < padding_fraction(d, loose)
+```
+
+✅ Bucketing is free to choose: `LossConfig.ranking_weight` is committed at 0 and
+stage S4 is dropped, so **no loss term is sensitive to batch composition**.
+
+⚠️ Two caveats survive. Bucketing reshapes the per-batch cell mix (duration and
+cell are not independent — sequential compositions run long), so a bucketed plan
+must still meet **C2**: audit it with `audit_specs(specs, batch_size=...)` and
+read `I9_C2_present_count_floor`. And the duration-vs-score check on the REAL
+class must be measured on **unbucketed** batches — which is why `eval_batches`
+refuses to bucket and `training_batches` refuses a frozen list.
+
+---
+
+## The dataset, and the two modes
+
+```python
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from training.dataset import (SpecDataset, eval_batches, frozen_eval_specs,
+                              training_batches)
+from training.render import ManifestIndex, RenderConfig
+from training.sampler import Sampler, SamplerConfig
+from training.synthetic import synthetic_manifest, write_synthetic_corpus
+
+root = Path(tempfile.mkdtemp())
+corpus = synthetic_manifest(n_per_pool=2, n_whole_file=2, seed=0,
+                            duration_range=(6.0, 8.0))
+write_synthetic_corpus(corpus, root, seed=0)
+index, cfg = ManifestIndex.from_frame(corpus), RenderConfig(root=root)
+sampler = Sampler(corpus, SamplerConfig(duration_range=(4.0, 6.0)))
+
+train = SpecDataset.from_sampler(sampler, 8, index, cfg)   # redrawn per epoch
+train.set_epoch(1)
+plan = training_batches(train, 4, n_buckets=2, seed=0)
+
+held = SpecDataset.frozen(frozen_eval_specs(sampler, 6, seed=0), index, cfg,
+                          slice_="train")
+with pytest.raises(RuntimeError):        # the eval set is a value, not a seed
+    held.set_epoch(1)
+assert [i for b in eval_batches(held, 4) for i in b] == list(range(6))
+```
+
+🔴 **The evaluation set is frozen as *specs*, not as a seed.** A seed reproduces
+only against the same sampler, the same manifest and the same code, and all
+three change during a competition. `set_epoch` on a frozen dataset raises — the
+alternative is a validation curve whose rows quietly change underneath it, which
+no downstream assertion can see.
+
+### 🔴 A composed sample has no fold, so the fold is resolved first
+
+`fold_manifest(manifest, folds, fold=k)` — a thin, required-argument wrapper on
+`apply_folds` — resolves TRAIN/VAL **on the manifest**, before a single spec is
+drawn. The sampler then has nothing out-of-fold to draw from, so containment is
+structural rather than checked afterwards.
+
+That is not a stylistic preference. A composed sample draws two or three
+components and nothing binds them to one family, so "the fold of a composed
+sample" is undefined; any rule that picked one (the first component's fold, the
+voice component's) would be an accident of draw order dressed up as a policy.
+
+```python
+from training.dataset import SpecDataset, fold_manifest
+from training.folds import FoldConfig, build_folds
+from training.render import ManifestIndex
+from training.sampler import Sampler, SamplerConfig
+from training.synthetic import synthetic_manifest
+
+corpus = synthetic_manifest(n_per_pool=240, n_whole_file=200,
+                            n_families=24, n_sources=8)
+folds = build_folds(corpus, FoldConfig(n_folds=5)).frame
+train = fold_manifest(corpus, folds, fold=2)          # `fold=` is required
+
+sampler = Sampler(train, SamplerConfig(), slice_="train")
+ds = SpecDataset.from_sampler(sampler, 500, ManifestIndex.from_frame(train))
+report = ds.audit(train)                              # forwards slice_ and fold
+assert report.results["I5_split_safety"][0], report.results["I5_split_safety"][1]
+```
+
+⚠️ `ds.audit(train)` is the whole containment story: **I5** already re-derives the
+allowed `file_id` set from the manifest, so the dataset wires the arguments
+rather than rebuilding the check ([`docs/pipelines/05 §5`](../docs/pipelines/05-invariants.md)).
+Called without a manifest, I5 reports `SKIPPED` — never a pass.
