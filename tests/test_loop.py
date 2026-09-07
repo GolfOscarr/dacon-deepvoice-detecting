@@ -36,7 +36,8 @@ from training.loop import (CODEC_VARIANTS, STAGES, EMA, FoldResult, LoopConfig,
                            autocast_for, checkpoint_soup, codec_variant_specs,
                            evaluate, generator_key, leak_tripwires,
                            load_train_checkpoint, measured_split_kind,
-                           output_sanity, prediction_frame, run_gates,
+                           RESOLUTION_FLOOR, output_sanity, prediction_frame,
+                           run_gates,
                            run_schedule, save_train_checkpoint, stage_plan,
                            train_stage, trainable_parameters, validate_fold)
 from training.render import ManifestIndex, RenderConfig, render
@@ -683,6 +684,59 @@ def test_autocast_actually_changes_the_compute_dtype(model_cfg):
         autocast_for("int8", "cpu")
 
 
+def _prob_frame(logits, dtype):
+    p = torch.sigmoid(logits.to(dtype)).double().numpy()
+    df = pd.DataFrame({"file_id": [f"s{i}" for i in range(len(p))]})
+    for c in PREDICTION_COLUMNS:
+        df[c] = p
+    return df
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
+def test_a_small_n_pass_of_b2_never_reads_as_resolution_confirmed(seed):
+    """🔴 B2 is a *ratio* against whatever `n` the caller passes, so on its own it
+    has the shape of the defect it just caught: bf16 passes at n=400.
+
+    **B2a** is the companion. Below the 1,200-row floor it SKIPs, so the pair can
+    never come back "ranking resolution confirmed" on a set too small to see a
+    precision-driven tie failure. `training.audit.RESOLVABLE_GAP` is the same
+    pattern one layer down.
+    """
+    rng = torch.Generator().manual_seed(seed)
+    small = _prob_frame(torch.randn(400, generator=rng) * 1.5, torch.bfloat16)
+
+    report = output_sanity(small)
+    # B2 itself passes at this size -- that is the whole problem ...
+    assert report.results["VG5_B2_ranking_resolution"][0]
+    # ... and B2a refuses to let that stand as evidence.
+    assert "VG5_B2a_resolution_is_resolvable" in report.skipped
+    assert "VG5_B2a_resolution_is_resolvable" not in report.ran
+
+    big = _prob_frame(torch.randn(RESOLUTION_FLOOR, generator=rng) * 1.5,
+                      torch.bfloat16)
+    at_size = output_sanity(big)
+    assert not at_size.results["VG5_B2_ranking_resolution"][0]
+    assert "VG5_B2a_resolution_is_resolvable" in at_size.ran
+
+
+def test_b2a_does_not_switch_b2_off_below_the_floor():
+    """⚠️ The floor is about *precision-driven* ties only. A gross failure is
+    visible at any n, and B2 must still fire on one -- otherwise the companion
+    check would have quietly disabled the guard it exists to qualify."""
+    n = 1000
+    assert n < RESOLUTION_FLOOR
+    rng = np.random.default_rng(0)
+    clean = rng.random(n)
+    saturated = np.where(clean <= 0.4, 0.0, np.where(clean >= 0.6, 1.0, clean))
+    df = pd.DataFrame({"file_id": [f"s{i}" for i in range(n)]})
+    for c in PREDICTION_COLUMNS:
+        df[c] = saturated
+
+    report = output_sanity(df)
+    assert not report.results["VG5_B2_ranking_resolution"][0]
+    assert "VG5_B2a_resolution_is_resolvable" in report.skipped
+
+
 @pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
 def test_a_bf16_probability_column_loses_ranking_resolution_at_val_size(seed):
     """🔴 Why `LoopConfig.eval_precision` is fp32, measured at the size that
@@ -694,17 +748,12 @@ def test_a_bf16_probability_column_loses_ranking_resolution_at_val_size(seed):
     as the padding defect where every fixture used `lengths = SR * 4`.
     """
     rng = torch.Generator().manual_seed(seed)
-    logits = torch.randn(1200, generator=rng) * 1.5
+    logits = torch.randn(RESOLUTION_FLOOR, generator=rng) * 1.5
 
-    def frame(dtype):
-        p = torch.sigmoid(logits.to(dtype)).double().numpy()
-        df = pd.DataFrame({"file_id": [f"s{i}" for i in range(len(p))]})
-        for c in PREDICTION_COLUMNS:
-            df[c] = p
-        return df
-
-    assert output_sanity(frame(torch.float32)).results["VG5_B2_ranking_resolution"][0]
-    assert not output_sanity(frame(torch.bfloat16)).results["VG5_B2_ranking_resolution"][0]
+    assert output_sanity(_prob_frame(logits, torch.float32)
+                         ).results["VG5_B2_ranking_resolution"][0]
+    assert not output_sanity(_prob_frame(logits, torch.bfloat16)
+                             ).results["VG5_B2_ranking_resolution"][0]
 
 
 # --------------------------------------------------------------------------- #

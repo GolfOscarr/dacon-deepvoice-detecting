@@ -1024,6 +1024,22 @@ def leak_tripwires(metrics: MetricSet, split_kind: str, detail: str = "") -> Aud
 # 8. The gates -- docs/validation/04
 # --------------------------------------------------------------------------- #
 
+#: 🔴 Below this many rows, B2's `n_unique > 0.5 n` ratio cannot resolve a
+#: **precision-driven** tie failure, because the probability that two files
+#: collide grows with n while the gate does not. Measured on unit-scale logits:
+#: a bf16 column gives 241 unique of 400 (**passes**) and 399 of 1,200
+#: (**fails**). Derived, not picked -- 1,200 is VG1 A8's per-class VAL floor, so
+#: it is both the size the gate was calibrated at and the size any run that
+#: passes A8 already has.
+#:
+#: ⚠️ It does **not** switch B2 off below the floor: a gross failure (a constant
+#: column, the 80% saturation that took EER 0.0950 -> 0.3017) is visible at any
+#: n. What it does is stop a small-n PASS reading as "ranking resolution
+#: confirmed" -- **B2a** reports SKIP instead, which is the same shape as
+#: `training.audit.RESOLVABLE_GAP`.
+RESOLUTION_FLOOR = 1_200
+
+
 def output_sanity(preds: pd.DataFrame, reference_ids: Sequence[str] | None = None
                   ) -> AuditReport:
     """**VG5** B1-B5: the five columns still carry ranking information.
@@ -1033,7 +1049,13 @@ def output_sanity(preds: pd.DataFrame, reference_ids: Sequence[str] | None = Non
     warning, and the usual fix -- rank-normalising the column -- is a cross-file
     statistic forbidden by rule 2.4. The way to satisfy it is float64 logits and
     a float64 squash with no rounding, which is what `models.outputs` does and
-    what `LoopConfig.eval_precision` protects.
+    what `predict`'s fp32 default protects.
+
+    🔴 B2 is a **ratio** against whatever `n` the caller passes, and on its own
+    that has the shape of the defect it exists to catch: bf16 passes it at
+    n=400 and fails at n=1,200. **B2a** is the companion that says so -- below
+    `RESOLUTION_FLOOR` it reports SKIP, so a small-n green B2 can never be read
+    as ranking resolution confirmed.
     """
     r: dict[str, tuple[bool, str]] = {}
     n = len(preds)
@@ -1052,6 +1074,17 @@ def output_sanity(preds: pd.DataFrame, reference_ids: Sequence[str] | None = Non
         f"worst column {worst!r} has {uniques[worst]} unique values over {n} files "
         f"(gate > {0.5 * n:.0f}); ties near the operating point took EER "
         f"0.0950 -> 0.3017")
+    r["VG5_B2a_resolution_is_resolvable"] = (
+        True,
+        (AuditReport.SKIP + f"n={n} is below the {RESOLUTION_FLOOR}-row floor, so "
+         f"B2's ratio cannot resolve a precision-driven tie failure -- a bf16 "
+         f"column passes B2 at n=400 and fails it at n=1200. B2's verdict above "
+         f"still covers gross failures (a constant or saturated column). VG1 A8's "
+         f"per-class floor is what makes B2 meaningful, and it is a separate gate")
+        if n < RESOLUTION_FLOOR else
+        f"n={n} >= {RESOLUTION_FLOOR}: B2's ratio can resolve a precision-driven "
+        f"tie failure at this size, measured against bf16 (399/1200)")
+
     constant = [c for c, u in uniques.items() if u <= 1]
     r["VG5_B3_no_constant_column"] = (
         not constant, f"constant column(s): {constant}")
