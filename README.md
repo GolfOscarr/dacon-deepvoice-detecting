@@ -38,13 +38,15 @@ offline on one L4 GPU within 60 minutes.
 | **[docs/kaggle/](docs/kaggle/README.md)** | Winners' practical recipes, incl. code pulled from top notebooks |
 | **[docs/data/](docs/data/README.md)** | Data strategy — tiered method catalogs, review gates, ~70 vetted sources |
 | **[docs/validation/](docs/validation/README.md)** | How we measure — splits, metric harness, decision protocol, gates, LB decomposition |
+| **[docs/architecture/](docs/architecture/README.md)** | How we build the model — design envelope, pretrained candidates, ensembling, runtime budget |
 | **[metrics/](metrics/AGENTS.md)** | The implementation, and how to use it — scoring, fold aggregation, diagnostics, submissions |
 | **[docs/papers/](docs/papers/INDEX.md)** | ~75 papers indexed with links; 12 read in depth |
 
 Start at **[docs/README.md](docs/README.md)** for a reading order.
 
 Confidence marks used throughout: ★ verified from a primary source · ☆ secondary, re-verify ·
-⚠️ risk · 🔴 decision-changing · ❌ forbidden by competition rules.
+⚠️ risk · 🔴 decision-changing · ❌ forbidden by competition rules ·
+🔷 our own inference, untested (used in [docs/architecture/](docs/architecture/README.md)).
 
 ## Findings that shaped the plan
 

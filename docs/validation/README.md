@@ -26,7 +26,7 @@ is no held-out private split to punish it. The only defence is a local measureme
 ## The plan in six lines
 
 1. Split by **artifact family**, source and speaker — never at random. A random split reports
-   ~0.99 and teaches nothing ([08 splits](../data/08-build-plan.md#splits)).
+   ~0.99 and teaches nothing ([08 splits](../data/08-build-plan.md#splits--generator-disjoint-source-disjoint)).
 2. Four slices: **TRAIN · VAL** (tuning) **· SHADOW** (domain shift) **· PROBE** (sealed).
 3. Track exactly the numbers in the **[metric register](02-metric-harness.md#1-the-metric-register)** —
    official, decision, diagnostic, guardrail — and reimplement the official metric exactly,

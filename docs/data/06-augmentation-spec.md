@@ -7,7 +7,7 @@ originals + code + config + seed.
 
 Tier legend in [07](07-eda-plan.md#tier-legend-used-in-05-06-07).
 
-## 🔴 The governing rule {#the-governing-rule}
+## 🔴 The governing rule
 
 > **Every transform must be applied independently of the label.** For every transform `T` and
 > label `L`: `P(T | L) = P(T)`.

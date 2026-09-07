@@ -1,0 +1,47 @@
+# Candidate B — three branches on the mixture, two specialist frontends, jointly trained.
+# The A→B increment is exactly: one more frontend, per-branch sources, and align_to.
+# docs/architecture/03-candidates.md
+name: b_three_branch
+seed: 0
+
+frontends:
+  speech:
+    name: xlsr_300m
+    weights: null
+    layers: 9              # ⚠️ 09 B3 — and "probed layers" != "truncation depth" (06 §1)
+    freeze: true
+    output_dim: 1024
+    fps: 50.0
+    adapter: {kind: lora, rank: 16, alpha: 32.0, targets: [q_proj, v_proj]}
+    freq_pool: {kind: none}          # wav2vec2 family has no frequency axis
+  audio:
+    name: beats
+    weights: null
+    layers: 9
+    freeze: true
+    output_dim: 768
+    fps: 50.0
+    adapter: {kind: lora, rank: 16, alpha: 32.0, targets: [q_proj, v_proj]}
+    n_freq: 8              # BEATs tokenises mel into a (F', T') patch grid
+    freq_pool: {kind: gem, p_init: 3.0, learnable: true}
+
+branches:
+  voice:  {sources: speech, column: VOICE_FAKE_PROB,    masked_by: voice_present}
+  music:  {sources: audio,  column: MUSIC_FAKE_PROB,    masked_by: music_present}
+  file:
+    sources: [speech, audio]         # concat — needs a common time base
+    align_to: audio
+    column: FILE_FAKE_PROB
+    masked_by: null
+    head: {hidden: 768}              # the only branch reading both frontends
+  v_pres: {sources: audio, column: VOICE_PRESENT_PROB,  masked_by: null}
+  m_pres: {sources: audio, column: MUSIC_PRESENT_PROB,  masked_by: null}
+
+segmentation: {mode: whole_file}
+aggregation:  {kind: topk_mean, k: 3}
+file_head:    {mode: learned}
+audio:        {sample_rate: 16000, channels: downmix, band_hz: null}   # band_hz: [0, 4000] for the low-band member (09 B7)
+runtime:      {precision: fp16, compile: false, batch_size: 8, num_workers: 5}
+output:       {dtype: float64, squash: softsign, logit_scale: 1.0}
+distill:      {enabled: true, embed_dim: 1024, stop_gradient: true}
+aux:          {separation_head: false}    # flip to true for C-lite

@@ -1,0 +1,41 @@
+# Candidate A's exact shape with a weightless `stub` frontend.
+#
+# The development config: real checkpoints are not wired, because the licences
+# for SSLAM / EAT / W2V-BERT 2.0 are unverified and a licence that forbids
+# third-party provision makes a checkpoint unusable at all here
+# (docs/architecture/09-open-questions.md, C1-C3).
+#
+# `layers` and `adapter` are nulled out rather than copied across: the stub has
+# no transformer layers to truncate and no attention projections to adapt, and
+# build_frontend REFUSES a config that asks for either, rather than accepting it
+# and quietly doing nothing.
+name: a_stub
+seed: 0
+
+frontends:
+  audio:
+    name: stub                # weightless; swap to the real name once licences clear
+    weights: null          # null => randomly initialised (tests / shape work)
+    layers: null           # truncation is meaningless without a real encoder
+    freeze: true
+    output_dim: 768
+    fps: 50.0
+    adapter: {kind: none}  # no attention projections to adapt in the stub
+    n_freq: 8              # BEATs tokenises mel into a (F', T') patch grid
+    freq_pool: {kind: gem, p_init: 3.0, learnable: true}   # BEATs is a patch grid
+
+branches:
+  voice:  {sources: audio, column: VOICE_FAKE_PROB,     masked_by: voice_present}
+  music:  {sources: audio, column: MUSIC_FAKE_PROB,     masked_by: music_present}
+  file:   {sources: audio, column: FILE_FAKE_PROB,      masked_by: null}
+  v_pres: {sources: audio, column: VOICE_PRESENT_PROB,  masked_by: null}
+  m_pres: {sources: audio, column: MUSIC_PRESENT_PROB,  masked_by: null}
+
+segmentation: {mode: whole_file}
+aggregation:  {kind: topk_mean, k: 3}
+file_head:    {mode: learned}
+audio:        {sample_rate: 16000, channels: downmix, band_hz: null}   # band_hz: [0, 4000] for the low-band member (09 B7)
+runtime:      {precision: fp16, compile: false, batch_size: 8, num_workers: 5}
+output:       {dtype: float64, squash: softsign, logit_scale: 1.0}
+distill:      {enabled: false}
+aux:          {separation_head: false}

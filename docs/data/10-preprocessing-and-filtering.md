@@ -108,7 +108,7 @@ Tier legend in [07](07-eda-plan.md#tier-legend-used-in-05-06-07).
 | **"Too noisy" by absolute SNR** | Noise is the target domain (P1). The test set contains telephone audio by design |
 | **"Low quality" by bitrate / bandwidth** | Same reason — and bandwidth correlates with the telephone subset we most need |
 | **Dropping clipped audio** | Clipping occurs in real phone recordings; inoculate instead |
-| **Any filter applied *asymmetrically across labels*** | Instantly creates the shortcut the whole plan is built to avoid ([06](06-augmentation-spec.md#the-governing-rule)) |
+| **Any filter applied *asymmetrically across labels*** | Instantly creates the shortcut the whole plan is built to avoid ([06](06-augmentation-spec.md#-the-governing-rule)) |
 
 ---
 

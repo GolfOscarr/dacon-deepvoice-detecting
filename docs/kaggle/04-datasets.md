@@ -21,7 +21,7 @@ FoR's `for-norm` variant applies **exactly the normalization the DACON organizer
 resample to 16 kHz, volume normalize, mono, trim silence. That makes it (a) a directly usable
 training source with minimal chain mismatch, and (b) **a reference implementation of the
 normalization pipeline** we are trying to reconstruct from 3 dummy files
-([data/07](../data/07-eda-plan.md#dummy-forensics)).
+([data/07](../data/07-eda-plan.md#tier-s)).
 
 ⚠️ But note `for-2sec` exists specifically to "eliminate length-related bias" — a reminder that
 **clip duration correlated with label** is a known trap in this exact dataset family. Our shortcut

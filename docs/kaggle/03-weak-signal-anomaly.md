@@ -78,7 +78,7 @@ off-target is positive, one present in both is a human artifact.
 
 **Transfer to us**: the on/off-target contrast is a **paired-negative design** — the same signal
 chain, differing only in whether the phenomenon is present. That is exactly our T3 vocoder-twin
-construction ([data/05](../data/05-synthesis-plan.md#paired-design)): identical channel, only the
+construction ([data/05](../data/05-synthesis-plan.md#tier-s)): identical channel, only the
 synthesis artifact differs. Independent evidence that this is the right way to build data when
 positives are synthetic.
 

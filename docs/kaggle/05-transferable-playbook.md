@@ -126,7 +126,7 @@ Everything above, reorganized by your four themes. Each item tagged with its sou
 | Add **adversarial validation** and the **statistics-T quality filter** to the EDA pass | [data/07](../data/07-eda-plan.md) |
 | Adopt **per-tier losses** and **two-stage clean→noisy training** for our label-confidence tiers | [data/08](../data/08-build-plan.md) |
 | Make `FILE_FAKE_PROB` pooling a **tuned confidence-gated rule**, not a mean | [data/02](../data/02-label-taxonomy.md) |
-| Add a **shadow split** for domain-shift stress testing, separate from the tuning split | [data/08](../data/08-build-plan.md#splits) |
+| Add a **shadow split** for domain-shift stress testing, separate from the tuning split | [data/08](../data/08-build-plan.md#splits--generator-disjoint-source-disjoint) |
 | Generate **adversarial** (deliberately hard) fakes, not only typical ones | [data/05](../data/05-synthesis-plan.md) |
 | Consider **real-class average-PSD whitening** as a front-end | new experiment |
 | 🔴 **SED attention head + GeM freq pooling** for all five heads; learnable `p` settles the max-vs-mean pooling question | [06 §1](06-notebook-code.md) |

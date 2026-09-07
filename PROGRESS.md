@@ -3,7 +3,7 @@
 **DACON 236749 — 딥보이스 범죄 대응을 위한 AI 탐지 모델 경진대회**
 Updated 2026-09-07 · **22 days to LB close** (2026-09-29 10:00 KST) · 2nd-stage materials 2026-10-05
 
-Docs: 58 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGENTS.md) — 1,584 lines, **60 tests green** on `main`
+Docs: 68 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGENTS.md) + [`models/`](models/AGENTS.md) — **224 tests green** on `feat/model-architecture`
 
 ---
 
@@ -16,7 +16,7 @@ Docs: 58 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGE
 | **+** | Paper research | ✅ done → [`docs/papers/`](docs/papers/INDEX.md) — ~75 indexed, 12 deep-read |
 | **B** | Data strategy | ✅ planned, ⬜ **not executed** → [`docs/data/`](docs/data/README.md) |
 | **C** | Validation design | ✅ designed → [`docs/validation/`](docs/validation/README.md) · ✅ metric pipeline shipped → [`metrics/`](metrics/AGENTS.md) · ⬜ fold builder + gates |
-| **D** | Model architecture | ⬜ |
+| **D** | Model architecture | ✅ designed → [`docs/architecture/`](docs/architecture/README.md) · ✅ implemented → [`models/`](models/AGENTS.md) · ⬜ **no real frontends, nothing trained** |
 | **E** | Score fusion & calibration | ⬜ |
 | **F** | Engineering / submission | ⬜ |
 | **G** | Report & compliance | ⬜ runs throughout |
@@ -77,6 +77,43 @@ Docs: 58 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGE
 - [x] Saturation, not rounding, is the output risk: rounding to 2 dp is harmless, saturating the operating point took EER 0.0950 → **0.3017**
 - [x] 3 submission-contract defects found by audit and fixed (column order; order hardcoded instead of read from `sample_submission.csv`; validator comparing a re-parsed approximation)
 
+**Architecture design (D)** — [`docs/architecture/`](docs/architecture/README.md)
+- [x] Design envelope: the hard gates (10-min pip, offline weights, shippable licences, rules 2.3/2.4) that eliminate architectures before any accuracy argument
+- [x] 🔴 **Training compute is free, inference is scarce** (8×H200 → one L4 at ~10× real-time). Every large model becomes a *teacher*, never a shipped component
+- [x] Pretrained catalog per role, with licence / size / 16 kHz verdict → [`02`](docs/architecture/02-pretrained-catalog.md)
+- [x] Candidates A–G ranked; **chosen: 3 branches on the mixture, jointly trained, two truncated specialist frontends** (PC-Mix layout) → [`03`](docs/architecture/03-candidates.md)
+- [x] 🔴 **Hard type routing rejected** despite winning AT-ADD Track 2 — their macro-F1 used per-type thresholds; our File EER pools every cell into one ranking, so a hard switch creates a score-comparability problem theirs never had
+- [x] 🔴 **Rank averaging across the test set is forbidden** (rule 2.4) — the standard Kaggle ensemble is illegal here; and probability averaging across models is unsound under a ranking metric until each model is calibrated offline on our own data
+- [x] 🔴 **Combine at training time, not inference time**: teacher ensemble + stop-gradient distillation, plus checkpoint soup — ensembling at zero inference cost → [`05`](docs/architecture/05-multi-model.md)
+- [x] 🔴 **Layer truncation** (4 probed layers of XLS-R-300M match the full model at 1.34M trainable params) is what makes two specialist frontends affordable at all → [`06`](docs/architecture/06-compression.md)
+- [x] 🔷 **Full temporal coverage beats multi-crop sampling** — 4 crops of a 60 s file cover 33%, and `frame_max` cannot recover what was never seen
+- [x] 🔷 Predicted binding constraint is the **6 vCPU decode path, not the GPU**; measurement protocol written → [`07`](docs/architecture/07-runtime-budget.md)
+- [ ] ⚠️ Every runtime number is an unmeasured extrapolation until [`07 §4`](docs/architecture/07-runtime-budget.md) runs
+
+**Model implementation (D)** — [`models/`](models/AGENTS.md), branch `feat/model-architecture`
+- [x] `config` · `heads` · `frontends` · `model` · `losses` · `outputs` + [`AGENTS.md`](models/AGENTS.md) whose snippets the suite executes
+- [x] **A and B are one class**, differing only by config — a test asserts they share branch structure and differ only in frontend count
+- [x] 🔴 **Three rule-2.4 tests pass rather than being asserted in prose**: a file scored alone matches the same file inside a batch of longer, louder files; ranking over a canned set is identical solo and batched; two different pad fillings give the same score
+- [x] Frontends normalise two genuinely different output shapes — `(B,T,D)` and an `(F',T')` patch grid — to one contract
+- [x] 🔴 **Default squash changed sigmoid → softsign.** At logit scale 30 a float64 sigmoid keeps 314/500 distinct values and loses the ordering; softsign keeps 500/500 and preserves it
+- [x] 🔴 **Measured the duration bias and it corrected the docs**: spread over 1–12 windows is `max` 1.63 · `top-k mean` 1.18 · `quantile` 1.08 · `mean` 0.004. Top-k mean was recorded as "mild" and is only ~28% better than max — every order statistic inherits the bias. `confidence_gated`'s good showing is an artifact: it equals `mean` on 99.7% of files
+- [x] 🔴 **Fixed two head defects found by review** — both inherited unexamined from the BirdCLEF snippet, both correct in *its* regime and wrong in ours. `tanh` on the attention logits capped any single frame's weight at ~7.4/T, so at T≈3000 `clip_logits` was a **mean pool** — the exact failure the SED head exists to prevent — and `norm_att` was flat, so the interpretability artifact worth 15 report points did not exist. ⚠️ **Our own `whole_file` choice made it ~12× worse** (the notebook's clips were 5 s, T≈250). And GeM's clamp discarded **50.7%** of SSL features with zero gradient; I introduced that clamp to stop a NaN and fixed it by destroying information
+- [x] 🔴 **Fixed a second rule-2.4 violation, found by independent review**: `align_time` interpolated over the *padded* axis, so the source→target mapping was a ratio of two padded frame counts and moved with the batch. Submitted `FILE_FAKE_PROB` drifted **3.5e-4 at 9 s of padding**, monotonically — latent only because both shipped configs use 50 fps for both frontends, which short-circuits the function. Now mapped in absolute time and clamped per sample. Residual 1e-8 is float32 kernel selection
+- [x] 🔴 **Fixed a rule-2.4 violation in the submission path**: `clip_logits` were padding-safe but `frame_max` was not, so the *submitted* probability moved 0.519 → 0.847 for the same file depending on what shared its batch. The mask now travels with the head output. The earlier test passed because it asserted on `clip_logits` rather than on what we upload
+- [x] 🔴 **Fixed 19 silently-ignored config fields** — `freeze` did nothing (the encoder was fully trainable) and all three `file_head.mode` settings produced identical output. Guarded by `test_no_config_field_is_silently_ignored`
+- [x] 🔴 Fixed a stub bug found by writing the batch tests — adaptive pooling *stretched* short files across the padded width, so the frame mask described the wrong frames. Frames are now absolutely positioned
+- [ ] ⚠️ **Real frontends are deliberately not wired** — gated on the licence verification in [`architecture/09 C1–C3`](docs/architecture/09-open-questions.md). `build_frontend` raises with that reason
+- [ ] Training loop, data loading, teacher wiring — all need the corpus, which does not exist yet
+- [ ] ⚠️ **Six defects were found this session, none by a green test suite.** Two shapes recur: a test asserting an *adjacent* quantity (`clip_logits` instead of the submitted probability), and a component inherited from a source recipe that was correct in *its* regime and silently wrong in ours after a later decision changed the regime. Both are worth checking for deliberately rather than trusting coverage
+- [x] **Reviewed by a separate fact-check and critique pass**; corrections recorded in the [`architecture README`](docs/architecture/README.md) rather than silently applied. The hard-routing rejection was re-argued from scratch, the inference blend was defeating our own saturation finding, `P0` had to split in two, and a claim about noisy-OR monotonicity was simply false
+- [ ] 🔴 Open from review: tile vs **whole-file single pass** (deletes the duration-bias problem at ~1.6× cost); does distillation still work with a **frozen** frontend; add a binned **duration stratum** to `metrics/breakdown.py`
+- [ ] 🔴 **`G1` dummy forensics now has a second, independent reason to be first**: per-file metadata (container, bitrate, channels, duration, encoder fingerprint) is legal under rule 2.4 and may separate REAL/FAKE almost for free — or be a pure CV mirage. If the leak is real it dominates every architecture decision ([`architecture/09 A5`](docs/architecture/09-open-questions.md))
+- [ ] 🔴 **Build in the stated drop order** — P0-a → P0-b → **candidate A** → candidate B → codec stage → distillation → extras. ~10 days of modelling remain after the corpus build ([`architecture/08 §4b`](docs/architecture/08-training-recipe.md#4b--the-budget-nobody-costed-engineer-days))
+- [x] 🔴 **A is stage one of B, not a fallback.** B strictly contains A — same SED heads, same masked losses, same joint multi-task training — so the A→B increment is one extra encoder, per-branch adapters, and a time-base alignment. "A then B" is strictly cheaper than "B, and A if B fails". And since A is *already* jointly trained, **B's marginal claim over A is frontend specialization alone, resting on a single citation** ([`architecture/03`](docs/architecture/03-candidates.md#-a-is-stage-one-of-b-not-a-fallback))
+- [ ] ⚠️ **Promote B over A only under P1–P6** ([`validation/03 §3`](docs/validation/03-decision-protocol.md)). "B failed" is undefined against a ±1.7/±2.5 pt noise floor; on an inconclusive result the pre-committed tiebreaker favours **A**
+- [ ] 🔴 **Check PANNs fires `VOICE_PRESENT` on a sung song** before trusting the day-one presence baseline — one song answers it; AudioSet conflates singing with Music
+- [ ] ⚠️ **Re-validate every technique on the music head specifically.** Layer truncation, meta-LoRA, AASIST and the distillation recipe were all measured on *speech*, while the music branch carries 0.27 plus most of the 0.45 file head — and the one time our literature applied a speech recipe to music (MERT-AASIST) it produced the 46.4% cross-generator EER
+
 ---
 
 ## Next — do in this order
@@ -87,7 +124,10 @@ Docs: 58 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGE
 - [ ] **G1** dummy-file forensics → `signal_chain.yaml`
 - [ ] **G2** license audit of `docs/data/11-source-inventory.md` (top 10 first)
 - [ ] `submit.zip` skeleton + trivial model → validate I/O, runtime, offline packaging (`metrics/submission.py` is ready to vendor)
-- [ ] LB probe: all-constant 0.5 submission → **must score exactly 0.5000**. ⚠️ P0 is deliberately degenerate, so it must be written with `validate=False` — the VG5 resolution gate rejects a constant column and would otherwise block the first submission
+- [ ] LB probe **P0-a**: all-constant 0.5 submission → **must score exactly 0.5000**. ⚠️ P0-a is deliberately degenerate, so it must be written with `validate=False` — the VG5 resolution gate rejects a constant column and would otherwise block the first submission
+- [ ] Then **P0-b**: PANNs presence heads + constant fake columns. 🔴 **Expect ~0.535, not 0.5000** (`Score = 0.45 + 0.1·CPS`) — do not let this trip the P0-a stop rule ([`architecture/03`](docs/architecture/03-candidates.md#p0--the-baselines-that-are-not-models))
+
+- [ ] 🔴 `pip download mamba-ssm causal-conv1d` against torch 2.7.1+cu128 / py3.11 / CUDA 12.8 — **one command**, and it decides whether the best published speech backbones (Fake-Mamba, 5.85% ITW EER) exist for us at all (V5)
 
 **Highest-value single experiment**
 - [ ] 🔴 `E-A1` **16 kHz survivability probe** — ArtifactNet's Table XI shows AI residual bandwidth ~291 Hz vs human ~1,996 Hz, which *looks* like it should survive an 8 kHz Nyquist, yet the paper insists 44.1 kHz is required. Settling this decides the whole music-head approach

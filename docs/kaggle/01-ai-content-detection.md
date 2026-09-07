@@ -32,7 +32,7 @@ plus **instruction-tuned LLMs used to generate adversarial essays**.
   analogue: clone real speakers from our real-voice pool (T2/T3 in [data/05](../data/05-synthesis-plan.md))
   and prompt music generators with tags describing our real tracks — not generic prompts.
 - **Ranking loss + supervised contrastive** on generated/real pairs is exactly what we proposed;
-  a Kaggle winner independently arrived at both. Confirms [data/05 paired design](../data/05-synthesis-plan.md#paired-design).
+  a Kaggle winner independently arrived at both. Confirms [data/05 paired design](../data/05-synthesis-plan.md#using-the-pairs-in-training).
 - Adversarial generation (deliberately make hard fakes) is a step we had not planned. Worth adding.
 
 ### Efficiency-prize / high-rank lesson ☆ [discussion 471898](https://www.kaggle.com/c/llm-detect-ai-generated-text/discussion/471898)

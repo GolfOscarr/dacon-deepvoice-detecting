@@ -1,0 +1,21 @@
+# Training-only. Never shipped, never stored in the checkpoint.
+stage: joint
+teachers:                       # frozen, training-only; never enter the inference path
+  speech_teacher: {name: xlsr_2b, weights: null, freeze: true, output_dim: 1920, fps: 50.0,
+                   adapter: {kind: none}, freq_pool: {kind: none}}
+  audio_teacher:  {name: sslam,   weights: null, freeze: true, output_dim: 768,  fps: 50.0,
+                   adapter: {kind: none}, freq_pool: {kind: none}}
+epochs: 10
+batch_size: 16
+lr: 5.0e-4
+weight_decay: 1.0e-5
+precision: bf16
+seed: 0
+loss:
+  # ⚠️ Equal weights are INHERITED from PC-Mix, not chosen. Our metric weights
+  # File .45 / Music .27 / Voice .18. Flagged open knob: docs/architecture/09 B11.
+  weights: {voice: 1.0, music: 1.0, file: 1.0, v_pres: 1.0, m_pres: 1.0}
+  frame_weight: 0.5        # shortcut-exposure knob — frame labels exist only on composed files
+  ranking_weight: 0.0      # raise for the S4 rank-polish stage
+  distill_weight: 1.0
+  frame_resolutions_ms: [40, 80, 160, 320, 640]
