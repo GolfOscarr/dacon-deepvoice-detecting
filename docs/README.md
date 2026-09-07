@@ -9,6 +9,7 @@ Working documentation for **DACON 236749 — 딥보이스 범죄 대응을 위�
 | **[kaggle/](kaggle/)** | Practical competition intelligence: winners' EDA, augmentation, synthesis, validation and inference tricks | [README](kaggle/README.md) |
 | **[data/](data/)** | Our data strategy: rules check, label taxonomy, sources, synthesis, augmentation spec, build plan | [README](data/README.md) |
 | **[validation/](validation/)** | How we measure: split scheme, metric harness, decision protocol, gates, LB decomposition | [README](validation/README.md) |
+| **[architecture/](architecture/)** | How we build the model: the design envelope, pretrained candidates, ensembling, runtime budget | [README](architecture/README.md) |
 
 ## Reading order for someone new
 
@@ -18,11 +19,13 @@ Working documentation for **DACON 236749 — 딥보이스 범죄 대응을 위�
 4. `kaggle/05-transferable-playbook.md` — the practical checklist
 5. `data/README.md` — what we're actually building
 6. `validation/README.md` — how we decide whether any of it worked
+7. `architecture/README.md` — what we build, and why that and not something else
 
 ## Confidence marks used throughout
 
 ★ verified from a primary source · ☆ secondary source, re-verify before relying on it ·
-⚠️ risk or caveat · 🔴 decision-changing · ❌ forbidden by competition rules
+⚠️ risk or caveat · 🔴 decision-changing · ❌ forbidden by competition rules ·
+🔷 our own inference, untested (used in [architecture/](architecture/README.md))
 
 ## Status
 
@@ -33,6 +36,7 @@ Working documentation for **DACON 236749 — 딥보이스 범죄 대응을 위�
 | Kaggle intelligence | ✅ complete (2026-09-05) |
 | Data strategy | ✅ planned; **not yet executed** — see [data/08](data/08-build-plan.md) |
 | Validation design | ✅ drafted (2026-09-07); gates not yet implemented |
+| Architecture design | ✅ candidates ranked (2026-09-07); **nothing trained yet** |
 | Modeling | ⬜ not started |
 
 **Next action**: Phase 0 of [data/08-build-plan.md](data/08-build-plan.md) — license audit and
