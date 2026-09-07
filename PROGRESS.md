@@ -3,7 +3,7 @@
 **DACON 236749 — 딥보이스 범죄 대응을 위한 AI 탐지 모델 경진대회**
 Updated 2026-09-07 · **22 days to LB close** (2026-09-29 10:00 KST) · 2nd-stage materials 2026-10-05
 
-Docs: 68 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGENTS.md) — 1,584 lines, **60 tests green** on `main`
+Docs: 68 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGENTS.md) + [`models/`](models/AGENTS.md) — **184 tests green** on `phase-d-model-architecture`
 
 ---
 
@@ -16,7 +16,7 @@ Docs: 68 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGE
 | **+** | Paper research | ✅ done → [`docs/papers/`](docs/papers/INDEX.md) — ~75 indexed, 12 deep-read |
 | **B** | Data strategy | ✅ planned, ⬜ **not executed** → [`docs/data/`](docs/data/README.md) |
 | **C** | Validation design | ✅ designed → [`docs/validation/`](docs/validation/README.md) · ✅ metric pipeline shipped → [`metrics/`](metrics/AGENTS.md) · ⬜ fold builder + gates |
-| **D** | Model architecture | ✅ designed → [`docs/architecture/`](docs/architecture/README.md) · ⬜ **not implemented, nothing trained** |
+| **D** | Model architecture | ✅ designed → [`docs/architecture/`](docs/architecture/README.md) · ✅ implemented → [`models/`](models/AGENTS.md) · ⬜ **no real frontends, nothing trained** |
 | **E** | Score fusion & calibration | ⬜ |
 | **F** | Engineering / submission | ⬜ |
 | **G** | Report & compliance | ⬜ runs throughout |
@@ -89,6 +89,17 @@ Docs: 68 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGE
 - [x] 🔷 **Full temporal coverage beats multi-crop sampling** — 4 crops of a 60 s file cover 33%, and `frame_max` cannot recover what was never seen
 - [x] 🔷 Predicted binding constraint is the **6 vCPU decode path, not the GPU**; measurement protocol written → [`07`](docs/architecture/07-runtime-budget.md)
 - [ ] ⚠️ Every runtime number is an unmeasured extrapolation until [`07 §4`](docs/architecture/07-runtime-budget.md) runs
+
+**Model implementation (D)** — [`models/`](models/AGENTS.md), branch `phase-d-model-architecture`
+- [x] `config` · `heads` · `frontends` · `model` · `losses` · `outputs` + [`AGENTS.md`](models/AGENTS.md) whose snippets the suite executes
+- [x] **A and B are one class**, differing only by config — a test asserts they share branch structure and differ only in frontend count
+- [x] 🔴 **Three rule-2.4 tests pass rather than being asserted in prose**: a file scored alone matches the same file inside a batch of longer, louder files; ranking over a canned set is identical solo and batched; two different pad fillings give the same score
+- [x] Frontends normalise two genuinely different output shapes — `(B,T,D)` and an `(F',T')` patch grid — to one contract
+- [x] 🔴 **Default squash changed sigmoid → softsign.** At logit scale 30 a float64 sigmoid keeps 314/500 distinct values and loses the ordering; softsign keeps 500/500 and preserves it
+- [x] 🔴 **Measured the duration bias and it corrected the docs**: spread over 1–12 windows is `max` 1.63 · `top-k mean` 1.18 · `quantile` 1.08 · `mean` 0.004. Top-k mean was recorded as "mild" and is only ~28% better than max — every order statistic inherits the bias. `confidence_gated`'s good showing is an artifact: it equals `mean` on 99.7% of files
+- [x] 🔴 Fixed a stub bug found by writing the batch tests — adaptive pooling *stretched* short files across the padded width, so the frame mask described the wrong frames. Frames are now absolutely positioned
+- [ ] ⚠️ **Real frontends are deliberately not wired** — gated on the licence verification in [`architecture/09 C1–C3`](docs/architecture/09-open-questions.md). `build_frontend` raises with that reason
+- [ ] Training loop, data loading, teacher wiring — all need the corpus, which does not exist yet
 - [x] **Reviewed by a separate fact-check and critique pass**; corrections recorded in the [`architecture README`](docs/architecture/README.md) rather than silently applied. The hard-routing rejection was re-argued from scratch, the inference blend was defeating our own saturation finding, `P0` had to split in two, and a claim about noisy-OR monotonicity was simply false
 - [ ] 🔴 Open from review: tile vs **whole-file single pass** (deletes the duration-bias problem at ~1.6× cost); does distillation still work with a **frozen** frontend; add a binned **duration stratum** to `metrics/breakdown.py`
 - [ ] 🔴 **`G1` dummy forensics now has a second, independent reason to be first**: per-file metadata (container, bitrate, channels, duration, encoder fingerprint) is legal under rule 2.4 and may separate REAL/FAKE almost for free — or be a pure CV mirage. If the leak is real it dominates every architecture decision ([`architecture/09 A5`](docs/architecture/09-open-questions.md))
