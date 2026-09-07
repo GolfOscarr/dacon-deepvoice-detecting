@@ -29,11 +29,15 @@ __all__ = [
     "roll_up",
 ]
 
-#: The five submission columns, in `sample_submission.csv` order.
+#: The five submission columns, in the order the competition lists them
+#: (docs/competition/01-overview.md). We have not seen the real
+#: sample_submission.csv, so this is a documented default, not ground truth --
+#: metrics.submission reads the actual order from the reference file when one
+#: is available and never relies on this tuple's ordering.
 PREDICTION_COLUMNS = (
     "FILE_FAKE_PROB",
-    "MUSIC_FAKE_PROB",
     "VOICE_FAKE_PROB",
+    "MUSIC_FAKE_PROB",
     "VOICE_PRESENT_PROB",
     "MUSIC_PRESENT_PROB",
 )

@@ -257,3 +257,63 @@ def test_validate_submission_catches_id_mismatch(tmp_path):
     write_submission(ids, preds, tmp_path / "s.csv")
     with pytest.raises(VG5Error, match="rows|ID set"):
         validate_submission(tmp_path / "s.csv", reference_ids=ids[:49])
+
+
+# --- submission contract regressions ------------------------------------
+def test_prediction_column_order_matches_the_competition_listing():
+    """docs/competition/01-overview.md lists FILE, VOICE, MUSIC, then presence.
+
+    Regression guard: the order was briefly taken from a metric-weight-ordered
+    table (FILE, MUSIC, VOICE), which would have written a mis-ordered file.
+    """
+    assert PREDICTION_COLUMNS == (
+        "FILE_FAKE_PROB", "VOICE_FAKE_PROB", "MUSIC_FAKE_PROB",
+        "VOICE_PRESENT_PROB", "MUSIC_PRESENT_PROB",
+    )
+
+
+def test_column_order_is_taken_from_the_reference_not_assumed(tmp_path):
+    from metrics.submission import read_sample_submission, validate_submission, write_submission
+
+    # a sample_submission whose order differs from our default
+    odd = ["ID", "MUSIC_PRESENT_PROB", "FILE_FAKE_PROB", "VOICE_PRESENT_PROB",
+           "MUSIC_FAKE_PROB", "VOICE_FAKE_PROB"]
+    ref = tmp_path / "sample_submission.csv"
+    pd.DataFrame({c: ([f"TEST_{i:04d}" for i in range(3)] if c == "ID" else [0.5] * 3)
+                  for c in odd})[odd].to_csv(ref, index=False)
+
+    ids, cols = read_sample_submission(ref)
+    assert list(cols) == odd[1:]
+
+    preds = {c: np.linspace(0, 1, 3) for c in PREDICTION_COLUMNS}
+    write_submission(ids, preds, tmp_path / "submission.csv", columns=cols)
+    back = validate_submission(tmp_path / "submission.csv",
+                               reference_ids=ids, reference_columns=cols,
+                               strict_sanity=False)
+    assert list(back.columns) == odd
+
+
+def test_csv_round_trip_is_bit_exact(tmp_path):
+    """pandas' default reader is not correctly rounded; the validator must not
+    silently compare against a re-parsed approximation."""
+    from metrics.submission import validate_submission, write_submission
+
+    rng = np.random.default_rng(0)
+    ids = [f"TEST_{i:04d}" for i in range(1200)]
+    v = rng.random(1200)
+    v[:3] = [1 / 3, np.nextafter(0.5, 1), 0.1 + 0.2]
+    write_submission(ids, {c: v for c in PREDICTION_COLUMNS}, tmp_path / "s.csv")
+
+    naive = pd.read_csv(tmp_path / "s.csv")["FILE_FAKE_PROB"].to_numpy()
+    exact = validate_submission(tmp_path / "s.csv")["FILE_FAKE_PROB"].to_numpy()
+    assert (exact == v).all(), "round_trip read must be bit-exact"
+    assert not (naive == v).all(), "default reader is expected to drift; guard is meaningful"
+
+
+def test_read_sample_submission_rejects_wrong_columns(tmp_path):
+    from metrics.submission import VG5Error, read_sample_submission
+
+    bad = tmp_path / "bad.csv"
+    pd.DataFrame({"ID": ["a"], "FILE_FAKE_PROB": [0.5], "NOPE": [0.5]}).to_csv(bad, index=False)
+    with pytest.raises(VG5Error, match="do not match"):
+        read_sample_submission(bad)

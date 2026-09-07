@@ -28,7 +28,8 @@ import pandas as pd
 
 from metrics.dacon import PREDICTION_COLUMNS
 
-__all__ = ["VG5Error", "check_output_sanity", "write_submission", "validate_submission"]
+__all__ = ["VG5Error", "check_output_sanity", "read_sample_submission",
+           "write_submission", "validate_submission"]
 
 #: VG5 B2 -- a column must keep at least this fraction of its values distinct.
 MIN_UNIQUE_RATIO = 0.5
@@ -67,20 +68,50 @@ def check_output_sanity(df: pd.DataFrame, min_unique_ratio: float = MIN_UNIQUE_R
             )
 
 
-def write_submission(ids, preds, path, *, validate: bool = True) -> pd.DataFrame:
+def read_sample_submission(path):
+    """Return (ids, columns) from DACON's sample_submission.csv.
+
+    The authority on column order. We have not seen the real file, so nothing in
+    this module hardcodes an order it cannot check -- pass the result of this
+    function to write_submission and validate_submission and the question does
+    not arise.
+    """
+    df = pd.read_csv(path, encoding="utf-8")
+    if df.columns[0] != "ID":
+        raise VG5Error(f"sample_submission: first column is {df.columns[0]!r}, expected 'ID'")
+    cols = tuple(df.columns[1:])
+    unknown = set(cols) ^ set(PREDICTION_COLUMNS)
+    if unknown:
+        raise VG5Error(
+            f"sample_submission columns {list(cols)} do not match the five expected "
+            f"prediction columns; symmetric difference {sorted(unknown)}"
+        )
+    return df["ID"].tolist(), cols
+
+
+def write_submission(ids, preds, path, *, columns=PREDICTION_COLUMNS,
+                     validate: bool = True) -> pd.DataFrame:
     """Write `submission.csv`: an ID column plus the five probabilities.
 
-    `preds` maps each name in PREDICTION_COLUMNS to a sequence of float scores
-    aligned with `ids`. Values are written as float64 and are never rounded or
-    clipped -- doing either is how ranking resolution gets lost.
+    `preds` maps each prediction column to a sequence of float scores aligned
+    with `ids`. `columns` fixes the output order -- pass the tuple from
+    read_sample_submission so the order comes from DACON's own file rather than
+    from our assumption about it.
+
+    Values are written as float64 and are never rounded or clipped; doing either
+    is how ranking resolution gets lost. pandas' default float writer is already
+    round-trip safe (verified 1200/1200 bit-exact), so no float_format is set.
     """
     ids = list(ids)
-    missing = [c for c in PREDICTION_COLUMNS if c not in preds]
+    columns = tuple(columns)
+    if set(columns) != set(PREDICTION_COLUMNS):
+        raise KeyError(f"write_submission: columns must be the five prediction columns, got {columns}")
+    missing = [c for c in columns if c not in preds]
     if missing:
         raise KeyError(f"write_submission: missing prediction columns {missing}")
 
     df = pd.DataFrame({"ID": ids})
-    for col in PREDICTION_COLUMNS:
+    for col in columns:
         v = np.asarray(preds[col], dtype=np.float64)
         if v.shape != (len(ids),):
             raise ValueError(f"{col}: expected {len(ids)} values, got {v.shape}")
@@ -95,16 +126,22 @@ def write_submission(ids, preds, path, *, validate: bool = True) -> pd.DataFrame
     return df
 
 
-def validate_submission(path, reference_ids=None, *, strict_sanity: bool = True) -> pd.DataFrame:
+def validate_submission(path, reference_ids=None, reference_columns=None, *,
+                        strict_sanity: bool = True) -> pd.DataFrame:
     """Re-read a written submission and check it against the contract.
 
-    `reference_ids` is the ID column of `sample_submission.csv`. Row count,
-    ID set *and* ID order are all checked: the scorer joins on ID, but a
+    `reference_ids` and `reference_columns` come from sample_submission.csv.
+    Row count, ID set *and* ID order are checked: the scorer joins on ID, but a
     reordered file is a symptom of a bug worth catching here.
-    """
-    df = pd.read_csv(path, encoding="utf-8")
 
-    expected = ["ID", *PREDICTION_COLUMNS]
+    Read with float_precision="round_trip". pandas' default CSV float parser is
+    not correctly rounded and silently perturbs about a third of float64 values
+    by ~1e-17; without this the validator would be checking a re-parsed
+    approximation rather than what we actually wrote.
+    """
+    df = pd.read_csv(path, encoding="utf-8", float_precision="round_trip")
+
+    expected = ["ID", *(reference_columns or PREDICTION_COLUMNS)]
     if list(df.columns) != expected:
         raise VG5Error(f"columns are {list(df.columns)}, expected {expected}")
 
