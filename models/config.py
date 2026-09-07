@@ -59,10 +59,12 @@ class ConfigError(ValueError):
 
 #: Every channel policy `models.audio.prepare_waveform` implements, and the one
 #: place they are listed. 🔴 Exported so downstream guards can *enumerate* them
-#: rather than restate them: `training.collate.promote_channels` is only rule-2.4
-#: safe because every policy here is invariant to duplicating a mono channel, and
-#: the test that proves it reads this tuple -- so adding a policy without
-#: checking it fails the suite instead of shipping.
+#: rather than restate them: `training.collate.promote_channels` is rule-2.4 safe
+#: only because every policy here is invariant to repeating a row's channels **a
+#: whole number of times**, and the test that proves it reads this tuple -- so
+#: adding a policy without checking it fails the suite instead of shipping.
+#: ⚠️ The qualifier is not decoration. An uneven repeat (2 -> 3) breaks `downmix`
+#: by 1.12 at the model boundary, which is why `promote_channels` refuses one.
 CHANNEL_POLICIES = ("downmix", "left", "mid_side")
 
 

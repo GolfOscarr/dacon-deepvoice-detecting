@@ -60,14 +60,29 @@ def promote_channels(wav: Tensor, channels: int) -> Tensor:
       would be averaged against a channel of silence and come out at **half
       amplitude**, i.e. its score would depend on what shared its batch. That is
       the violation, not a rounding deviation.
-    * **cyclic repeat** of the row's own channels. Chosen, because it is the
-      identity at the model boundary: for every shipped policy
-      (``models.audio.CHANNEL_POLICIES``) ``prepare_waveform`` of the promoted
-      row is **bitwise** the un-promoted row -- ``mean(x, x) == x``,
-      ``left(x, x) == x``, ``0.5*(x + x) == x``, all exact in float32 because the
-      operations are multiplications by a power of two.
+    * **cyclic repeat** of the row's own channels. Chosen, but 🔴 **only when
+      ``channels`` is an exact multiple of ``have``**, and that qualifier is
+      load-bearing. When it divides, every shipped policy
+      (``models.audio.CHANNEL_POLICIES``) gives **bitwise** the un-promoted row:
+      each source channel appears the same number of times, so ``downmix``'s mean
+      is unchanged, ``left`` reads channel 0 either way and ``mid_side``'s
+      ``0.5*(c0 + c1)`` is unchanged -- exact in float32, since the arithmetic is
+      multiplication by a power of two. When it does **not** divide, the repeat
+      is uneven and the identity fails outright: 2 -> 3 gives ``[L, R, L]``,
+      which ``downmix`` averages to ``(2L + R)/3`` instead of ``(L + R)/2``.
+      Measured max deviation **1.05** raw, and **1.12** end to end at the model
+      boundary for a stereo row collated beside a 3-channel one -- the same
+      half-amplitude class of violation this rejects zero-fill for.
 
-    ⚠️ So the invariance is not a property of *this* function alone: it is a
+    So an uneven promotion is refused rather than performed. ⚠️ It is latent
+    today only because no corpus file has more than 2 channels, which is a
+    property of the corpus and not an invariant of this code: ``sf.read`` is
+    called with ``always_2d=True``, ``render._to_channels`` keeps the leading
+    channels of a multi-channel source rather than downmixing it, and the
+    ``channels`` normalize draw accepts ``null``. A 5.1 file entering the corpus
+    must fail loudly here, not silently rescale a stereo neighbour's score.
+
+    ⚠️ The invariance is not a property of *this* function alone either: it is a
     joint property of the promotion and the channel policy, and a new policy
     could break it (a hypothetical ``side`` policy would read 0 from a promoted
     mono row rather than its true absence of a second channel). It is therefore
@@ -85,8 +100,16 @@ def promote_channels(wav: Tensor, channels: int) -> Tensor:
         return wav
     if have > channels:                                       # pragma: no cover
         raise ValueError(f"row has {have} channels, more than the batch's {channels}")
-    reps = -(-channels // have)                               # ceil
-    return wav.repeat(reps, 1)[:channels]
+    if channels % have:
+        raise ValueError(
+            f"cannot promote a {have}-channel row into a {channels}-channel "
+            f"batch: {channels} is not a multiple of {have}, so the repeat is "
+            f"uneven and the row's own content would change -- 2 -> 3 downmixes "
+            f"to (2L+R)/3 rather than (L+R)/2, a rule-2.4 violation of up to "
+            f"1.12 at the model boundary. Split the batch by channel count, or "
+            f"apply a channel policy before collation")
+    reps = channels // have
+    return wav.repeat(reps, 1)
 
 
 def collate(samples: Sequence[RenderedSample], *,
@@ -119,6 +142,18 @@ def collate(samples: Sequence[RenderedSample], *,
     n = len(samples)
     channels = max(int(s.wav.shape[0]) for s in samples)
     s_max = max(int(s.wav.shape[-1]) for s in samples)
+
+    # 🔴 Refused here, with the whole batch in hand, rather than one row at a
+    # time inside `promote_channels`: the caller needs to know which counts
+    # collided, and the answer ("split the batch by channel count") is a
+    # statement about the batch. See `promote_channels` for the arithmetic.
+    uneven = sorted({c for c in (int(s.wav.shape[0]) for s in samples)
+                     if channels % c})
+    if uneven:
+        raise ValueError(
+            f"batch mixes channel counts {uneven} with a {channels}-channel row; "
+            f"{channels} is not a multiple of {uneven}, so promotion would change "
+            f"those rows' own content (2 -> 3 downmixes to (2L+R)/3, not (L+R)/2)")
 
     wav = torch.full((n, channels, s_max), float(pad_value), dtype=torch.float32)
     lengths = torch.empty(n, dtype=torch.int64)
@@ -155,15 +190,32 @@ def collate(samples: Sequence[RenderedSample], *,
 # is sensitive to batch composition and bucketing may be chosen purely for
 # padding efficiency.
 #
-# 🔴 Two caveats survive and both are live. Bucketing must not fight **C2**: a
-# duration bucket is still a batch and must meet the per-head present-count
-# floor, and duration and cell are not independent (sequential compositions run
-# long), so bucketing reshapes the per-batch cell mix. Bucketed batches are
-# therefore auditable with `training.audit.audit_specs(..., batch_size=...)` --
-# see `tests/test_collate.py::test_bucketing_does_not_starve_a_masked_head`,
-# which sweeps seeds rather than trusting one. And the duration-vs-score check
-# on the REAL class must be measured on **unbucketed** eval batches, which the
-# frozen eval spec list is by construction (`training.dataset`).
+# ✅ **Duration and cell are independent, by construction rather than by luck.**
+# `sample_spec` draws `duration_s` FIRST, from the test distribution U(4, 60),
+# and only then draws the cell and fits the components into that timeline
+# (`take = min(seg, row.duration_s)`). Nothing downstream can feed back into the
+# length, so a duration bucket cannot be a cell filter. Measured over 2,000 drawn
+# specs cut into four quantile buckets: voice presence 0.682 / 0.678 / 0.676 /
+# 0.694 and music presence 0.656 / 0.678 / 0.674 / 0.688, flat across the whole
+# 4-60 s span.
+#
+# ⚠️ An earlier version of this note claimed the opposite -- "sequential
+# compositions run long" -- and it is simply false against this sampler: a
+# sequential draw reuses the same drawn duration rather than concatenating two,
+# so mean duration is 30.85 s sequential against 30.38 s overlap, and sequential
+# runs at 40-52 per 500 in every bucket. The independence is a property we impose
+# (draw the length from the test distribution, then fit), which is a stronger
+# guarantee than the accident that was being claimed.
+#
+# 🔴 The **C2** check therefore stays as cheap insurance, not as a live hazard:
+# `audit_specs(specs, batches=training_batches(...))` measures the per-head
+# present count on the plan the optimiser will actually step on. Pass the plan --
+# a `batch_size` alone cuts the stream in draw order, which stopped being the
+# training order the moment bucketing arrived.
+#
+# And the duration-vs-score check on the REAL class must be measured on
+# **unbucketed** eval batches, which the frozen eval spec list is by construction
+# (`training.dataset.eval_batches`).
 
 
 def bucket_edges(durations: Sequence[float], n_buckets: int = 4) -> tuple[float, ...]:
@@ -187,7 +239,23 @@ def bucket_edges(durations: Sequence[float], n_buckets: int = 4) -> tuple[float,
 
 
 def bucket_of(duration: float, edges: Sequence[float]) -> int:
-    """Which bucket a duration falls in, given ``bucket_edges``' interior edges."""
+    """Which bucket a duration falls in, given ``bucket_edges``' interior edges.
+
+    ⚠️ ``side="right"`` is a tie-break convention with **no observable
+    consequence here**, and it is documented rather than tested because there is
+    nothing to test. It differs from ``side="left"`` only for a duration exactly
+    equal to an edge, and over 2,000 drawn specs there were 0 such rows and 0
+    rows assigned differently by the two -- durations come from
+    ``rng.uniform(4, 60)`` and the edges from ``np.quantile``'s interpolation, so
+    exact equality has measure zero. Asserting one of them would pin an arbitrary
+    choice, which is how a test starts confirming the implementation.
+
+    🔴 The property that *is* worth holding, and is tested: bucketing is a
+    function of the **duration**, so two equal durations always land in the same
+    bucket. A rank-based bucketer (``np.array_split`` over ``argsort``) is the
+    plausible alternative and splits ties across a boundary, which makes the
+    batch a row happens to land in depend on the other rows.
+    """
     return int(np.searchsorted(np.asarray(edges, dtype=float), float(duration),
                                side="right"))
 

@@ -120,6 +120,42 @@ def test_lengths_are_each_rows_own_sample_count_not_the_padded_width(samples):
         "the fixture stopped being ragged, so this test stopped testing anything"
 
 
+def test_each_rows_own_channels_appear_bitwise_at_offset_zero(samples):
+    """🔴 The batch must contain each row's audio, unaltered and at offset 0.
+
+    ⚠️ Sliced to `s.wav.shape[0]` -- the **sample's** channel count -- and never
+    to `batch["wav"].shape[1]`, so this cannot be satisfied by restating the
+    promotion rule. It is the content half of the contract; `lengths` is the
+    extent half and the zero-padding test is the position half, and all three
+    were needed: a collator that rolled the waveform (0.587), normalised per row
+    (0.637), flipped the channels (0.583) or cast to bf16 (4.9e-4) passed every
+    other test in this file.
+    """
+    batch = collate(samples)
+    for i, sample in enumerate(samples):
+        got = batch["wav"][i, :sample.wav.shape[0], :sample.wav.shape[-1]]
+        assert torch.equal(got, sample.wav.to(torch.float32)), \
+            f"row {i}: the batch does not contain the sample's own audio"
+
+
+@pytest.mark.parametrize("corrupt,name", [
+    (lambda w: torch.roll(w, 1_000, dims=-1), "rolled"),
+    (lambda w: w / w.abs().max().clamp(min=1e-9), "per-row normalised"),
+    (lambda w: w.flip(0), "channel-flipped"),
+    (lambda w: w.to(torch.bfloat16).to(torch.float32), "bf16 round-tripped"),
+])
+def test_the_content_check_can_fail(samples, corrupt, name):
+    """Mutation for the check above -- the four corruptions the reviewer found
+    slipping through a suite that checked only shape, length and padding."""
+    sample = samples[0]
+    hurt = RenderedSample(wav=corrupt(sample.wav), sample_rate=sample.sample_rate,
+                          targets=sample.targets,
+                          frame_intervals=sample.frame_intervals, spec=sample.spec)
+    batch = collate([hurt])
+    got = batch["wav"][0, :sample.wav.shape[0], :sample.wav.shape[-1]]
+    assert not torch.equal(got, sample.wav.to(torch.float32)), name
+
+
 def test_the_padding_region_is_zero(samples):
     batch = collate(samples)
     for i, n in enumerate(batch["lengths"]):
@@ -316,6 +352,48 @@ def test_zero_filling_the_channel_axis_is_caught():
     assert 0.49 < ratio < 0.51, f"expected the half-amplitude signature, got {ratio}"
 
 
+def test_an_uneven_promotion_is_refused_rather_than_performed():
+    """🔴 The one production defect the review found, and its number.
+
+    Cyclic repeat is the identity at the model boundary only when the target is
+    an exact multiple of the row's own channel count. 2 -> 3 gives `[L, R, L]`,
+    which `downmix` averages to `(2L+R)/3` instead of `(L+R)/2` -- so a stereo
+    row's audio changes because a 3-channel row shared its batch. That is the
+    half-amplitude violation `promote_channels` rejects zero-fill for, arriving
+    through the rule that replaced it.
+
+    ⚠️ Latent today only because no corpus file has more than 2 channels, which
+    is a property of the corpus and not of this code: `sf.read` uses
+    `always_2d=True`, `render._to_channels` keeps the leading channels of a
+    multi-channel source, and the `channels` normalize draw accepts `null`.
+    """
+    stereo = _noise(SR * 4, channels=2, seed=1)
+    with pytest.raises(ValueError, match="not a multiple"):
+        promote_channels(stereo, 3)
+
+    # And the collator refuses the batch that would need it, naming both counts.
+    with pytest.raises(ValueError, match=r"channel counts \[2\]"):
+        collate([_fake(stereo), _fake(_noise(SR * 5, channels=3, seed=2), sample_id=1)])
+
+
+def test_the_uneven_promotion_would_have_moved_the_audio():
+    """Non-vacuity for the refusal: measure what it is refusing.
+
+    Without this the test above would pass against a `promote_channels` that
+    refused for no reason. The deviation is asserted on `prepare_waveform`
+    output -- the model's input -- not on the raw tensor.
+    """
+    stereo = _noise(SR * 4, channels=2, seed=1)
+    uneven = torch.cat([stereo, stereo[:1]], dim=0)          # [L, R, L]
+    cfg = AudioConfig(channels="downmix")
+
+    honest = prepare_waveform(stereo[None], cfg)[0]
+    lied = prepare_waveform(uneven[None], cfg)[0]
+    assert torch.allclose(lied, (2 * stereo[0] + stereo[1]) / 3, atol=1e-6)
+    moved = float((honest - lied).abs().max())
+    assert moved > 0.5, moved                                # measured 1.05
+
+
 def test_promote_channels_repeats_rather_than_pads():
     row = _noise(100, channels=1, seed=3)
     out = promote_channels(row, 2)
@@ -362,12 +440,19 @@ def test_the_submitted_probability_does_not_move_with_the_batch(samples, model, 
     file's probability from 0.519 to 0.847 depending on its batch.
 
     The shipped collator pads with zeros, so a row's padded tail is the same
-    whatever else is in the batch. The seed sweeps which rows share the batch and
-    in what order: four rounds of flakiness in this repo traced to every test
-    drawing seed 0.
+    whatever else is in the batch.
+
+    ⚠️ The sweep draws a random **subset** of the other rows, not a permutation
+    of all of them. A permutation keeps the company and therefore `S_max`
+    constant, so all four seeds produced the bit-identical deviation
+    1.7059283430320704e-09 -- one test run four times. With a varying subset the
+    padded width varies, which is the thing that could move a score.
     """
     rng = np.random.default_rng(seed)
-    order = list(rng.permutation(len(samples)))
+    others = list(rng.permutation(np.arange(1, len(samples))))
+    keep = others[:int(rng.integers(1, len(others) + 1))]
+    order = [0] + [int(i) for i in keep]
+    rng.shuffle(order)
     where = order.index(0)
 
     alone = _submitted(model, collate([samples[0]]))
@@ -496,6 +581,90 @@ def test_bucketing_is_deterministic_and_partitions_the_stream(draw_durations):
     assert len(flat) >= len(d) - 4 * 31
 
 
+def test_the_batch_order_is_shuffled_not_short_files_first(draw_durations):
+    """🔴 Deleting `order = rng.permutation(...)` passed every other test.
+
+    Buckets are built shortest-first, so without the final shuffle every epoch
+    walks the short files first and the long ones last -- a duration schedule the
+    optimiser sees, which is batch composition back in the objective by the side
+    door. §3's whole argument is that bucketing is free of that.
+
+    Measured on the mean duration per batch position: unshuffled, the rank
+    correlation with batch index is +1.0 by construction. Shuffled it must be
+    near zero, and the bound is derived from the null -- Spearman's rho over B
+    batches has sd 1/sqrt(B-1) under H0, so 4 sd is the gate.
+    """
+    d = spec_durations(draw_durations)
+    plan = bucket_batches(d, 32, n_buckets=4, seed=0)
+    means = np.array([np.mean([d[i] for i in b]) for b in plan])
+
+    order_rank = np.argsort(np.argsort(np.arange(len(means))))
+    dur_rank = np.argsort(np.argsort(means))
+    rho = float(np.corrcoef(order_rank, dur_rank)[0, 1])
+    gate = 4.0 / np.sqrt(len(means) - 1)
+    assert abs(rho) < gate, f"batches are ordered by duration: rho={rho:.3f}"
+
+    # Not vacuous: the same statistic on the unshuffled plan is +1.0.
+    ordered = sorted(plan, key=lambda b: np.mean([d[i] for i in b]))
+    om = np.array([np.mean([d[i] for i in b]) for b in ordered])
+    rho_sorted = float(np.corrcoef(np.arange(len(om)), np.argsort(np.argsort(om)))[0, 1])
+    assert rho_sorted > 0.99, rho_sorted
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_quantile_edges_stay_balanced_where_equal_width_edges_do_not(seed):
+    """The justification in `bucket_edges`' docstring, tested where it bites.
+
+    ⚠️ **Not** on the drawn stream. `SamplerConfig.duration_range` is `U(4, 60)`,
+    so equal-width edges are balanced there too (measured 0.224-0.291 across four
+    buckets) -- a test on that stream cannot tell the two rules apart, and a
+    first version of this one said so by failing its own non-vacuity guard.
+
+    The claim `bucket_edges` actually makes is about *any* stream it is handed:
+    occupancy decides both padding efficiency and how many batches a bucket
+    yields, and a thin bucket loses nearly all of its rows to `drop_last`. A
+    skewed stream is where the two rules diverge, and durations skew the moment
+    a corpus's own lengths reach the draw (a short-clip pool truncates
+    `ComponentDraw.duration_s`) or `duration_range` is swept.
+    """
+    rng = np.random.default_rng(seed)
+    skewed = np.clip(4.0 + rng.lognormal(1.0, 1.0, 4_000), 4.0, 60.0)
+
+    q = np.bincount([bucket_of(x, bucket_edges(skewed, 4)) for x in skewed],
+                    minlength=4) / len(skewed)
+    lo, hi = skewed.min(), skewed.max()
+    wide = tuple(lo + (hi - lo) * k / 4 for k in (1, 2, 3))
+    w = np.bincount([bucket_of(x, wide) for x in skewed], minlength=4) / len(skewed)
+
+    assert q.min() > 0.20 and q.max() < 0.30, q.tolist()
+    # Non-vacuity, on the same stream: equal width leaves a bucket starved.
+    assert w.min() < 0.10, w.tolist()
+
+
+def test_equal_durations_never_split_across_buckets():
+    """Bucketing is a function of the duration, not of the row's rank.
+
+    ⚠️ `bucket_of`'s `side="right"` is a tie-break with no observable effect on a
+    drawn stream (0 of 2,000 rows assigned differently by `side="left"`, because
+    exact ties with a quantile edge have measure zero over `U(4, 60)`). This is
+    the property underneath it that does bite: a rank-based bucketer --
+    `np.array_split` over `argsort`, the obvious alternative -- splits a tied
+    mass across a boundary, so which batch a row lands in depends on the others.
+    """
+    # ⚠️ Deliberately uneven group sizes. With 400/400/400 the rank thirds land
+    # exactly on the value boundaries and the rank-based bucketer agrees by
+    # accident -- so the non-vacuity check below would pass for the wrong reason.
+    d = [10.0] * 500 + [20.0] * 100 + [30.0] * 600
+    edges = bucket_edges(d, 3)
+    for value in (10.0, 20.0, 30.0):
+        assert len({bucket_of(x, edges) for x in d if x == value}) == 1, value
+
+    # Non-vacuity: the rank-based alternative splits both tied masses.
+    ranked = np.argsort(np.argsort(d)) * 3 // len(d)
+    for value in (10.0, 30.0):
+        assert len({int(b) for b, x in zip(ranked, d) if x == value}) > 1, value
+
+
 def test_a_batch_never_straddles_a_bucket(draw_durations):
     d = spec_durations(draw_durations)
     edges = bucket_edges(d, 4)
@@ -521,28 +690,31 @@ def test_bucketing_is_the_padding_win_it_claims_to_be(draw_durations):
 def test_bucketing_does_not_starve_a_masked_head(draw_durations, seed):
     """🔴 The C2 caveat docs/pipelines/04 §3 leaves live, measured not assumed.
 
-    Duration and cell are not independent -- sequential compositions run long --
-    so bucketing reshapes the per-batch cell mix, and with it the per-head
-    present counts C2 floors. The check is run over the *bucketed* batches, and
-    the seed is swept: four rounds of flakiness in this repo traced to every
-    test drawing seed 0.
+    ✅ Duration and cell are independent by construction -- `sample_spec` draws
+    the duration first, from U(4, 60), then fits components into it -- so this is
+    insurance rather than a live hazard (measured presence per bucket:
+    0.676-0.694). It stays because the property is worth a tripwire and the check
+    is cheap, and the seed is swept: four rounds of flakiness in this repo traced
+    to every test drawing seed 0.
 
     The floor is `audit_specs`' own `min_present=8` at `batch_size=32`, which is
     where docs/pipelines/02 §4's table puts the gradient-norm inflation at 2.0x.
+
+    🔴 The count is **not** reimplemented here. An earlier version looped over
+    the plan inline and then asserted that `audit_specs`' *draw-order* batching
+    also passed -- two different batchings, one of which the optimiser never
+    sees. That is the adjacent-quantity pattern, in the file written against it.
+    `audit_specs(..., batches=)` now takes the plan itself, so the shipped check
+    and the shipped batching are the same two objects.
     """
     from training.audit import audit_specs
 
     specs = list(draw_durations)
-    d = spec_durations(specs)
-    for batch in bucket_batches(d, 32, n_buckets=4, seed=seed):
-        rows = [specs[i] for i in batch]
-        for key in ("voice_present", "music_present"):
-            assert sum(getattr(s, key) for s in rows) >= 8, \
-                f"seed {seed}: a bucketed batch starves {key}"
-    # And the same stream, audited in the same units, agrees.
-    report = audit_specs(specs, batch_size=32)
-    assert report.results["I9_C2_present_count_floor"][0], \
-        report.results["I9_C2_present_count_floor"][1]
+    plan = bucket_batches(spec_durations(specs), 32, n_buckets=4, seed=seed)
+    report = audit_specs(specs, batches=plan, min_present=8)
+    passed, why = report.results["I9_C2_present_count_floor"]
+    assert passed, f"seed {seed}: {why}"
+    assert "supplied plan" in why, "the report must say which batching it measured"
 
 
 def test_the_starvation_check_can_fail(draw_durations):
@@ -550,11 +722,24 @@ def test_the_starvation_check_can_fail(draw_durations):
 
     Sorting the stream by whether voice is present is the extreme of what
     bucketing does mildly -- it makes batch composition a function of a label.
+    Run through the same `batches=` path the check above uses, so the mutation
+    exercises the shipped code rather than a loop written next to it.
     """
-    specs = sorted(draw_durations, key=lambda s: s.voice_present)
-    starved = 0
-    for start in range(0, len(specs) - 31, 32):
-        rows = specs[start:start + 32]
-        if sum(s.voice_present for s in rows) < 8:
-            starved += 1
-    assert starved > 0
+    from training.audit import audit_specs
+
+    specs = list(draw_durations)
+    by_presence = sorted(range(len(specs)), key=lambda i: specs[i].voice_present)
+    plan = [by_presence[k:k + 32] for k in range(0, len(specs) - 31, 32)]
+    report = audit_specs(specs, batches=plan, min_present=8)
+    passed, why = report.results["I9_C2_present_count_floor"]
+    assert not passed, why
+    assert "voice" in why
+
+
+def test_the_audited_plan_must_index_the_stream_it_audits(draw_durations):
+    """A plan from another epoch would silently measure the wrong specs."""
+    from training.audit import audit_specs
+
+    specs = list(draw_durations)
+    with pytest.raises(ValueError, match="outside the spec list"):
+        audit_specs(specs, batches=[[0, 1, len(specs) + 5]])
