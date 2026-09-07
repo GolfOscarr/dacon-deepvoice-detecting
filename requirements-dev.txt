@@ -7,3 +7,9 @@ numpy
 pandas
 scipy          # simulations in scripts/verify_metric.py only; not a runtime dep
 pytest
+
+# Pinned to the evaluation server's version (torch==2.7.1+cu128 there, CPU wheel
+# here). The server's build is CUDA; matching the version keeps the skew that
+# PROGRESS.md already tracks from widening further.
+torch==2.7.1
+pyyaml
