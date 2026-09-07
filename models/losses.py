@@ -108,7 +108,9 @@ def multitask_loss(
             y = y * (1 - eps) + 0.5 * eps
 
         out = outputs[branch]
-        fmask = (frame_masks or {}).get(branch)
+        # Same reason as models.outputs.branch_logit: an unmasked frame_max
+        # trains against arbitrary padded-frame logits.
+        fmask = (frame_masks or {}).get(branch, out.get("mask"))
         clip = out["clip_logits"]
         fmax = frame_max(out["frame_logits"], fmask)
 

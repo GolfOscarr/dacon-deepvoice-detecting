@@ -110,16 +110,47 @@ def test_ranking_over_a_canned_set_is_batch_invariant(model):
 
 
 def test_padding_content_cannot_leak_into_a_score(model):
-    """Same file, two different pad fillings -> identical score."""
+    """Same file, two different pad fillings -> identical score.
+
+    🔴 Asserted on the **submitted probabilities**, not on clip_logits. An
+    earlier version of this test checked clip_logits only and passed while the
+    submission path was broken: attention already excludes padding, but the
+    frame_max term did not, so the number we would have uploaded moved from
+    0.519 to 0.847 depending on what shared the batch.
+    """
     torch.manual_seed(2)
     x = torch.randn(1, SR * 4)
     lengths = torch.tensor([SR * 4])
-    quiet = model(torch.nn.functional.pad(x, (0, SR * 4)), lengths)
+    quiet = model.submission_probs(model(torch.nn.functional.pad(x, (0, SR * 4)), lengths))
     loud = torch.cat([x, torch.randn(1, SR * 4) * 50], dim=-1)
-    noisy = model(loud, lengths)
-    for branch in model.cfg.branches:
-        assert torch.allclose(quiet[branch]["clip_logits"],
-                              noisy[branch]["clip_logits"], atol=1e-4), branch
+    noisy = model.submission_probs(model(loud, lengths))
+    for column in quiet:
+        assert torch.allclose(quiet[column], noisy[column], atol=1e-9), column
+
+
+def test_submitted_probabilities_are_batch_invariant(model):
+    """The end-to-end contract: what we upload must not move with the batch."""
+    torch.manual_seed(3)
+    solo = torch.randn(1, SR * 4)
+    alone = model.submission_probs(model(solo, torch.tensor([SR * 4])))
+
+    others = torch.randn(7, SR * 9) * 10
+    batch = torch.cat([torch.nn.functional.pad(solo, (0, SR * 5)), others])
+    lengths = torch.tensor([SR * 4] + [SR * 9] * 7)
+    together = model.submission_probs(model(batch, lengths))
+
+    for column in alone:
+        assert torch.allclose(alone[column], together[column][:1], atol=1e-6), column
+
+
+def test_frame_max_respects_the_mask_recorded_by_the_head():
+    """The head carries its mask so callers cannot forget it."""
+    m = _model("b_stub")
+    out = m(torch.nn.functional.pad(torch.randn(1, SR * 4), (0, SR * 4)),
+            torch.tensor([SR * 4]))
+    assert out["file"]["mask"].shape == out["file"]["frame_logits"].shape
+    assert out["file"]["mask"][0, :200].all()
+    assert not out["file"]["mask"][0, 200:].any()
 
 
 def test_deterministic_in_eval_mode(model):

@@ -32,6 +32,13 @@ class SEDOutput(dict):
                              the interpretability artifact the 2nd-stage report
                              is scored on
     ``attention``    (B, T)  where the model actually looked
+    ``mask``         (B, T)  which frames are real
+
+    🔴 ``mask`` is carried here rather than left to the caller because
+    ``frame_logits`` on padded frames are arbitrary. A ``frame_max`` taken
+    without it makes a file's submitted score depend on what was batched with
+    it -- which is a rule 2.4 violation, and one that `clip_logits` alone does
+    not expose, since attention already excludes padding.
     """
 
     __getattr__ = dict.__getitem__
@@ -124,10 +131,12 @@ class SEDHead(nn.Module):
                     f"{tuple(frame_logits.shape)}")
             att_logits = att_logits.masked_fill(~mask, float("-inf"))
 
+        if mask is None:
+            mask = torch.ones_like(frame_logits, dtype=torch.bool)
         attention = torch.softmax(att_logits, dim=-1)
         clip_logits = (attention * frame_logits).sum(dim=-1)
-        return SEDOutput(
-            clip_logits=clip_logits, frame_logits=frame_logits, attention=attention)
+        return SEDOutput(clip_logits=clip_logits, frame_logits=frame_logits,
+                         attention=attention, mask=mask)
 
 
 def frame_max(frame_logits: Tensor, mask: Tensor | None = None) -> Tensor:

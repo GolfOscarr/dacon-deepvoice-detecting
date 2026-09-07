@@ -31,6 +31,35 @@ components present and independently fake, which leaves a hard switch undefined.
 
 ---
 
+## The whole path, once
+
+Everything else on this page is a detail of these six lines.
+
+```python
+import torch
+
+from models.audio import prepare_waveform
+from models.config import load_model_config
+from models.model import DeepVoiceNet
+
+cfg = load_model_config("configs/b_stub.yaml")
+model = DeepVoiceNet(cfg).eval()
+
+stereo = torch.randn(2, 2, 16_000 * 5)                    # (B, C, S) as decoded
+wav = prepare_waveform(stereo, cfg.audio)                 # -> (B, S) per audio.channels
+lengths = torch.tensor([16_000 * 5, 16_000 * 3])          # real samples per file
+
+with torch.no_grad():
+    probs = model.submission_probs(model(wav, lengths))   # {column: (B,) float64}
+```
+
+⚠️ Two of those six lines are easy to skip and both are wrong to skip. `prepare_waveform`
+applies the channel policy — the model takes mono `(B, S)` and will reject `(B, C, S)`. And
+`lengths` is what makes the frame mask correct; without it every padded frame counts as real
+audio.
+
+---
+
 ## Build a model
 
 ```python
@@ -65,8 +94,15 @@ out["file"]["attention"]                  # (B, T) where the model looked
 ```
 
 `lengths` is what makes the frame mask correct. Omit it only when every file in the batch is
-the same length — otherwise padding enters the attention softmax and a file's score starts
-depending on what is batched with it, which rule 2.4 forbids.
+the same length — otherwise padding is treated as audio and a file's score starts depending on
+what is batched with it, which rule 2.4 forbids.
+
+🔴 **The mask travels with the output**, as `out[branch]["mask"]`, and `submission_probs` and
+`multitask_loss` both use it automatically. That is deliberate: `clip_logits` are already
+padding-safe because attention excludes masked frames, but `frame_max` is not — and a
+`frame_max` taken over padded frames moved a submitted probability from 0.519 to 0.847 for the
+same file, depending only on what shared its batch. Do not recompute `frame_max` yourself
+without passing a mask.
 
 ## Produce submission numbers
 
@@ -112,6 +148,18 @@ equally. Ours weights File .45 / Music .27 / Voice .18. This is a flagged open k
 ([09 B11](../docs/architecture/09-open-questions.md)), and the default is currently *wrong*
 rather than neutral.
 
+## Inspecting what you built
+
+```python
+print(model.columns)                      # branch -> submission column
+print(f"{model.n_parameters():,} params, {model.n_parameters(True):,} trainable")
+print({name: fe.fps for name, fe in model.frontends.items()})
+```
+
+⚠️ A large gap between total and trainable is expected and is the point: `freeze: true` means
+the encoder contributes parameters but no gradients. If the two numbers are equal on a config
+that says `freeze: true`, something is wrong — there is a test for exactly that.
+
 ## Checkpoints
 
 ```python
@@ -126,21 +174,30 @@ The config is stored beside the weights and the model is rebuilt from it before 
 the guard `script.py` needs, since a silently mis-shaped model would otherwise write a
 well-formed `submission.csv` full of 0.5 and score exactly 0.5000 without raising.
 
-## Windows, if you tile
+## Windows, if you ever tile
+
+⚠️ **`DeepVoiceNet` refuses `segmentation.mode: tiling`** — it consumes a whole waveform, and
+windowing belongs to the inference script. `aggregate_windows` is therefore a standalone helper
+for that script rather than something the model calls:
 
 ```python
 from models.config import AggregationConfig
 from models.outputs import aggregate_windows
 
-window_logits = torch.randn(4, 12)        # (files, windows)
+window_logits = torch.randn(4, 12)        # (files, windows), from your own windowing
 file_logits = aggregate_windows(window_logits, AggregationConfig(kind="topk_mean", k=3))
 ```
 
 ⚠️ **Every order-statistic aggregator carries a duration bias** — measured spread over 1–12
-windows on identical content: `max` 1.63, `top-k mean` 1.18, `quantile` 1.08, `mean` 0.004. Long
-files score higher than short ones on the same content, inside a ranking that pools 4–60 s files.
-Both shipped configs therefore use `segmentation.mode: whole_file`, which has no windows and so
-no bias to trade against dilution.
+windows on identical content:
+
+| `max` | `top-k mean` | `quantile` | `mean` |
+|---|---|---|---|
+| 1.63 | 1.18 | 1.08 | **0.004** |
+
+Long files score higher than short ones on identical content, inside a ranking that pools
+4–60 s files. Only `mean` is neutral, and it dilutes — which is the problem the SED head exists
+to solve. Both shipped configs therefore use `whole_file`, where the dilemma does not arise.
 
 
 ---

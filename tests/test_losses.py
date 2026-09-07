@@ -165,3 +165,18 @@ def test_distillation_contributes_when_enabled():
     _, parts = multitask_loss(out, targets, cfg, LossConfig(),
                               teacher_emb=torch.randn(2, cfg.distill.embed_dim))
     assert parts["distill"] > 0
+
+
+def test_loss_frame_max_ignores_padding_by_default():
+    """The training signal must not come from padded-frame logits either."""
+    model, cfg = _model()
+    x = torch.randn(1, SR * 4)
+    lengths = torch.tensor([SR * 4])
+    targets = _targets([1], [1], voice_fake=[1.0], music_fake=[0.0])
+
+    quiet = model(torch.nn.functional.pad(x, (0, SR * 4)), lengths)
+    loud = model(torch.cat([x, torch.randn(1, SR * 4) * 50], dim=-1), lengths)
+    _, a = multitask_loss(quiet, targets, cfg, LossConfig())
+    _, b = multitask_loss(loud, targets, cfg, LossConfig())
+    for head in ("voice", "music", "file"):
+        assert a[head] == pytest.approx(b[head], abs=1e-6), head

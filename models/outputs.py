@@ -40,7 +40,14 @@ def blend_logits(clip_logits: Tensor, frame_max_logits: Tensor, clip_weight: flo
 
 
 def branch_logit(out: SEDOutput, head_cfg: SEDHeadConfig, mask: Tensor | None = None) -> Tensor:
-    """One branch's blended file-level logit."""
+    """One branch's blended file-level logit.
+
+    🔴 Defaults to the mask the head recorded. Passing nothing used to mean
+    "frame_max over every frame including padding", which made the submitted
+    number depend on batch composition even though `clip_logits` did not.
+    """
+    if mask is None:
+        mask = out.get("mask")
     return blend_logits(out["clip_logits"],
                         frame_max(out["frame_logits"], mask),
                         head_cfg.clip_weight)
