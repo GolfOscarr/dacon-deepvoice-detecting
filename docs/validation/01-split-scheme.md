@@ -173,8 +173,8 @@ Pooled numbers are **not reportable on their own**. Every experiment emits:
 
 | Breakdown | Why |
 |---|---|
-| Per **cell** (1–9) | A good pooled number hides a collapsed cell — cells 6/7 are the whole reason two fake heads exist |
-| Per **artifact_family** | Feeds [`E-A9`](../data/07-eda-plan.md) generator difficulty; identifies where budget goes |
+| Per **cell** (1–9) | A small collapsed cell moves the pooled EER by less than the measurement noise — cells 6/7 are the whole reason two fake heads exist. Scored against a [shared contrast pool](02-metric-harness.md#-label-determining-keys-need-a-shared-contrast-pool) |
+| Per **artifact_family** | Feeds [`E-A9`](../data/07-eda-plan.md) generator difficulty; identifies where budget goes. Also shared-contrast |
 | Per **fold** (mean + sd) | ★ E5: *"a model with slightly lower mean but lower fold variance is often a better final candidate"* |
 | **T3-pairs only** | The corpus-identity leakage detector — [VG4](04-audit-gates.md#vg4--corpus-identity-leakage) |
 | Sung vs spoken | [09 R5](../data/09-risks-and-checks.md) |

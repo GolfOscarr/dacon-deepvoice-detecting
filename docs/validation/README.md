@@ -56,6 +56,9 @@ prints every table in [02](02-metric-harness.md) and [05](05-lb-probe-plan.md):
 - Fold assignment generated **once**, frozen to `folds.parquet`, reused by every experiment (★ E4)
 - **Generator-disjoint by artifact family**, not by model name ([09 R4](../data/09-risks-and-checks.md))
 - The **PROBE slice is sealed** — a hard budget of 3 openings for the whole competition
-- Report **per cell and per generator**, never pooled only — a good pooled number hides a dead cell
+- Report **per cell and per generator**, never pooled only — a dead cell at 2% of the corpus shifts
+  the pooled EER by ~1 pt, inside the noise band, while the cell itself sits at chance
+- Cell and family are **label-determining**, so those slices need a
+  [shared contrast pool](02-metric-harness.md#-label-determining-keys-need-a-shared-contrast-pool)
 - 🔴 **OOF decides whether an idea survives; the public LB is a weak cross-check only** (★ E1)
 - No experiment is quotable without a **VG1–VG6 pass** recorded alongside it

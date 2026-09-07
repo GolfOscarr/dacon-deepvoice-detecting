@@ -39,8 +39,8 @@ trustworthy ([§4](#4-how-we-aggregate), [§6](#6-confidence-intervals)).
 | `Score_sd` | sd over the 5 VAL folds | ★ E5 tiebreaker — lower variance wins a tie |
 | `Δ_paired` | candidate − incumbent, same folds/seeds/composition | **[P1](03-decision-protocol.md#3-the-promotion-rule)** — the promotion test |
 | `CI95(Δ)` | group bootstrap over `artifact_family`, 10k resamples | P1's decision boundary |
-| `worst_cell_eer` | max over cells 1–9 of that cell's file EER | **P2** — no cell may regress |
-| `worst_family_eer` | max over artifact families | **P3** — no family may collapse |
+| `worst_cell_eer` | max over cells 1–9, shared contrast, thin slices excluded | **P2** — no cell may regress |
+| `worst_family_eer` | max over artifact families, shared contrast | **P3** — no family may collapse |
 | `shadow_delta` | `Score(VAL) − Score(SHADOW-a)`, paired via `shadow_of` | Domain-shift robustness |
 | `runtime_s_per_file` | wall clock ÷ 1,200, on L4 | **P5** — hard budget 3.0 s |
 
@@ -50,8 +50,8 @@ Never a promotion criterion on their own. They decide what to work on next.
 
 | Metric | Breakdown | Reads |
 |---|---|---|
-| `per_cell_eer` | cells 1–9 ([taxonomy](../data/02-label-taxonomy.md)) | Are cells 6/7 actually learned, or have the fake heads entangled? |
-| `per_family_eer` | artifact family | Feeds [`E-A9`](../data/07-eda-plan.md) difficulty ranking |
+| `per_cell_eer` | cells 1–9 ([taxonomy](../data/02-label-taxonomy.md)), **shared contrast** | Are cells 6/7 actually learned, or have the fake heads entangled? |
+| `per_family_eer` | artifact family, **shared contrast** | Feeds [`E-A9`](../data/07-eda-plan.md) difficulty ranking |
 | `per_fold_score` | fold 0–4 | Instability, and which family group is the outlier |
 | `t3_pair_eer` | T3 matched pairs only | **The corpus-identity control** — see [VG4](04-audit-gates.md#vg4--corpus-identity-leakage) |
 | `sung_eer` / `spoken_eer` | voice subtype | [R5](../data/09-risks-and-checks.md) sung-voice gap |
@@ -177,6 +177,29 @@ either; report both the component means and the Score so a reader can recompute.
 
 This is only true of the **roll-up**. It is not true of the underlying EERs, which is the whole
 point of the rule above.
+
+### 🔴 Label-determining keys need a shared contrast pool
+
+Found while implementing `breakdown.py`, and it invalidates the naive reading of
+`per_cell_eer` / `per_family_eer` above.
+
+A **cell fixes the label** — cell 6 is fake by definition — and so does an **artifact family**, a
+generator that emits only fakes. A within-slice EER on either is computed over a single class and
+is **undefined**. Taken literally, the per-cell and per-family diagnostic tables would come out
+entirely `NaN`.
+
+The fix: score a label-determining slice against a **shared contrast pool** — the slice's rows
+plus every row of the *opposite* class in the same masked pool. That answers the question we
+actually want: *how well does this cell's audio rank against everything of the other label?*
+Slices are then comparable to each other, because they share the contrast set.
+
+| Key | Contains both classes? | Scoring |
+|---|---|---|
+| `cell`, `artifact_family` | ❌ no | Shared contrast pool |
+| `fold`, `snr_bucket`, `duration_bucket`, `sung/spoken` | ✅ yes | Within-slice, as usual |
+
+`breakdown.by(..., contrast="auto")` decides per slice and **records which was used** in the
+output, so the two can never be silently mixed in one table.
 
 ### Small-pool folds
 
