@@ -183,3 +183,67 @@ def test_conditional_policy_keeps_genuine_whole_file_audio(manifest):
 def test_f8_out_of_range_is_rejected(bad):
     with pytest.raises(ValueError, match="f8"):
         composed_fractions(CellMix(), bad)
+
+
+# --------------------------------------------------------------------------- #
+# I1b -- the metadata shortcut audit (E-S2 at spec level)
+
+def test_I1b_passes_for_both_policies(manifest):
+    """The joint check: each balance can hold while a combination still leaks."""
+    for f8 in (0.0, 1.0):
+        report = run_audit(Sampler(manifest, SamplerConfig(f8=f8)), n=N, manifest=manifest)
+        passed, why = report.results["I1b_metadata_shortcut_auc"]
+        assert passed, f"f8={f8}: {why}"
+
+
+def test_I1b_excludes_cell_9_and_why(manifest):
+    """🔴 Cell 9 is always REAL and never composed, so it contributes an
+    unfixable "not composed => REAL" correlation.
+
+    Including it, the strict policy scores 0.6003 and fails the 0.60 gate --
+    a false alarm blocking a policy we deliberately support.
+    """
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import roc_auc_score
+    from sklearn.preprocessing import StandardScaler
+
+    specs = list(Sampler(manifest, SamplerConfig(f8=1.0)).epoch_specs(8000))
+
+    def auc(pool):
+        y = np.array([s.file_fake for s in pool])
+        X = np.array([[s.duration_s, float(s.render_mode == "composed"),
+                       float(s.structure == "sequential"), float(len(s.components)),
+                       float(np.mean([c.gain_db for c in s.components])), s.crossfade_ms,
+                       float(np.mean([c.source_offset_s for c in s.components]))]
+                      for s in pool])
+        Xs = StandardScaler().fit_transform(X)
+        return roc_auc_score(y, LogisticRegression(max_iter=2000).fit(Xs, y)
+                             .predict_proba(Xs)[:, 1])
+
+    assert auc(specs) > 0.59, "including cell 9, the strict policy sits at the gate"
+    assert auc([s for s in specs if s.cell != 9]) < 0.56, "cells 1-8 must have headroom"
+
+
+def test_I1b_catches_a_duration_shortcut():
+    """Nothing else in the audit looks at duration.
+
+    If fake samples were systematically longer -- e.g. because AI songs are
+    used whole while real mixes are cropped -- this is the only check that sees
+    it, and it is exactly the E-S2 failure mode.
+    """
+    def timed(cell, sample_id, seconds):
+        return SampleSpec(
+            sample_id=sample_id, epoch=0, seed=0, scheme_version="v1",
+            duration_s=seconds, cell=cell, render_mode="composed",
+            structure="overlap",
+            components=(ComponentDraw(file_id="A00001", role="voice",
+                                      source_offset_s=0.0, duration_s=seconds,
+                                      target_start_s=0.0, gain_db=0.0),))
+
+    specs = ([timed(2, i, 50.0) for i in range(500)] +
+             [timed(1, 500 + i, 8.0) for i in range(500)])
+    report = audit_specs(specs)
+    passed, why = report.results["I1b_metadata_shortcut_auc"]
+    assert not passed, why
+    assert "AUC = 1.0" in why or "AUC = 0.9" in why, why

@@ -17,13 +17,17 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
+import numpy as np
 import pandas as pd
 
 from training.sampler import C1_BOUNDS, Sampler
 from training.spec import (CELL_TABLE, SampleSpec, cell_labels, is_fake_cell,
                            stratum_of)
 
-__all__ = ["AuditReport", "audit_specs", "run_audit"]
+__all__ = ["AuditReport", "SHORTCUT_AUC_GATE", "audit_specs", "run_audit"]
+
+#: ★ docs/data/07 E-S2. Above this, neutralise before training anything.
+SHORTCUT_AUC_GATE = 0.60
 
 
 @dataclass
@@ -54,6 +58,53 @@ def _fraction(num: float, den: float) -> float:
     return num / den if den else float("nan")
 
 
+def _metadata_shortcut(specs: Sequence[SampleSpec]) -> tuple[bool, str]:
+    """Can structural metadata alone predict FILE_FAKE?
+
+    ⚠️ Deliberately includes the features the sampler *controls* -- duration,
+    composedness, structure, component count, gain. If the constraints hold,
+    none of them nor any combination should separate the labels.
+
+    ⚠️ ``stratum`` is excluded as a feature. Presence is a legitimate signal the
+    model is *asked* to predict, so including it would measure the label space
+    rather than our corpus.
+
+    🔴 **Cell 9 is excluded from the population**, for the same reason it is
+    excluded from the mixedness balance: a file with no components cannot be
+    fake, and cell 9 is also never composed, so it contributes an *unfixable*
+    "not composed => REAL" correlation. Measured: including it the strict policy
+    (``f8 = 1``) scores **0.6003** and fails this gate, while over cells 1-8 it
+    scores 0.5196. That failure would have been a false alarm blocking a policy
+    we deliberately support.
+    """
+    specs = [s for s in specs if s.cell != 9]
+    if not specs:
+        return True, "skipped: no cells 1-8 in the stream"
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import roc_auc_score
+    from sklearn.preprocessing import StandardScaler
+
+    y = np.array([s.file_fake for s in specs])
+    if len(np.unique(y)) < 2:
+        return True, "skipped: only one class in the stream"
+    X = np.array([[
+        s.duration_s,
+        float(s.render_mode == "composed"),
+        float(s.structure == "sequential"),
+        float(len(s.components)),
+        float(np.mean([c.gain_db for c in s.components])),
+        s.crossfade_ms,
+        float(np.mean([c.source_offset_s for c in s.components])),
+    ] for s in specs])
+    Xs = StandardScaler().fit_transform(X)
+    model = LogisticRegression(max_iter=2000).fit(Xs, y)
+    auc = float(roc_auc_score(y, model.predict_proba(Xs)[:, 1]))
+    # In-sample AUC: an optimistic estimate, which is the safe direction for a
+    # guardrail -- it cannot hide a shortcut, only invent one.
+    return (auc < SHORTCUT_AUC_GATE,
+            f"metadata-only in-sample AUC = {auc:.4f}, gate < {SHORTCUT_AUC_GATE}")
+
+
 def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = None,
                 slice_: str | None = None, tol: float = 0.02,
                 batch_size: int = 32, min_present: int = 2) -> AuditReport:
@@ -81,6 +132,14 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
         worst <= tol,
         f"worst |P(T|FAKE) - P(T|REAL)| = {worst:.4f} on {worst_name!r} "
         f"over {len(names)} transform(s), tol {tol}")
+
+    # -- I1b: the metadata shortcut audit, E-S2 at spec level ---------------- #
+    # 🔴 The joint check. Each balance above can hold individually while a
+    # *combination* of structural features still separates the labels -- and
+    # nothing else here would see it. This is docs/data/07 E-S2 ("logistic
+    # regression on metadata-only features, gate AUC < 0.60"), promoted to VG2,
+    # run over specs instead of over decoded audio.
+    r["I1b_metadata_shortcut_auc"] = _metadata_shortcut(specs)
 
     # -- I2: composedness label-independent WITHIN each presence stratum ----- #
     # ⚠️ The stratified form. A marginal balance can hold while composedness
