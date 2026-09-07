@@ -48,7 +48,7 @@ built, using the identical mixing code path. Same for cell 8 — include both na
 artificial B+D mixes.
 
 Corollary: **every structural transform (mixing, concatenation, crossfade, gain) must appear on
-both sides of every label.** See [06](06-augmentation-spec.md#the-governing-rule).
+both sides of every label.** See [06](06-augmentation-spec.md#-the-governing-rule).
 
 ## Mixing gain is a first-class variable
 

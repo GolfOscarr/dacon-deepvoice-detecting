@@ -73,7 +73,7 @@ No new data. Modeling, ensembling, runtime tuning. Corpus + ledger + reports pac
 
 Composed/augmented samples are generated on the fly and never stored.
 
-## Splits — generator-disjoint, source-disjoint {#splits}
+## Splits — generator-disjoint, source-disjoint
 
 🔴 A random split will report ~0.99 and teach us nothing. The whole task is generalization to
 unseen generators ([survey README](../survey/README.md) #6).
@@ -88,7 +88,7 @@ unseen generators ([survey README](../survey/README.md) #6).
 Report validation **per cell** and **per generator**, not just pooled — a good pooled number can
 hide a collapsed cell.
 
-## Provenance ledger {#provenance-ledger}
+## Provenance ledger
 
 One row per source file, written at acquisition/generation time. Required by DACON's 출처 명시
 의무 and the 2nd-stage 학습데이터 구성 보고서 (20 pts).
