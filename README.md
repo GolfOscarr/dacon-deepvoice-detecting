@@ -6,7 +6,8 @@ Research and strategy for **딥보이스 범죄 대응을 위한 AI 탐지 모�
 Hosted by 행정안전부 and 한국지능정보사회진흥원, supervised by 국립과학수사연구원, run by DACON.
 ₩42,000,000 prize pool · leaderboard closes **2026-09-29**.
 
-> **Status: research and planning complete. No model code yet.**
+> **Status: research, planning and the measurement pipeline are complete. No *model* code yet.**
+> The metric harness ships in **[`metrics/`](metrics/AGENTS.md)** — 60 tests, verified end to end.
 > Current state and next actions: **[PROGRESS.md](PROGRESS.md)**
 
 ---
@@ -37,6 +38,7 @@ offline on one L4 GPU within 60 minutes.
 | **[docs/kaggle/](docs/kaggle/README.md)** | Winners' practical recipes, incl. code pulled from top notebooks |
 | **[docs/data/](docs/data/README.md)** | Data strategy — tiered method catalogs, review gates, ~70 vetted sources |
 | **[docs/validation/](docs/validation/README.md)** | How we measure — splits, metric harness, decision protocol, gates, LB decomposition |
+| **[metrics/](metrics/AGENTS.md)** | The implementation, and how to use it — scoring, fold aggregation, diagnostics, submissions |
 | **[docs/papers/](docs/papers/INDEX.md)** | ~75 papers indexed with links; 12 read in depth |
 
 Start at **[docs/README.md](docs/README.md)** for a reading order.

@@ -3,7 +3,7 @@
 **DACON 236749 — 딥보이스 범죄 대응을 위한 AI 탐지 모델 경진대회**
 Updated 2026-09-07 · **22 days to LB close** (2026-09-29 10:00 KST) · 2nd-stage materials 2026-10-05
 
-Docs: 57 files under [`docs/`](docs/README.md) · Code: none yet
+Docs: 58 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGENTS.md) — 1,584 lines, **60 tests green** on `main`
 
 ---
 
@@ -15,7 +15,7 @@ Docs: 57 files under [`docs/`](docs/README.md) · Code: none yet
 | **+** | Kaggle intelligence | ✅ done → [`docs/kaggle/`](docs/kaggle/README.md) |
 | **+** | Paper research | ✅ done → [`docs/papers/`](docs/papers/INDEX.md) — ~75 indexed, 12 deep-read |
 | **B** | Data strategy | ✅ planned, ⬜ **not executed** → [`docs/data/`](docs/data/README.md) |
-| **C** | Validation design | ✅ designed → [`docs/validation/`](docs/validation/README.md), ⬜ **not implemented** |
+| **C** | Validation design | ✅ designed → [`docs/validation/`](docs/validation/README.md) · ✅ metric pipeline shipped → [`metrics/`](metrics/AGENTS.md) · ⬜ fold builder + gates |
 | **D** | Model architecture | ⬜ |
 | **E** | Score fusion & calibration | ⬜ |
 | **F** | Engineering / submission | ⬜ |
@@ -64,6 +64,19 @@ Docs: 57 files under [`docs/`](docs/README.md) · Code: none yet
 - [x] 🔴 CompSpoof V2 found — public dataset with our exact label structure
 - [x] 🔴 AI-Hub blocked by default; NIA is a 주최기관 → inquiry worth making
 
+**Validation design + metric pipeline (C)** — [`docs/validation/`](docs/validation/README.md) · [`metrics/`](metrics/AGENTS.md)
+- [x] Split scheme: **artifact-family**-disjoint (not model-name), 4 slices, size floors from an EER-noise simulation
+- [x] Four-tier **metric register** — official / decision / diagnostic / guardrail
+- [x] Gates **VG1–VG6**; decision protocol with a paired-bootstrap promotion rule
+- [x] 🔴 LB decomposition: **4 marginal submissions** recover all 3 fake EERs *and* CPS — proved minimal
+- [x] `metrics/` shipped and merged ([#1](https://github.com/GolfOscarr/dacon-deepvoice-detecting/pull/1)); usage guide in [`metrics/AGENTS.md`](metrics/AGENTS.md), snippets executed by the test suite
+- [x] 🔴 **Never pool raw OOF scores across folds** — measured 0.1705 for a true 0.100; use the mean of per-fold metrics
+- [x] 🔴 EER invariant to monotone transforms and class prevalence, **not** to cell composition within a class (0.034 → 0.297) ⇒ freeze the eval composition by seed
+- [x] 🔴 **Cell and artifact_family determine the label**, so those slices need a shared contrast pool — a within-slice EER on them is undefined
+- [x] 🔴 **Rule 2.4 forbids rank calibration** across the cohort ⇒ tie-freedom from float64 logits, never rank normalization
+- [x] Saturation, not rounding, is the output risk: rounding to 2 dp is harmless, saturating the operating point took EER 0.0950 → **0.3017**
+- [x] 3 submission-contract defects found by audit and fixed (column order; order hardcoded instead of read from `sample_submission.csv`; validator comparing a re-parsed approximation)
+
 ---
 
 ## Next — do in this order
@@ -74,7 +87,7 @@ Docs: 57 files under [`docs/`](docs/README.md) · Code: none yet
 - [ ] **G1** dummy-file forensics → `signal_chain.yaml`
 - [ ] **G2** license audit of `docs/data/11-source-inventory.md` (top 10 first)
 - [ ] `submit.zip` skeleton + trivial model → validate I/O, runtime, offline packaging (`metrics/submission.py` is ready to vendor)
-- [ ] LB probe: all-constant 0.5 submission → **must score exactly 0.5000**
+- [ ] LB probe: all-constant 0.5 submission → **must score exactly 0.5000**. ⚠️ P0 is deliberately degenerate, so it must be written with `validate=False` — the VG5 resolution gate rejects a constant column and would otherwise block the first submission
 
 **Highest-value single experiment**
 - [ ] 🔴 `E-A1` **16 kHz survivability probe** — ArtifactNet's Table XI shows AI residual bandwidth ~291 Hz vs human ~1,996 Hz, which *looks* like it should survive an 8 kHz Nyquist, yet the paper insists 44.1 kHz is required. Settling this decides the whole music-head approach
@@ -85,9 +98,11 @@ Docs: 57 files under [`docs/`](docs/README.md) · Code: none yet
 - [x] Decision protocol: 3 speeds, paired-bootstrap promotion rule, experiment ledger
 - [x] Gates **VG1–VG6** defined with pre-committed thresholds
 - [x] 🔴 LB decomposition solved: **4 marginal submissions** recover all 3 fake EERs *and* CPS
-- [x] **Implemented** `metrics/` — dacon · submission · aggregate · breakdown, 47 tests green under the server's scikit-learn 1.8.0 (branch `feat/metrics-harness`)
-- [ ] **Implement** `folds.parquet` builder + VG1 assertions
+- [x] **Shipped `metrics/`** — `dacon` · `submission` · `aggregate` · `breakdown` + [`AGENTS.md`](metrics/AGENTS.md) usage guide. **60 tests** under the server's scikit-learn 1.8.0. Merged to `main` in [#1](https://github.com/GolfOscarr/dacon-deepvoice-detecting/pull/1)
+- [x] **Audited and verified end-to-end** — `eer` fuzzed against exact rational arithmetic over 2,991 cases (**zero** genuine disagreements); a synthetic 1,200-file run in the real `submit.zip` layout scores the constant probe at **exactly 0.5000** and recovers the 4-way LB decomposition to ~1e-16
+- [ ] **Implement** `folds.parquet` builder + VG1 assertions ← next code
 - [ ] Wire VG2/VG3 (`E-S2`, `E-A2`) to run per-experiment, not ad hoc
+- [ ] Close the **version skew**: suite runs under scikit-learn 1.8.0 but Python 3.12 / numpy 2.5.3 / pandas 3.0.5, against the server's 3.11.15 / 1.26.4 / 2.0.3
 - [ ] 🔴 Resolve the **music-family shortfall** below before any fold is built
 
 **Then (B execution — days 3–12)**
