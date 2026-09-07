@@ -919,11 +919,18 @@ said by name why they could not.
 |---|---|
 | **VG1** A1–A7, A10 | `training.folds.check_split_integrity` |
 | **VG1** A8/A9 | `training.audit.audit_specs(..., eval_floors=True)` |
+| **VG1** A1–A6 at draw time | the same audit's **I5** — needs `slice_` and `fold` |
 | **VG2** | the same audit's **I1b** — E-S2 at spec level |
 | **VG3** adversarial validation | ⚠️ **SKIP — not implemented** |
 | **VG4** | `metrics.breakdown.t3_gap` |
 | **VG5** B1–B5 | `training.loop.output_sanity` |
 | **VG6** | the `probe_openings.log` line count, refused at 4 |
+
+⚠️ `slice_` must name the slice the eval specs were **drawn from**, not the role
+they are being used in. `validate_fold` forwards `eval_dataset.slice_` and
+`eval_dataset.fold` so I5 runs rather than SKIPs — and it immediately caught a
+frozen set built from a `slice_="train"` sampler while `SpecDataset.frozen`'s
+default labelled it `"val"`. Without a manifest I5 reports SKIP, never a pass.
 
 ⚠️ **VG3 is the honest gap.** It needs a TRAIN-vs-VAL classifier over the VG2
 metadata features. It reports SKIP rather than shipping green, because a stub

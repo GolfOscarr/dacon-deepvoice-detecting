@@ -717,7 +717,7 @@ def scored(corpus, model_cfg):
     torch.manual_seed(0)
     model = _model(model_cfg)
     specs = frozen_eval_specs(Sampler(manifest, DRAW), 40, seed=11)
-    ds = SpecDataset.frozen(specs, index, rcfg, fold=None)
+    ds = SpecDataset.frozen(specs, index, rcfg, slice_="train", fold=None)
     return model, ds, evaluate(model, ds, batch_size=8, fold=0)
 
 
@@ -1097,7 +1097,7 @@ def test_vg1_and_vg2_skip_without_the_inputs_they_need(scored):
     _, _, report = scored
     gates = run_gates(report)
     for key in ("VG1_split_integrity", "VG1_A8A9_eval_size_floors",
-                "VG2_shortcut_audit"):
+                "VG1_I5_split_safety", "VG2_shortcut_audit"):
         assert key in gates.skipped, key
 
 
@@ -1168,8 +1168,12 @@ def test_validate_fold_cannot_produce_a_result_without_running_the_tripwires(
     sampler = Sampler(manifest, DRAW)
     torch.manual_seed(0)
     model = _model(model_cfg)
+    # ⚠️ `slice_` must name the slice the specs were DRAWN from, not the role
+    # they are being used in. `SpecDataset.frozen` defaults to "val", and these
+    # specs come from a `slice_="train"` sampler -- I5 caught exactly that
+    # mislabelling here, which is the point of forwarding slice_/fold to it.
     eval_ds = SpecDataset.frozen(frozen_eval_specs(sampler, 24, seed=5), index,
-                                 rcfg, fold=None)
+                                 rcfg, slice_=sampler.slice_, fold=None)
     train_specs = list(sampler.epoch_specs(60, seed=0))
 
     result = validate_fold(model, eval_ds, train_specs=train_specs, fold=0)
@@ -1180,6 +1184,13 @@ def test_validate_fold_cannot_produce_a_result_without_running_the_tripwires(
     # The gates that had no inputs skipped by name rather than passing quietly.
     assert "VG3_adversarial_validation" in result.gates.skipped
     assert "VG1_split_integrity" in result.gates.skipped
+    # 🔴 I5 SKIPs without a manifest and RUNS with one -- never a silent pass.
+    assert "VG1_I5_split_safety" in result.gates.skipped
+    with_manifest = validate_fold(model, eval_ds, train_specs=train_specs,
+                                  fold=0, manifest=manifest)
+    passed, why = with_manifest.gates.results["VG1_I5_split_safety"]
+    assert "VG1_I5_split_safety" not in with_manifest.gates.skipped, why
+    assert passed, why
     assert result.validation.per_cell is not None
 
     with pytest.raises(TypeError):

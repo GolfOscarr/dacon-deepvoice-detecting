@@ -1075,6 +1075,7 @@ def run_gates(report: ValidationReport, *,
               folds: pd.DataFrame | None = None,
               eval_specs: Sequence[SampleSpec] | None = None,
               manifest: pd.DataFrame | None = None,
+              slice_: str | None = None, fold: int | None = None,
               scheme_version: str | None = None,
               probe_log: Path | str | None = None,
               opened_probe: bool = False) -> AuditReport:
@@ -1087,6 +1088,7 @@ def run_gates(report: ValidationReport, *,
     |---|---|
     | VG1 A1-A7, A10 | `training.folds.check_split_integrity` |
     | VG1 A8/A9 | `training.audit.audit_specs(..., eval_floors=True)` |
+    | VG1 A1-A6 at draw time | the same audit's **I5**, which needs `slice_`/`fold` |
     | VG2 | the same audit's **I1b**, E-S2 at spec level |
     | VG3 adversarial validation | ⚠️ **SKIP** -- not implemented |
     | VG4 | `metrics.breakdown.t3_gap` |
@@ -1108,12 +1110,17 @@ def run_gates(report: ValidationReport, *,
             r[f"VG1_{k}"] = v
 
     if eval_specs is None:
-        for k in ("VG1_A8A9_eval_size_floors", "VG2_shortcut_audit"):
+        for k in ("VG1_A8A9_eval_size_floors", "VG1_I5_split_safety",
+                  "VG2_shortcut_audit"):
             r[k] = (True, AuditReport.SKIP + "no eval specs given")
     else:
+        # ⚠️ `slice_`/`fold` are what make **I5** run rather than SKIP -- the
+        # draw-time form of VG1 A1-A6, which re-derives the allowed `file_id`
+        # set from the manifest and reports any drawn component outside it.
         spec_report = audit_specs(list(eval_specs), manifest=manifest,
-                                  eval_floors=True)
+                                  slice_=slice_, fold=fold, eval_floors=True)
         r["VG1_A8A9_eval_size_floors"] = spec_report.results["I7_eval_size_floors"]
+        r["VG1_I5_split_safety"] = spec_report.results["I5_split_safety"]
         r["VG2_shortcut_audit"] = spec_report.results["I1b_metadata_shortcut_auc"]
 
     r["VG3_adversarial_validation"] = (
@@ -1274,7 +1281,8 @@ def validate_fold(model: DeepVoiceNet, eval_dataset: SpecDataset, *,
         fold=report.fold,
         validation=report,
         gates=run_gates(report, folds=folds, eval_specs=eval_dataset.specs,
-                        manifest=manifest, scheme_version=scheme_version,
+                        manifest=manifest, slice_=eval_dataset.slice_,
+                        fold=eval_dataset.fold, scheme_version=scheme_version,
                         probe_log=probe_log, opened_probe=opened_probe),
         tripwires=leak_tripwires(report.metrics, kind, detail))
 
