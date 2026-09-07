@@ -40,11 +40,37 @@ def test_every_cell_matches_the_taxonomy():
                 got["music_fake"], got["file_fake"]) == (vp, mp, vf, mf, ff), cell
 
 
-def test_file_fake_is_computed_not_written():
-    """🔴 One implementation of "OR over present components" in this repo."""
+def test_file_fake_is_computed_not_written(monkeypatch):
+    """🔴 One implementation of "OR over present components" in this repo.
+
+    ⚠️ The earlier version asserted
+    ``cell_labels(cell)["file_fake"] == file_fake_label(vp, mp, vf or 0, mf or 0)``
+    -- which is character-for-character the expression in `spec.py`. A tautology:
+    it stays green if `metrics.dacon.file_fake_label` changes meaning, and it
+    stays green if `spec.py` stops calling it, because both sides move together.
+
+    The claim in the name is about DELEGATION, so test delegation: replace the
+    metric with a sentinel and require `cell_labels` to follow it. A hard-coded
+    file_fake column in `CELL_TABLE`, or a second local OR, fails here. The
+    *values* are pinned independently against the docs/data/02 table in
+    `test_every_cell_matches_the_taxonomy`.
+    """
+    import training.spec
+
+    calls = []
+
+    def sentinel(vp, mp, vf, mf):
+        calls.append((vp, mp, vf, mf))
+        return 1 - int(file_fake_label(vp, mp, vf, mf))       # inverted
+
+    monkeypatch.setattr(training.spec, "file_fake_label", sentinel)
     for cell, (vp, mp, vf, mf) in CELL_TABLE.items():
-        assert cell_labels(cell)["file_fake"] == int(
+        assert cell_labels(cell)["file_fake"] == 1 - int(
             file_fake_label(vp, mp, vf or 0, mf or 0)), cell
+    assert len(calls) == len(CELL_TABLE), "every cell must go through the metric"
+    # ⚠️ Absent components arrive as 0, not None -- `file_fake_label` survives
+    # None only incidentally (spec.py's own docstring), so pin the call itself.
+    assert all(v in (0, 1) for call in calls for v in call), calls
 
 
 def test_absent_components_never_reach_file_fake():
