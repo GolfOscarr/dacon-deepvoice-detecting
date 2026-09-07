@@ -1,4 +1,4 @@
-"""Execute every Python snippet in metrics/AGENTS.md.
+"""Execute every Python snippet in metrics/AGENTS.md and models/AGENTS.md.
 
 A usage guide that has drifted from the code is worse than no guide, and these
 snippets are the first thing anyone copies. Running them is cheap; leaving them
@@ -70,3 +70,39 @@ def test_agents_md_snippet_runs(index, tmp_path):
             .replace('"data/sample_submission.csv"', f'r"{tmp_path / "sample_submission.csv"}"')
             .replace('"output/submission.csv"', f'r"{tmp_path / "submission.csv"}"'))
     exec(compile(code, f"AGENTS.md[block {index + 1}]", "exec"), env)
+
+
+# --------------------------------------------------------------------------- #
+# models/AGENTS.md
+
+MODELS_DOC = pathlib.Path(__file__).resolve().parents[1] / "models" / "AGENTS.md"
+
+
+def _model_blocks():
+    return re.findall(r"```python\n(.*?)```", MODELS_DOC.read_text(encoding="utf-8"), re.S)
+
+
+def test_models_doc_has_snippets():
+    assert len(_model_blocks()) >= 5
+
+
+@pytest.mark.parametrize("index", range(len(_model_blocks())))
+def test_models_agents_md_snippet_runs(index, tmp_path):
+    """The guide is the first thing anyone copies, so it must actually run."""
+    import dataclasses
+
+    import torch
+
+    from models.config import load_model_config
+    from models.model import DeepVoiceNet
+
+    cfg = load_model_config("configs/b_stub.yaml")
+    model = DeepVoiceNet(cfg).eval()
+    wav = torch.randn(2, 16_000 * 5)
+    out = model(wav, torch.tensor([16_000 * 5, 16_000 * 3]))
+
+    env = {"cfg": cfg, "model": model, "out": out, "torch": torch}
+    (tmp_path / "model").mkdir(exist_ok=True)
+    code = (_model_blocks()[index]
+            .replace('"model/model.pt"', f'r"{tmp_path / "model" / "model.pt"}"'))
+    exec(compile(code, f"models/AGENTS.md[block {index + 1}]", "exec"), env)

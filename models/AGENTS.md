@@ -1,0 +1,141 @@
+# Using the model
+
+Everything that turns audio into the five submission logits.
+
+**The one rule: candidates A and B are the same class.** `DeepVoiceNet` is built from a
+`ModelConfig`; A names one frontend and points all five branches at it, B names two and gives
+the file branch both. If you find yourself writing a second model class, the config is missing
+a field.
+
+Why each choice was made: [`docs/architecture/`](../docs/architecture/README.md).
+This file is how to *use* it.
+
+| Module | Use it for |
+|---|---|
+| `models.config` | Loading and validating a config. Rejects unknown keys |
+| `models.frontends` | SSL encoders, normalised to one `(B, T, D)` contract |
+| `models.heads` | The SED head and frequency pooling |
+| `models.model` | `DeepVoiceNet`, checkpoint save/load |
+| `models.losses` | The masked multi-task objective |
+| `models.outputs` | Logits → the five submission probabilities |
+
+---
+
+## 🔴 The branches are outputs, not input types
+
+The single most likely misreading. **Every file passes through every branch; nothing is routed.**
+The "voice branch" is the branch that *produces* `VOICE_FAKE_PROB`, not the branch for
+voice-only files. Routing by input type is candidate D, rejected because a 혼합 file has both
+components present and independently fake, which leaves a hard switch undefined.
+
+---
+
+## Build a model
+
+```python
+from models.config import load_model_config
+from models.model import DeepVoiceNet
+
+cfg = load_model_config("configs/b_stub.yaml")   # B's shape, weightless frontends
+model = DeepVoiceNet(cfg).eval()
+print(model.columns)          # branch name -> submission column
+```
+
+⚠️ Real checkpoints are **not wired yet**, which is why the snippet loads `b_stub.yaml` rather
+than `b_three_branch.yaml`. `build_frontend` raises for anything but `stub`, because the licences
+for SSLAM, EAT and W2V-BERT 2.0 are unverified
+([09 C1–C3](../docs/architecture/09-open-questions.md)) and a licence forbidding third-party
+provision makes a checkpoint unusable *at all* here — so downloading first and checking later is
+the wrong order. `b_stub.yaml` is candidate B's exact shape with weightless encoders; swap the
+file once the licences clear.
+
+## Run it
+
+```python
+import torch
+
+wav = torch.randn(2, 16_000 * 5)          # (B, samples), mono, 16 kHz
+lengths = torch.tensor([16_000 * 5, 16_000 * 3])
+out = model(wav, lengths)
+
+out["file"]["clip_logits"]                # (B,)  attention-pooled
+out["file"]["frame_logits"]               # (B, T) per-frame evidence
+out["file"]["attention"]                  # (B, T) where the model looked
+```
+
+`lengths` is what makes the frame mask correct. Omit it only when every file in the batch is
+the same length — otherwise padding enters the attention softmax and a file's score starts
+depending on what is batched with it, which rule 2.4 forbids.
+
+## Produce submission numbers
+
+```python
+from models.outputs import branch_logit, to_probability
+
+probs = {}
+for branch, br_cfg in cfg.branches.items():
+    z = branch_logit(out[branch], br_cfg.head)
+    probs[br_cfg.column] = to_probability(z, cfg.output)
+```
+
+🔴 Never blend two sigmoids. `branch_logit` blends `clip` and `frame_max` in **logit space** and
+`to_probability` squashes once, in float64, with a non-saturating map. Saturating the operating
+point took EER 0.0950 → 0.3017 in measurement, and rank normalisation — the usual fix for the
+ties it creates — is forbidden by rule 2.4.
+
+## Train
+
+```python
+from models.config import LossConfig
+from models.losses import multitask_loss
+
+targets = {
+    "voice_fake":    torch.tensor([1.0, 0.0]),
+    "music_fake":    torch.tensor([0.0, 1.0]),
+    "file_fake":     torch.tensor([1.0, 1.0]),
+    "voice_present": torch.tensor([1.0, 0.0]),   # ground truth, not predictions
+    "music_present": torch.tensor([1.0, 1.0]),
+}
+total, parts = multitask_loss(out, targets, cfg, LossConfig())
+total.backward()
+```
+
+`voice_present` / `music_present` are **ground truth**. They mask the component losses so that a
+voice-fake loss is never taken on a music-only file — mirroring the official metric, which
+computes Voice EER only over voice-present files. `parts` is a per-head breakdown for the
+experiment ledger.
+
+⚠️ `LossConfig().weights` are all `1.0`, inherited from PC-Mix whose metric weighted components
+equally. Ours weights File .45 / Music .27 / Voice .18. This is a flagged open knob
+([09 B11](../docs/architecture/09-open-questions.md)), and the default is currently *wrong*
+rather than neutral.
+
+## Checkpoints
+
+```python
+from models.model import load_checkpoint, save_checkpoint
+
+save_checkpoint(model, "model/model.pt")
+restored = load_checkpoint("model/model.pt")
+```
+
+The config is stored beside the weights and the model is rebuilt from it before a **strict**
+`load_state_dict`. That is what makes the load an assertion rather than a coincidence — and it is
+the guard `script.py` needs, since a silently mis-shaped model would otherwise write a
+well-formed `submission.csv` full of 0.5 and score exactly 0.5000 without raising.
+
+## Windows, if you tile
+
+```python
+from models.config import AggregationConfig
+from models.outputs import aggregate_windows
+
+window_logits = torch.randn(4, 12)        # (files, windows)
+file_logits = aggregate_windows(window_logits, AggregationConfig(kind="topk_mean", k=3))
+```
+
+⚠️ **Every order-statistic aggregator carries a duration bias** — measured spread over 1–12
+windows on identical content: `max` 1.63, `top-k mean` 1.18, `quantile` 1.08, `mean` 0.004. Long
+files score higher than short ones on the same content, inside a ranking that pools 4–60 s files.
+Both shipped configs therefore use `segmentation.mode: whole_file`, which has no windows and so
+no bias to trade against dilution.
