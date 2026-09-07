@@ -134,6 +134,16 @@ class SpecDataset(Dataset):
     def is_frozen(self) -> bool:
         return self._sampler is None
 
+    @property
+    def n_per_epoch(self) -> int | None:
+        """How many specs `set_epoch` redraws, or None on a frozen set.
+
+        ⚠️ Not `len(self)`: they agree today, but the count is what the *draw* is
+        keyed on and a resume has to record it (`training.loop.SamplerState`).
+        A frozen set has no such number -- its length is the whole story.
+        """
+        return self._n
+
     def __len__(self) -> int:
         return len(self._specs)
 
