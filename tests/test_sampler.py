@@ -1,6 +1,7 @@
 """The sampler: split safety, DOSS capping, determinism, epoch semantics."""
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from training.sampler import (REFERENCE_MIX, CellMix, Sampler, SamplerConfig,
@@ -132,23 +133,97 @@ def test_a_slice_missing_a_component_kind_fails_loudly(manifest):
 # --------------------------------------------------------------------------- #
 # DOSS capping
 
-def test_doss_flattens_over_represented_domains(manifest):
+@pytest.fixture(scope="module")
+def big_manifest():
+    """A corpus large enough that the SHIPPED `domain_cap` actually binds.
+
+    🔴 At `n_per_pool=200` the largest domain holds ~75 files, far under the
+    shipped `N_c = 500`, so every weight is 1.0 and the default is a no-op --
+    the earlier DOSS test had to pass `cap=20` to make anything happen, and
+    therefore never exercised the value we ship.
+    """
+    return synthetic_manifest(n_per_pool=2000, n_whole_file=200, seed=0)
+
+
+def test_the_shipped_domain_cap_binds_on_a_production_sized_corpus(big_manifest):
+    """The premise of every assertion below. Stated, so it cannot rot silently."""
+    fake = big_manifest[(big_manifest.row_kind == "component")
+                        & big_manifest.pool.isin(["B", "D"])]
+    counts = fake.domain_key.value_counts()
+    cap = SamplerConfig().domain_cap
+    over = counts[counts > cap]
+    assert len(over) >= 2, (
+        f"nothing exceeds the shipped cap {cap}; largest domain is {counts.max()}")
+
+
+def test_doss_flattens_over_represented_domains(big_manifest):
     """★ 0.2k h domain-balanced -> 2.77% EER vs 6.4k h naive -> 3.29%.
 
     A weight, not a corpus edit: nothing is discarded, and N_c is sweepable.
+
+    🔴 Two things the earlier version did not do. It runs at the SHIPPED
+    `domain_cap`, on a corpus where that value binds (see the fixture), and it
+    asserts an EFFECT SIZE. `capped < uncapped` is met by a rounding error, and
+    the shipped default was measured at N_eff 7.46 capped against 7.46 uncapped
+    -- identical, because the cap bound on nothing.
+
+    The weights are read straight off the sampler, so this is exact rather than
+    a Monte-Carlo estimate: `_doss_weights` is the production implementation.
     """
-    fake = manifest[(manifest.row_kind == "component") & manifest.pool.isin(["B", "D"])]
-    biggest = fake.domain_key.value_counts().idxmax()
+    cap = SamplerConfig().domain_cap
+    dominant = big_manifest.loc[big_manifest.pool == "D",
+                                "domain_key"].value_counts().idxmax()
 
-    def share(cap):
-        specs = list(Sampler(manifest, SamplerConfig(domain_cap=cap)).epoch_specs(4000))
-        ids = [c.file_id for s in specs for c in s.components]
-        dom = manifest.set_index("file_id").domain_key
-        drawn = dom.reindex(ids).dropna()
-        return (drawn == biggest).mean()
+    def domain_weights(domain_cap):
+        s = Sampler(big_manifest, SamplerConfig(domain_cap=domain_cap))
+        rows, w = s._by_role_fake[("music", True)], s._weights[("music", True)]
+        return pd.Series(w, index=rows.domain_key.to_numpy()).groupby(level=0).sum()
 
-    uncapped, capped = share(10**9), share(20)
-    assert capped < uncapped, f"capping must reduce the dominant domain: {capped} vs {uncapped}"
+    def n_eff(w):
+        return float(np.exp(-(w * np.log(w)).sum()))
+
+    uncapped, capped = domain_weights(10**9), domain_weights(cap)
+    assert uncapped[dominant] >= 0.25, (
+        f"no head to flatten: the dominant domain holds {uncapped[dominant]:.3f}")
+    assert capped[dominant] <= 0.85 * uncapped[dominant], (
+        f"the shipped cap must take at least 15% off the dominant domain: "
+        f"{capped[dominant]:.4f} vs {uncapped[dominant]:.4f}")
+    assert n_eff(capped) >= n_eff(uncapped) + 0.3, (
+        f"effective domains must rise materially: "
+        f"{n_eff(capped):.3f} vs {n_eff(uncapped):.3f}")
+    # Nothing is discarded: capping is a reweighting, so every domain survives.
+    assert set(capped.index) == set(uncapped.index)
+    assert capped.sum() == pytest.approx(1.0)
+
+
+def test_doss_capping_reaches_the_drawn_stream(big_manifest):
+    """The weights are only a claim until the drawn stream moves with them.
+
+    ⚠️ Measured over pool-D draws only. Pooled over every component, real files
+    (weight-free, no `domain_key`) and the whole-file rows dilute the effect to
+    within the noise of a 6k-spec draw -- an adjacent quantity.
+    """
+    cap = SamplerConfig().domain_cap
+    dom = big_manifest.set_index("file_id").domain_key
+    pool_d = set(big_manifest.loc[(big_manifest.row_kind == "component")
+                                  & (big_manifest.pool == "D"), "file_id"])
+    dominant = big_manifest.loc[big_manifest.pool == "D",
+                                "domain_key"].value_counts().idxmax()
+
+    def share(domain_cap):
+        # a = b = 1 composes the single-component cells too, so cell 4 also draws
+        # fake music: ~5,200 pool-D draws, enough that a 0.06 gap is ~9 sigma.
+        cfg = SamplerConfig(domain_cap=domain_cap, single_composed_rate=1.0)
+        specs = Sampler(big_manifest, cfg).epoch_specs(20_000)
+        ids = [c.file_id for s in specs for c in s.components if c.file_id in pool_d]
+        assert len(ids) > 3_000, len(ids)
+        return float((dom.reindex(ids) == dominant).mean())
+
+    uncapped, capped = share(10**9), share(cap)
+    assert uncapped >= 0.25, f"no head to flatten: dominant domain at {uncapped:.3f}"
+    assert capped <= uncapped - 0.04, (
+        f"the shipped cap must visibly flatten the drawn stream: "
+        f"{capped:.4f} vs {uncapped:.4f}")
 
 
 def test_domain_weights_are_a_probability_vector(sampler):
@@ -226,12 +301,60 @@ def test_sequential_samples_carry_a_crossfade(sampler):
 
 
 def test_gain_is_skewed_toward_the_quiet_end(sampler):
-    """★ G2Net: models generalise low-SNR -> high-SNR, not the reverse."""
-    gains = [c.gain_db for s in sampler.epoch_specs(3000)
-             for c in s.components if c.role == "voice" and s.stratum == "mixed"]
-    assert np.mean(gains) < 0, "voice must sit below music on average"
-    lo, hi = SamplerConfig().gain_db_range
-    assert all(lo <= g <= hi for g in gains)
+    """★ G2Net: models generalise low-SNR -> high-SNR, not the reverse.
+
+    🔴 `mean < 0` was the adjacent quantity: `gain_db_mean = -3.6` is the only
+    source of gain in the sampler, so that assertion could only fail if gain were
+    unwired entirely. It would have greened at `gain_db_mean = -0.01`, which is
+    not a skew. Assert the drawn distribution instead: its location, its spread,
+    and the mass below unity gain that *is* the skew.
+    """
+    cfg = SamplerConfig()
+    gains = np.array([c.gain_db for s in sampler.epoch_specs(6000)
+                      if s.render_mode == "composed"
+                      for c in s.components if c.role == "voice"])
+    assert len(gains) > 1_500, len(gains)
+
+    # sd of the mean is ~0.08 here, so 0.35 is >4 sigma of slack and still
+    # catches a mean moved to 0 (or to the -1.0 a "mild" tweak would pick).
+    assert abs(gains.mean() - cfg.gain_db_mean) < 0.35, gains.mean()
+    assert abs(gains.std() - cfg.gain_db_sigma) < 0.5, gains.std()
+    # P(N(-3.6, 4) < 0) = 0.816. At gain_db_mean = 0 this is 0.5 and fails.
+    assert (gains < 0).mean() > 0.75, (gains < 0).mean()
+    lo, hi = cfg.gain_db_range
+    assert lo <= gains.min() and gains.max() <= hi
+
+
+def test_gain_applies_to_composed_voice_in_every_stratum(manifest):
+    """⚠️ Filtering to the mixed stratum hid what the sampler actually does.
+
+    `_gain_db` is applied to every component whose role is "voice", so a composed
+    voice-only sample (cells 1/2, reachable whenever `single_composed_rate > 0`)
+    is gained too -- there is no music for it to sit under, so it is a level
+    shift rather than a voice/music ratio. That is the shipped behaviour; pin it
+    here so a change to it is a test failure rather than a surprise.
+
+    Whole-file rows are the documented exception: one row used as-is, gain 0.
+    """
+    cfg = SamplerConfig(single_composed_rate=1.0)
+    by_stratum: dict[str, list[float]] = {}
+    whole_file_gains: list[float] = []
+    for s in Sampler(manifest, cfg).epoch_specs(6000):
+        for c in s.components:
+            if c.role != "voice":
+                continue
+            if s.render_mode == "composed":
+                by_stratum.setdefault(s.stratum, []).append(c.gain_db)
+            else:
+                whole_file_gains.append(c.gain_db)
+
+    assert set(by_stratum) == {"voice-only", "mixed"}, sorted(by_stratum)
+    for stratum, gains in by_stratum.items():
+        g = np.array(gains)
+        assert len(g) > 400, (stratum, len(g))
+        assert abs(g.mean() - cfg.gain_db_mean) < 0.6, (stratum, g.mean())
+        assert (g < 0).mean() > 0.72, (stratum, (g < 0).mean())
+    assert whole_file_gains and not any(whole_file_gains), "whole files are ungained"
 
 
 @pytest.mark.parametrize("bad", [{"duration_range": (60.0, 4.0)},
