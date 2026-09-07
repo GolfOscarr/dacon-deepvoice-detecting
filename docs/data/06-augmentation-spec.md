@@ -78,6 +78,41 @@ parameters in `A-A1`/`A-A2` are unchanged — only the stage they run in.
 | **A-S3** | **Codec round-trip** | MP3 at **64 kbps** cost MusicDET **+37 EER points** ([survey/02](../survey/02-sota-music.md)); the test set is MP3/WAV/FLAC. Confirmed as the top robustness intervention by RADAR 2026 and SAFE ([kaggle/01](../kaggle/01-ai-content-detection.md)) | MP3 {64, 96, 128, 192}, AAC, OPUS, OGG, FLAC round-trip. p ≈ 0.5 |
 | **A-S4** | **Telephone chain** — 16k → **8k** → 16k, plus G.711 μ/A-law, AMR-NB, OPUS-NB, GSM, G.722; optional packet loss | The test set explicitly contains 전화채널 audio. The UR channel-robust ASVspoof 2021 system generalized by simulating landline/cellular/VoIP at 8 kHz with OPUS ([survey/01](../survey/01-sota-speech.md)) | p ≈ 0.2. Log which chain was applied for per-condition error analysis |
 
+### 🔴 A-S3's encoder delay — and why the obvious implementation is the broken one
+
+A lossy encoder does not return the samples you gave it. LAME prepends its
+algorithmic delay, **measured here at 1,105 samples — 69 ms at 16 kHz**, constant
+across 64/96/128/192 kbps and mono/stereo. The delay is meant to be cancelled by
+the encoder's **gapless (Xing/LAME) header**, which records it — and ffmpeg can
+only write that header when it can *seek back over its own output*, i.e. when it
+writes to a **file**. Encode to a pipe and the header is silently missing:
+
+```
+ffmpeg -i in.wav -c:a libmp3lame -b:a 96k -f mp3 pipe:1   # 33,408 samples, lag 1,105
+ffmpeg -i in.wav -c:a libmp3lame -b:a 96k    out.mp3      # 32,000 samples, lag 0
+```
+
+⚠️ Both commands "work". Both produce audio that sounds right, has the right
+bitrate and passes any check on RMS, bandwidth or codec artifacts. The piped one
+just moves every sample 69 ms later — while `frame_intervals` (the frame-level
+labels, in absolute seconds) stay where composition put them. That is a
+**label/audio desynchronisation with no failing test**: the same shape as the
+`align_time` violation, at 3.5 frames of drift on a 50 fps frontend.
+
+**The guard** (`training.render._codec_roundtrip`, see
+[`training/AGENTS.md`](../../training/AGENTS.md)): encode to a temporary file,
+then assert the decoded frame count equals the input's and raise if it does not.
+The length *is* the delay's signature, so a future ffmpeg that stops writing the
+header fails loudly instead of shifting the corpus. 🔴 Do not "fix" such a
+failure by trimming the head to taste — the delay is per-encoder, and guessing
+it is how the drift comes back.
+
+⚠️ Only **WAV / FLAC / MP3** are wired today. AAC, OPUS, OGG and A-S4's
+narrowband codecs each need their own delay verified the same way before they
+join the draw; the local ffmpeg does not carry every encoder. A-S4's 8 kHz leg
+and G.711 μ/A-law companding are implemented (`resample_poly` is linear phase
+and self-compensating, so that leg introduces no shift).
+
 ---
 
 ## Tier A
