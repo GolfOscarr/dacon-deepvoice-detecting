@@ -516,14 +516,32 @@ def test_audit_is_stable_across_draw_budgets_and_manifests(manifest):
     small whole-file pool its range separated the labels at AUC 0.764), and I3
     counting components drawn only once (a file drawn once cannot appear on
     both sides -- that measures the draw budget, not the sampler).
+
+    🔴 **And it must vary the SEED.** An earlier version swept manifest size,
+    policy and draw budget -- every axis except the one that produces flakiness.
+    Both `synthetic_manifest(seed=0)` and `run_audit(seed=0)` default to the same
+    seed, so "every test draws seed 0" is a property of this harness rather than
+    a habit of any one test. The I2 tolerance bug tripped 6 of 16 seeds in the
+    shipped config and this guard could not see it.
+
+    ⚠️ It also asserts on `skipped`, not only on `ok`: `.ok` counts a SKIP as a
+    pass, so without this the guard would green on a check's *absence*.
     """
     from training.synthetic import synthetic_manifest
+    expected_skips = {"I7_eval_size_floors"}
     for npp, nwf in ((60, 60), (200, 200)):
-        m = synthetic_manifest(n_per_pool=npp, n_whole_file=nwf, seed=0)
-        for f8 in (0.0, 1.0):
-            for n in (1500, 6000):
-                report = run_audit(Sampler(m, SamplerConfig(f8=f8)), n=n, manifest=m)
-                assert report.ok, f"{npp}/{nwf} f8={f8} n={n}: {report.failures}"
+        for mseed in (0, 1):
+            m = synthetic_manifest(n_per_pool=npp, n_whole_file=nwf, seed=mseed)
+            for f8 in (0.0, 1.0):
+                for n in (1500, 6000):
+                    for seed in (0, 1, 2, 3):
+                        report = run_audit(Sampler(m, SamplerConfig(f8=f8)), n=n,
+                                           manifest=m, seed=seed)
+                        where = f"{npp}/{nwf} mseed={mseed} f8={f8} n={n} seed={seed}"
+                        assert report.ok, f"{where}: {report.failures}"
+                        assert set(report.skipped) <= expected_skips, (
+                            f"{where}: unexpected SKIP {set(report.skipped)} -- a "
+                            f"guard that greens on a check's absence is not a guard")
 
 
 def test_source_offset_is_not_a_feature():

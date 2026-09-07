@@ -195,6 +195,13 @@ def _auc_or_none(X: np.ndarray, y: np.ndarray) -> float | None:
     return float(roc_auc_score(y, proba))
 
 
+def _auc_se(n1: int, n0: int) -> float:
+    """Standard error of an AUC under H0 (A = 0.5): `sqrt((n1+n0+1)/(12 n1 n0))`."""
+    if n1 < 1 or n0 < 1:
+        return float("inf")
+    return float(np.sqrt((n1 + n0 + 1) / (12.0 * n1 * n0)))
+
+
 def _metadata_shortcut(specs: Sequence[SampleSpec]) -> tuple[bool, str]:
     """Can structural metadata alone predict FILE_FAKE? (E-S2 / VG2 at spec level.)
 
@@ -222,9 +229,11 @@ def _metadata_shortcut(specs: Sequence[SampleSpec]) -> tuple[bool, str]:
     X_all, names = _feature_frame(specs)
     scored: list[tuple[float, str]] = []
 
+    counts: dict[str, tuple[int, int]] = {}
     pooled = _auc_or_none(X_all, y_all)
     if pooled is not None:
         scored.append((pooled, "pooled"))
+        counts["pooled"] = (int((y_all == 1).sum()), int((y_all == 0).sum()))
     for stratum in ("voice-only", "music-only", "mixed"):
         idx = [i for i, s in enumerate(specs) if s.stratum == stratum]
         if len(idx) < 200:
@@ -232,14 +241,27 @@ def _metadata_shortcut(specs: Sequence[SampleSpec]) -> tuple[bool, str]:
         auc = _auc_or_none(X_all[idx], y_all[idx])
         if auc is not None:
             scored.append((auc, stratum))
+            ys = y_all[idx]
+            counts[stratum] = (int((ys == 1).sum()), int((ys == 0).sum()))
 
     if not scored:
         return True, AuditReport.SKIP + "not enough samples to estimate an AUC"
     worst, where = max(scored)
+
+    # 🔴 Noise-aware, for the same reason I2 is. A fixed 0.60 against a per-probe
+    # AUC whose own standard error is ~0.033 in a thin stratum is a false-alarm
+    # generator, and taking the MAX over four probes inflates the tail further.
+    # A seed sweep caught it: voice-only scored 0.6023 on a clean corpus at
+    # n=1500. Under H0 (A = 0.5) the AUC's se is sqrt((n1+n0+1)/(12*n1*n0)).
+    n_worst = counts[where]
+    se = _auc_se(*n_worst)
+    gate = max(SHORTCUT_AUC_GATE, 0.5 + NOISE_K * se)
     detail = ", ".join(f"{w}={a:.4f}" for a, w in sorted(scored, key=lambda t: -t[0]))
-    return (worst < SHORTCUT_AUC_GATE,
-            f"worst metadata-only CV AUC = {worst:.4f} in {where!r} "
-            f"over {len(names)} feature(s); gate < {SHORTCUT_AUC_GATE} [{detail}]")
+    return (worst < gate,
+            f"worst metadata-only CV AUC = {worst:.4f} in {where!r} over "
+            f"{len(names)} feature(s); gate < {gate:.4f} "
+            f"(floor {SHORTCUT_AUC_GATE}, {NOISE_K:g} SE = {NOISE_K * se:.4f} at "
+            f"n={n_worst}) [{detail}]")
 
 
 def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = None,
@@ -352,10 +374,18 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
     f8_, r8_ = [s for s in c8 if s.file_fake], [s for s in c8 if not s.file_fake]
     pm_f = _fraction(sum(s.stratum == "mixed" for s in f8_), len(f8_))
     pm_r = _fraction(sum(s.stratum == "mixed" for s in r8_), len(r8_))
+    # ⚠️ Noise-aware, like I2/I2c. This is the same difference-of-binomials
+    # estimator, and it was left on a flat 0.02 when they were fixed -- a seed
+    # sweep caught it immediately at n=1500, seed 1: gap 0.0220 against 0.02,
+    # a false alarm on a clean corpus.
+    mix_f = sum(1 for s in f8_ if s.stratum == "mixed")
+    mix_r = sum(1 for s in r8_ if s.stratum == "mixed")
+    mix_tol, mix_noise = _gap_tolerance(mix_f, len(f8_), mix_r, len(r8_), tol)
     r["I2b_mixedness_balance"] = (
-        abs(pm_f - pm_r) <= tol,
-        f"P(mixed|FAKE) = {pm_f:.4f} vs P(mixed|REAL) = {pm_r:.4f} "
-        f"(cells 1-8), tol {tol}")
+        abs(pm_f - pm_r) <= mix_tol,
+        f"P(mixed|FAKE) = {pm_f:.4f} vs P(mixed|REAL) = {pm_r:.4f} (cells 1-8), "
+        f"gap {abs(pm_f - pm_r):.4f}, tol {mix_tol:.4f} "
+        f"(floor {tol}, {NOISE_K:g} SE = {mix_noise:.4f})")
 
     # -- I3: real component files appear on both sides of FILE_FAKE ---------- #
     sides: dict[str, set[int]] = defaultdict(set)
@@ -557,10 +587,16 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
     # smallest and therefore the likeliest to starve a head.
     starved: Counter = Counter()
     n_batches = 0
-    for start in range(0, n, batch_size):
+    # ⚠️ The trailing partial batch is EXCLUDED, and that is a reversal. It was
+    # included on the argument that it is smallest and likeliest to starve a
+    # head -- but C2's floor is absolute (the gradient norm scales as 1/sqrt(n),
+    # not with the batch fraction), so a short final batch can never satisfy it:
+    # a seed sweep found 1/188 batches failing on a clean corpus for exactly
+    # this reason. Training uses `drop_last=True`, so that batch is never
+    # stepped on; auditing it measures a batch the optimiser will not see.
+    dropped_tail = n % batch_size
+    for start in range(0, n - batch_size + 1, batch_size):
         batch = specs[start:start + batch_size]
-        if len(batch) < 2:
-            continue
         n_batches += 1
         for head, key in (("voice", "voice_present"), ("music", "music_present")):
             if sum(getattr(s, key) for s in batch) < min_present:
@@ -571,7 +607,8 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
     r["I9_C2_present_count_floor"] = (
         not starved,
         f"{sum(starved.values())}/{n_batches} batch(es) below {min_present} present "
-        f"samples for a masked head" + (f": {dict(starved)}" if starved else ""))
+        f"samples for a masked head" + (f": {dict(starved)}" if starved else "")
+        + (f"; {dropped_tail} trailing spec(s) excluded (drop_last)" if dropped_tail else ""))
     return AuditReport(r)
 
 
