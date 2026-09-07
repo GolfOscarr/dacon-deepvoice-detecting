@@ -57,6 +57,15 @@ class ConfigError(ValueError):
     """A config that would build a model we do not mean to build."""
 
 
+#: Every channel policy `models.audio.prepare_waveform` implements, and the one
+#: place they are listed. 🔴 Exported so downstream guards can *enumerate* them
+#: rather than restate them: `training.collate.promote_channels` is only rule-2.4
+#: safe because every policy here is invariant to duplicating a mono channel, and
+#: the test that proves it reads this tuple -- so adding a policy without
+#: checking it fails the suite instead of shipping.
+CHANNEL_POLICIES = ("downmix", "left", "mid_side")
+
+
 @dataclass(frozen=True)
 class AudioConfig:
     sample_rate: int = 16_000     # the test set is standardised to 16 kHz
@@ -497,7 +506,7 @@ def validate_model_config(cfg: ModelConfig) -> None:
     if cfg.output.logit_scale <= 0:
         raise ConfigError("output.logit_scale must be > 0")
 
-    if cfg.audio.channels not in ("downmix", "left", "mid_side"):
+    if cfg.audio.channels not in CHANNEL_POLICIES:
         raise ConfigError(f"audio.channels invalid: {cfg.audio.channels!r}")
     if cfg.audio.sample_rate != 16_000:
         raise ConfigError(

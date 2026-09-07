@@ -17,9 +17,9 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
-from models.config import AudioConfig
+from models.config import CHANNEL_POLICIES, AudioConfig
 
-__all__ = ["bandpass", "prepare_waveform"]
+__all__ = ["CHANNEL_POLICIES", "bandpass", "prepare_waveform"]
 
 
 def prepare_waveform(wav: Tensor, cfg: AudioConfig) -> Tensor:
