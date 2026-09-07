@@ -924,7 +924,13 @@ said by name why they could not.
 | **VG3** adversarial validation | ⚠️ **SKIP — not implemented** |
 | **VG4** | `metrics.breakdown.t3_gap` |
 | **VG5** B1–B5 | `training.loop.output_sanity` |
+| **VG5** B2a | the same, qualifying B2 below the 1,200-row resolution floor |
 | **VG6** | the `probe_openings.log` line count, refused at 4 |
+
+🔴 **B2 is a ratio, so it is n-relative** — a bf16 column gives 241 unique of 400
+and passes, then 399 of 1,200 and fails. **B2a** reports SKIP below 1,200 rows so
+a small-n green B2 can never read as "ranking resolution confirmed". It does not
+switch B2 off: a constant or saturated column is visible at any n.
 
 ⚠️ `slice_` must name the slice the eval specs were **drawn from**, not the role
 they are being used in. `validate_fold` forwards `eval_dataset.slice_` and
