@@ -69,8 +69,20 @@ def test_an_epoch_is_a_fixed_count_of_specs(sampler):
     e1 = list(sampler.epoch_specs(50, epoch=1))
     assert len(e0) == len(e1) == 50
     assert [s.sample_id for s in e0] == list(range(50))
-    assert [s.sample_id for s in e1] == list(range(50, 100))
-    assert e0 != e1
+    assert [s.sample_id for s in e1] == list(range(50)), "sample_id is epoch-LOCAL"
+    assert e0 != e1, "epoch is in the RNG key, so the streams still differ"
+
+
+def test_changing_steps_per_epoch_does_not_reroll_the_corpus(sampler):
+    """🔴 `sample_id` was `epoch * n + i`, so it moved with steps_per_epoch.
+
+    Changing the batch size would silently re-roll every sample in every later
+    epoch, which makes a run irreproducible for a reason nobody would look for.
+    `epoch` is already in the RNG key, so the index within the epoch suffices.
+    """
+    short = list(sampler.epoch_specs(50, epoch=1))
+    long_ = list(sampler.epoch_specs(200, epoch=1))
+    assert short == long_[:50]
 
 
 # --------------------------------------------------------------------------- #
@@ -155,19 +167,55 @@ def test_domain_cap_must_be_positive():
 # structure
 
 def test_every_spec_respects_its_cell(sampler):
-    for s in sampler.epoch_specs(2000):
+    """Both render modes. The `if composed` guard used to exempt ~59% of the
+    stream, so the whole-file role assignment was checked by nothing."""
+    seen = {"composed": 0, "whole_file": 0}
+    for s in sampler.epoch_specs(3000):
         vp, mp, _, _ = CELL_TABLE[s.cell]
         roles = {c.role for c in s.components}
+        seen[s.render_mode] += 1
         if s.render_mode == "composed":
             assert ("voice" in roles) == bool(vp), s.cell
             assert ("music" in roles) == bool(mp), s.cell
+        else:
+            # A whole file is one row used as-is; its role must still name the
+            # component the cell says is present ("noise" for cell 9).
+            assert len(s.components) == 1, s.cell
+            expected = "voice" if vp else "music" if mp else "noise"
+            assert roles == {expected}, (s.cell, roles)
+    assert min(seen.values()) > 100, f"both render modes must be exercised: {seen}"
 
 
 def test_durations_stay_inside_the_test_range(sampler):
+    """🔴 Both bounds. An earlier version asserted `0 < d <= 60.0`.
+
+    The lower bound was 0, not 4 -- the adjacent quantity -- so it passed while
+    a corpus of short sources produced 2,580 of 4,000 specs below
+    `AudioConfig.min_seconds`, because `take = min(duration, row.duration_s)`
+    silently shortens the timeline.
+    """
+    lo, hi = SamplerConfig().duration_range
     for s in sampler.epoch_specs(2000):
-        assert 0 < s.duration_s <= 60.0
+        assert lo <= s.duration_s <= hi, s.duration_s
         for c in s.components:
             assert c.target_start_s + c.duration_s <= s.duration_s + 1e-6
+
+
+def test_sources_shorter_than_the_minimum_are_dropped(manifest):
+    """A source shorter than the floor cannot back a legal sample."""
+    m = manifest.copy()
+    m.loc[m.row_kind == "whole_file", "duration_s"] = 1.5
+    sampler = Sampler(m)
+    assert sampler.n_dropped_short > 0
+    lo = SamplerConfig().duration_range[0]
+    assert all(s.duration_s >= lo for s in sampler.epoch_specs(2000))
+
+
+def test_a_corpus_of_only_short_sources_fails_loudly(manifest):
+    m = manifest.copy()
+    m["duration_s"] = 1.0
+    with pytest.raises(ValueError, match="shorter than"):
+        Sampler(m)
 
 
 def test_sequential_samples_carry_a_crossfade(sampler):

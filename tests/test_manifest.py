@@ -31,8 +31,37 @@ def test_whole_file_rows_have_a_cell_and_no_pool(df):
 
 
 def test_cells_6_and_7_never_appear_as_whole_files(df):
-    """They cannot be scraped -- the entire reason two fake heads exist."""
-    assert not df.cell.isin([6, 7]).any()
+    """They cannot be scraped -- the entire reason two fake heads exist.
+
+    🔴 Asserted against VALIDATION, not just against the generator. The earlier
+    version only checked `synthetic.py`'s own `whole_cells` tuple, so a real
+    manifest carrying a cell-6 whole-file row would validate, the fold table
+    would be built from it, and the failure would surface only inside
+    `SampleSpec.__post_init__` at draw time -- long after the split was frozen.
+    """
+    assert not df.cell.isin([6, 7]).any(), "the generator must not emit them"
+
+    whole_idx = df.index[df.row_kind == "whole_file"][0]
+    for cell in (6, 7):
+        bad = df.copy()
+        bad.loc[whole_idx, "cell"] = cell
+        bad.loc[whole_idx, "label_voice_present"] = 1
+        bad.loc[whole_idx, "label_music_present"] = 1
+        with pytest.raises(ValueError, match="cannot be whole_file"):
+            validate_manifest(bad)
+
+
+def test_rejects_a_whole_file_row_carrying_a_pool(df):
+    """Validation kept the row kinds apart in only one direction.
+
+    It required component rows to carry a pool, but never checked that
+    whole_file rows do not -- so half the contract was unenforced.
+    """
+    whole_idx = df.index[df.row_kind == "whole_file"][0]
+    bad = df.copy()
+    bad.loc[whole_idx, "pool"] = "A"
+    with pytest.raises(ValueError, match="pool = null"):
+        validate_manifest(bad)
 
 
 def test_fake_components_carry_the_split_and_capping_keys(df):

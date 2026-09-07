@@ -205,7 +205,7 @@ def _metadata_shortcut(specs: Sequence[SampleSpec]) -> tuple[bool, str]:
 
 def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = None,
                 slice_: str | None = None, fold: int | None = None,
-                tol: float = 0.02, batch_size: int = 32, min_present: int = 2,
+                tol: float = 0.02, batch_size: int = 32, min_present: int = 8, marginal_tol: float = 0.02,
                 eval_floors: bool = False, class_floor: int = 1_200,
                 cell_floor: int = 100, min_families: int = 3) -> AuditReport:
     """Run I1-I9 over a drawn stream."""
@@ -265,6 +265,20 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
         worst <= tol,
         f"worst within-stratum |P(composed|FAKE) - P(composed|REAL)| = {worst:.4f} "
         f"in {worst_where!r}, tol {tol}")
+
+    # -- I2c: the MARGINAL composedness residual ----------------------------- #
+    # 🔴 Measured, not asserted. The stratified constraint leaves a marginal gap
+    # because cell 9 is its own presence stratum with no FAKE counterpart: 0.127
+    # without `balance_marginal_composedness`, 0.253 at a = b = 1. The defence
+    # ("composedness is uninformative given presence, and the model is
+    # supervised on presence") is sound but lived in three docstrings and was
+    # measured nowhere.
+    m_f = _fraction(sum(s.render_mode == "composed" for s in fake), len(fake))
+    m_r = _fraction(sum(s.render_mode == "composed" for s in real), len(real))
+    r["I2c_marginal_composedness"] = (
+        abs(m_f - m_r) <= marginal_tol,
+        f"P(composed|FAKE) = {m_f:.4f} vs P(composed|REAL) = {m_r:.4f} over ALL "
+        f"cells, gap {abs(m_f - m_r):.4f}, tol {marginal_tol}")
 
     # -- I2b: mixedness label-independent, over cells 1-8 -------------------- #
     # Cell 9 excluded: a file with no components cannot be fake, so the
@@ -472,14 +486,23 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
         r["I10_generator_diversity"] = (True, AuditReport.SKIP + "no manifest given")
 
     # -- I9 (C2): per-head present-count floor per batch --------------------- #
+    # ⚠️ Two stated assumptions. Batches are cut in DRAW order, which is the
+    # training order only if the DataLoader does not reshuffle -- audit the same
+    # order you train in. And the final partial batch IS included: it is the
+    # smallest and therefore the likeliest to starve a head.
     starved: Counter = Counter()
     n_batches = 0
-    for start in range(0, n - batch_size + 1, batch_size):
+    for start in range(0, n, batch_size):
         batch = specs[start:start + batch_size]
+        if len(batch) < 2:
+            continue
         n_batches += 1
         for head, key in (("voice", "voice_present"), ("music", "music_present")):
             if sum(getattr(s, key) for s in batch) < min_present:
                 starved[head] += 1
+    # ⚠️ The default floor is 8, not 2. `docs/pipelines/02 §4`'s own table puts
+    # n=2 at 3.9x the gradient norm of n=32 and n=8 at 2.0x -- a floor of 2
+    # accepts exactly the case C2 exists to prevent.
     r["I9_C2_present_count_floor"] = (
         not starved,
         f"{sum(starved.values())}/{n_batches} batch(es) below {min_present} present "

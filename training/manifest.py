@@ -73,6 +73,19 @@ def validate_manifest(df: pd.DataFrame) -> pd.DataFrame:
             "the sampler composes one")
     if df.loc[whole, "cell"].isna().any():
         raise ValueError("whole_file rows must carry a cell (1-9)")
+    if df.loc[whole, "pool"].notna().any():
+        raise ValueError(
+            "whole_file rows must have pool = null -- a whole file is used as-is, "
+            "not drawn from a component pool")
+    # 🔴 Cells 6 and 7 hold one real and one fake component, so they cannot be
+    # scraped. Without this, a manifest carrying such a row validates, the fold
+    # table is built from it, and the failure only surfaces inside
+    # SampleSpec.__post_init__ at draw time -- long after the split is frozen.
+    bad_cells = sorted({int(c) for c in df.loc[whole, "cell"].dropna()} & {6, 7})
+    if bad_cells:
+        raise ValueError(
+            f"cell(s) {bad_cells} cannot be whole_file rows: they hold one real and "
+            f"one fake component, which is why they cannot be scraped")
 
     pools = set(df.loc[comp, "pool"].unique()) - set(POOLS)
     if pools:

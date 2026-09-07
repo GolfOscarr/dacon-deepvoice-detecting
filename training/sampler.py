@@ -60,8 +60,8 @@ class CellMix:
         return int(rng.choice(cells, p=[self.p[c] for c in cells]))
 
 
-def composed_fractions(mix: CellMix, f8: float, a: float = 0.0,
-                       b: float = 0.0, f9: float = 0.0) -> dict[int, float]:
+def composed_fractions(mix: CellMix, f8: float, a: float = 0.0, b: float = 0.0,
+                       f9: float = 0.0, balance_marginal: bool = True) -> dict[int, float]:
     """The per-cell composed fraction implied by `f8`.
 
     🔴 `f8` is the only knob, and the two policies are its endpoints: `f8 = 0`
@@ -84,7 +84,37 @@ def composed_fractions(mix: CellMix, f8: float, a: float = 0.0,
     if mixed_mass <= 0:
         raise ValueError("the mixed-fake cells 6/7/8 cannot all have zero mass")
     f5 = (p[6] * 1.0 + p[7] * 1.0 + p[8] * f8) / mixed_mass
-    return {1: a, 2: a, 3: b, 4: b, 5: f5, 6: 1.0, 7: 1.0, 8: f8, 9: f9}
+    f = {1: a, 2: a, 3: b, 4: b, 5: f5, 6: 1.0, 7: 1.0, 8: f8, 9: f9}
+    if balance_marginal:
+        f[9] = _f9_for_marginal_balance(p, f)
+    return f
+
+
+def _f9_for_marginal_balance(p: dict[int, float], f: dict[int, float]) -> float:
+    """The cell-9 composed fraction that removes the *marginal* composedness gap.
+
+    🔴 The stratified constraint leaves a marginal residual, because cell 9 is
+    its own presence stratum with no FAKE counterpart to balance against. It is
+    emitted at p≈0.115 with f₉=0, so "not composed" skews REAL: measured
+    **P(composed|REAL) 0.2875 vs P(composed|FAKE) 0.4090**, a gap of 0.121,
+    against 0.0001 over cells 1-8.
+
+    ⚠️ The defence -- composedness is uninformative *given* presence, and the
+    model is supervised on presence -- is sound but was asserted in docstrings
+    and measured nowhere. Closing it costs nothing: a composed cell-9 sample is
+    a pool-E noise draw the sampler already supports.
+
+    ⚠️ `f₉ = f₅` does **not** close it, it overshoots (0.5015 against a 0.4090
+    target). Solve instead.
+    """
+    fake = [c for c in p if is_fake_cell(c)]
+    real = [c for c in p if not is_fake_cell(c)]
+    m_fake, m_real = sum(p[c] for c in fake), sum(p[c] for c in real)
+    if not m_fake or not m_real or p[9] <= 0:
+        return f[9]
+    target = sum(p[c] * f[c] for c in fake) / m_fake
+    without_9 = sum(p[c] * f[c] for c in real if c != 9)
+    return float(min(1.0, max(0.0, (target * m_real - without_9) / p[9])))
 
 
 def head_positive_rates(mix: CellMix) -> dict[str, float]:
@@ -128,6 +158,11 @@ class SamplerConfig:
     #: keep composedness label-independent inside those strata.
     single_composed_rate: float = 0.0
     noise_composed_rate: float = 0.0
+    #: 🔴 Solve `f9` so the *marginal* composedness gap closes. The stratified
+    #: constraint leaves one, because cell 9 is its own presence stratum with no
+    #: FAKE counterpart: measured 0.121 without this. Costs nothing -- a composed
+    #: cell-9 sample is a pool-E noise draw the sampler already supports.
+    balance_marginal_composedness: bool = True
     #: DOSS per-domain cap. ★ 0.2k h domain-balanced -> 2.77% EER vs 6.4k h
     #: naive -> 3.29% (docs/papers/05). A weight, so nothing is discarded.
     domain_cap: int = 500
@@ -150,13 +185,22 @@ class SamplerConfig:
             raise ValueError(f"domain_cap must be >= 1, got {self.domain_cap}")
         if not 0.0 <= self.sequential_prob <= 1.0:
             raise ValueError(f"sequential_prob must be in [0, 1], got {self.sequential_prob}")
-        composed_fractions(self.cell_mix, self.f8, self.single_composed_rate,
-                           self.noise_composed_rate)   # validates the knobs
+        composed_fractions(                       # validates the knobs
+            self.cell_mix, self.f8,
+            a=self.single_composed_rate, b=self.single_composed_rate,
+            f9=self.noise_composed_rate,
+            balance_marginal=self.balance_marginal_composedness)
 
     @property
     def f(self) -> dict[int, float]:
-        return composed_fractions(self.cell_mix, self.f8,
-                                  self.single_composed_rate, self.noise_composed_rate)
+        # ⚠️ Keywords, not position. `noise_composed_rate` is f9; passing it
+        # positionally put it in `b` -- the MUSIC-ONLY composed rate -- so the
+        # two single-component strata silently disagreed (f1=f2=a but f3=f4=f9).
+        return composed_fractions(
+            self.cell_mix, self.f8,
+            a=self.single_composed_rate, b=self.single_composed_rate,
+            f9=self.noise_composed_rate,
+            balance_marginal=self.balance_marginal_composedness)
 
 
 class Sampler:
@@ -171,6 +215,20 @@ class Sampler:
         if df.empty:
             raise ValueError(f"no manifest rows for slice={slice_!r} fold={fold!r}")
         self.slice_, self.fold = slice_, fold
+
+        # 🔴 A source shorter than the minimum duration would produce a spec
+        # below `AudioConfig.min_seconds`: `take = min(duration, row.duration_s)`
+        # silently shortens the timeline. Measured on a corpus of 1.5 s scraped
+        # clips: 2,580 of 4,000 specs came out under the competition's own 4 s
+        # floor. Drop those rows here rather than emit an out-of-range sample.
+        min_seconds = self.cfg.duration_range[0]
+        usable = df[df.duration_s >= min_seconds]
+        self.n_dropped_short = int(len(df) - len(usable))
+        if usable.empty:
+            raise ValueError(
+                f"every row in slice={slice_!r} fold={fold!r} is shorter than "
+                f"{min_seconds}s; nothing can be drawn")
+        df = usable
 
         comp = df[df.row_kind == "component"]
         self._by_role = {
@@ -295,5 +353,8 @@ class Sampler:
     def epoch_specs(self, n: int, epoch: int = 0, seed: int = 0):
         """An epoch is a fixed count of drawn specs -- otherwise `sample_id` is
         undefined and reproducibility is nominal (docs/pipelines/02 §6)."""
+        # ⚠️ `i`, not `epoch * n + i`. `epoch` is already in the RNG key, and a
+        # global index makes the whole corpus depend on `steps_per_epoch`:
+        # changing the batch size would silently re-roll every sample.
         for i in range(n):
-            yield self.sample_spec(epoch * n + i, epoch=epoch, seed=seed)
+            yield self.sample_spec(i, epoch=epoch, seed=seed)

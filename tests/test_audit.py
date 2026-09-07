@@ -425,3 +425,58 @@ def test_I10_passes_on_a_diverse_slice(manifest):
     passed, why = report.results["I10_generator_diversity"]
     assert passed, why
     assert "effective" in why, "the measured diversity must be visible in the report"
+
+
+def test_I3_can_actually_fail(manifest):
+    """🔴 I3 measured 400/400 = 1.000 and had no mutation test.
+
+    With a = b = 0 every drawn pool-A/C file necessarily lands in both cell 5
+    and cell 6/7, so the check is structurally saturated. Prove it can go red.
+    """
+    real_a = str(manifest[manifest.pool == "A"].file_id.iloc[0])
+
+    def one_sided(cell, sample_id):
+        return SampleSpec(
+            sample_id=sample_id, epoch=0, seed=0, scheme_version="v1",
+            duration_s=10.0, cell=cell, render_mode="composed", structure="overlap",
+            components=(ComponentDraw(file_id=real_a, role="voice",
+                                      source_offset_s=0.0, duration_s=10.0,
+                                      target_start_s=0.0, gain_db=0.0),))
+
+    # 30 distinct real files, each drawn twice, each only ever in a REAL sample
+    ids = [str(x) for x in manifest[manifest.pool == "A"].file_id.head(30)]
+    specs = []
+    for k, fid in enumerate(ids):
+        for rep in range(2):
+            specs.append(dataclasses.replace(one_sided(1, 2 * k + rep), components=(
+                dataclasses.replace(one_sided(1, 0).components[0], file_id=fid),)))
+    passed, why = audit_specs(specs, manifest=manifest,
+                              slice_="train").results["I3_real_components_on_both_sides"]
+    assert not passed, why
+    assert "0.000" in why or "0/1" in why, why
+
+
+def test_I2c_catches_the_marginal_composedness_residual(manifest):
+    """Measured, not asserted in a docstring.
+
+    Without balancing, cell 9 (always REAL, never composed) skews "not composed"
+    toward REAL: 0.127 marginally, against 0.0086 over cells 1-8.
+    """
+    unbalanced = SamplerConfig(balance_marginal_composedness=False)
+    report = run_audit(Sampler(manifest, unbalanced), n=8000, manifest=manifest)
+    assert not report.results["I2c_marginal_composedness"][0]
+    assert report.results["I2_stratified_composedness"][0], \
+        "the stratified constraint still holds -- that is the point"
+
+    balanced = run_audit(Sampler(manifest, SamplerConfig()), n=8000, manifest=manifest)
+    assert balanced.results["I2c_marginal_composedness"][0]
+
+
+def test_C2_floor_defaults_to_8_not_the_pathological_value():
+    """docs/pipelines/02 §4: n=2 carries 3.9x the gradient norm of n=32.
+
+    A floor of 2 accepts exactly the case C2 exists to prevent.
+    """
+    import inspect
+    from training.audit import audit_specs as fn
+    assert inspect.signature(fn).parameters["min_present"].default == 8
