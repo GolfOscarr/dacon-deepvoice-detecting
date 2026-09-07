@@ -320,7 +320,12 @@ def test_each_codec_variant_actually_changes_the_audio(corpus):
 # 3. 🔴 Resume
 
 
-def _run(model_cfg, corpus, out, *, max_steps=None, resume_from=None, n=4,
+#: 🔴 6 specs at batch_size 2 with one bucket = **3 batches per pass**, so
+#: `max_steps=2` stops *inside* a pass rather than on its boundary. At n=4 the
+#: interruption landed exactly on a pass boundary and `batch_index` was always 0
+#: -- the mid-epoch half of the resume would have gone untested while every
+#: assertion below still passed.
+def _run(model_cfg, corpus, out, *, max_steps=None, resume_from=None, n=6,
          epochs=2, ckpt_every=0, torch_seed=1234):
     model = _model(model_cfg)
     torch.manual_seed(torch_seed)
@@ -349,6 +354,10 @@ def test_a_resumed_run_reproduces_an_uninterrupted_run_bitwise(corpus, model_cfg
 
     _, res_part = _run(model_cfg, corpus, tmp_path / "part", max_steps=2)
     assert res_part.truncated
+    # ⚠️ Assert the interruption is *mid-pass*. On a pass boundary `batch_index`
+    # is 0 and the resume would only have to restore the pass counter.
+    stopped = res_part.checkpoints[-1].sampler
+    assert stopped.pass_index == 0 and stopped.batch_index == 2, stopped
     ck = res_part.checkpoints[-1].path
 
     resumed, res_resume = _run(model_cfg, corpus, tmp_path / "resume",
@@ -387,6 +396,27 @@ def test_dropping_the_sampler_state_makes_the_resume_diverge(corpus, model_cfg,
     assert not _same(_flat(full), _flat(resumed)), (
         "dropping the sampler position changed nothing -- the bitwise-resume "
         "test above is then not testing the draw")
+
+
+def test_dropping_only_the_batch_position_makes_the_resume_diverge(corpus,
+                                                                  model_cfg,
+                                                                  tmp_path):
+    """The sharper mutation: keep `pass_index`, reset **only** `batch_index`.
+
+    A resume that restores the epoch but restarts it from batch 0 replays the
+    first half of the pass and never sees the second -- the shape a
+    "resume from the last epoch" implementation has by default.
+    """
+    full, _ = _run(model_cfg, corpus, tmp_path / "full")
+    _, res_part = _run(model_cfg, corpus, tmp_path / "part", max_steps=2)
+
+    blob = torch.load(res_part.checkpoints[-1].path, map_location="cpu",
+                      weights_only=False)
+    assert blob["sampler"]["batch_index"] == 2
+    rewound = _rewrite(res_part.checkpoints[-1].path, tmp_path / "rewound.pt",
+                       sampler={**blob["sampler"], "batch_index": 0})
+    resumed, _ = _run(model_cfg, corpus, tmp_path / "resume", resume_from=rewound)
+    assert not _same(_flat(full), _flat(resumed))
 
 
 def test_dropping_the_torch_rng_state_makes_the_resume_diverge(corpus, model_cfg,
