@@ -13,12 +13,12 @@ This file is how to *use* it.
 | Module | Use it for |
 |---|---|
 | `models.config` | Loading and validating a config. Rejects unknown keys |
-| `models.frontends` | SSL encoders, normalised to one `(B, T, D)` contract |
+| `models.frontends` | Encoder wrappers, normalised to one `(B, T, D)` contract. ⚠️ Only `stub` is wired |
 | `models.heads` | The SED head and frequency pooling |
 | `models.model` | `DeepVoiceNet`, checkpoint save/load |
 | `models.losses` | The masked multi-task objective |
 | `models.outputs` | Logits → probabilities; cross-window pooling |
-| `models.audio` | Channel policy and band restriction |
+| `models.audio` | Channel policy and band restriction (pass `lengths`) |
 
 ---
 
@@ -147,6 +147,12 @@ experiment ledger.
 equally. Ours weights File .45 / Music .27 / Voice .18. This is a flagged open knob
 ([09 B11](../docs/architecture/09-open-questions.md)), and the default is currently *wrong*
 rather than neutral.
+
+🔴 **The clip-vs-`frame_max` blend is not a loss knob.** It is `SEDHeadConfig.clip_weight`, in
+the *model* config, and the loss reads that same field — so training and inference cannot
+disagree about the objective. A separate loss-side `frame_weight` used to exist and was
+documented as the frame-*supervision* weight of `04 §4`, a different quantity; anyone tuning it
+per that section was tuning the blend.
 
 ## Inspecting what you built
 

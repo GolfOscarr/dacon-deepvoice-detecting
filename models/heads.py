@@ -21,6 +21,12 @@ from models.config import FreqPoolConfig, SEDHeadConfig
 __all__ = ["FreqPool", "SEDHead", "SEDOutput"]
 
 
+def _inv_softplus(y: float) -> float:
+    """x such that softplus(x) == y, for initialising the exponent."""
+    import math
+    return math.log(math.expm1(y))
+
+
 class SEDOutput(dict):
     """What an SED head returns.
 
@@ -64,9 +70,18 @@ class FreqPool(nn.Module):
         self.kind = cfg.kind
         self.rectifier = cfg.rectifier
         if cfg.kind == "gem":
-            p = torch.tensor(float(cfg.p_init))
-            self.p = nn.Parameter(p) if cfg.learnable else nn.Buffer(p)
+            # 🔴 Parameterised as p = 1 + softplus(raw), not as a raw value clamped
+            # in forward. `p.clamp(min=1.0)` has exactly zero gradient in the
+            # clamped region, so an exponent that ever drifted below 1.0 was
+            # frozen there permanently -- measured: grad 0.0 at p_init=0.5.
+            raw = torch.tensor(_inv_softplus(max(float(cfg.p_init) - 1.0, 1e-4)))
+            self.raw_p = nn.Parameter(raw) if cfg.learnable else nn.Buffer(raw)
         self.eps = 1e-6
+
+    @property
+    def p(self) -> Tensor:
+        """The effective exponent, always >= 1 and always differentiable."""
+        return 1.0 + F.softplus(self.raw_p)
 
     def forward(self, x: Tensor) -> Tensor:
         """(B, F, T, D) -> (B, T, D)."""
@@ -77,16 +92,23 @@ class FreqPool(nn.Module):
         if self.kind == "max":
             return x.amax(dim=1)
         if self.kind == "gem":
-            p = self.p.clamp(min=1.0)
+            p = self.p
             # A negative base with fractional p is NaN, so x must be made
             # positive first. 🔴 `clamp` does that by mapping every negative
             # entry to eps -- which on SSL hidden states discards ~50% of the
             # distribution and gives it exactly zero gradient. `softplus` is
             # monotone, positive and differentiable everywhere, so it costs no
             # information.
-            base = (F.softplus(x) + self.eps if self.rectifier == "softplus"
-                    else x.clamp(min=self.eps))
-            return base.pow(p).mean(dim=1).pow(1.0 / p)
+            # 🔴 The power mean runs in fp32 even under fp16 inference. At
+            # p=3 any feature above ~40 overflows fp16 (40^3 = 64,000 against a
+            # 65,504 max), inf survives the 1/p root, and the attention softmax
+            # downstream becomes NaN. Both shipped configs pair
+            # `precision: fp16` with `gem, p_init: 3.0`.
+            dtype = x.dtype
+            x32 = x.float()
+            base = (F.softplus(x32) + self.eps if self.rectifier == "softplus"
+                    else x32.clamp(min=self.eps))
+            return base.pow(p.float()).mean(dim=1).pow(1.0 / p.float()).to(dtype)
         raise ValueError(f"FreqPool: nothing to do for kind={self.kind!r}")
 
 

@@ -107,13 +107,50 @@ def test_per_head_weights_are_applied():
     assert float(equal) != pytest.approx(float(metric_shaped))
 
 
-def test_frame_weight_moves_the_objective():
+def test_loss_blend_comes_from_the_head_config_not_a_separate_knob():
+    """🔴 Training and inference must use the same clip/frame_max blend.
+
+    A separate loss-side `frame_weight` existed and was documented as the
+    frame-*supervision* weight of 04 §4 -- a different quantity -- so it could
+    silently disagree with the head's `clip_weight`, training the model on one
+    objective and scoring it on another.
+    """
     model, cfg = _model()
     out = model(torch.randn(3, SR * 4))
     targets = _targets([1, 1, 1], [0, 0, 0], voice_fake=[1, 0, 1])
-    clip_only, _ = multitask_loss(out, targets, cfg, LossConfig(frame_weight=0.0))
-    frame_only, _ = multitask_loss(out, targets, cfg, LossConfig(frame_weight=1.0))
-    assert float(clip_only) != pytest.approx(float(frame_only))
+
+    def with_clip_weight(w):
+        branches = {n: dataclasses.replace(b, head=dataclasses.replace(b.head, clip_weight=w))
+                    for n, b in cfg.branches.items()}
+        c = dataclasses.replace(cfg, branches=branches)
+        return float(multitask_loss(out, targets, c, LossConfig())[0])
+
+    assert with_clip_weight(0.0) != pytest.approx(with_clip_weight(1.0))
+
+    # and it is the *same* number the output stage blends with
+    from models.outputs import branch_logit
+    br = next(iter(cfg.branches.values()))
+    assert branch_logit(out["voice"], dataclasses.replace(br.head, clip_weight=1.0)).allclose(
+        out["voice"]["clip_logits"])
+
+
+def test_ranking_loss_ranks_what_inference_ranks():
+    """Ranking `clip` alone would optimise the ordering of half the score."""
+    from models.outputs import branch_logit
+
+    model, cfg = _model()
+    out = model(torch.randn(6, SR * 4))
+    targets = _targets([1] * 6, [0] * 6, voice_fake=[1, 1, 1, 0, 0, 0])
+
+    _, plain = multitask_loss(out, targets, cfg, LossConfig())
+    _, ranked = multitask_loss(out, targets, cfg, LossConfig(ranking_weight=1.0))
+    assert ranked["voice"] > plain["voice"], "the ranking term must contribute"
+
+    # The term is computed on the blended logit, which is what branch_logit returns.
+    br = cfg.branches["voice"]
+    blended = branch_logit(out["voice"], br.head)
+    assert not torch.allclose(blended, out["voice"]["clip_logits"]), \
+        "with clip_weight 0.5 the blend must differ from clip alone"
 
 
 def test_loss_is_differentiable():
@@ -180,3 +217,65 @@ def test_loss_frame_max_ignores_padding_by_default():
     _, b = multitask_loss(loud, targets, cfg, LossConfig())
     for head in ("voice", "music", "file"):
         assert a[head] == pytest.approx(b[head], abs=1e-6), head
+
+
+def test_no_train_config_field_is_silently_ignored():
+    """🔴 The ModelConfig-only guard missed LossConfig.frame_resolutions_ms.
+
+    It was accepted, defaulted, round-tripped and read nowhere, so a config
+    could request multi-resolution frame supervision that does not exist.
+    """
+    import pathlib
+    import re
+
+    from models.config import load_train_config
+    from models.losses import TRAIN_CONSUMED_ELSEWHERE
+
+    src = "\n".join(
+        (pathlib.Path("models") / f"{m}.py").read_text()
+        for m in ("model", "frontends", "heads", "losses", "outputs", "utils", "audio"))
+    cfg = load_train_config("configs/train_joint.yaml")
+
+    ignored = []
+    for f in dataclasses.fields(cfg):
+        if f.name in TRAIN_CONSUMED_ELSEWHERE:
+            continue
+        value = getattr(cfg, f.name)
+        if dataclasses.is_dataclass(value):
+            for sub in dataclasses.fields(value):
+                if not re.search(rf"\.{re.escape(sub.name)}\b", src):
+                    ignored.append(f"{f.name}.{sub.name}")
+        elif not re.search(rf"\.{re.escape(f.name)}\b", src):
+            ignored.append(f.name)
+
+    assert not ignored, (
+        f"TrainConfig fields neither read nor allowlisted: {ignored}")
+
+
+def test_gem_power_mean_survives_fp16():
+    """Both shipped configs pair `precision: fp16` with `gem, p_init: 3.0`.
+
+    At p=3 any feature above ~40 overflows fp16 (40**3 = 64,000 against a
+    65,504 max), inf survives the 1/p root, and the attention softmax downstream
+    becomes NaN.
+    """
+    from models.config import FreqPoolConfig
+    from models.heads import FreqPool
+
+    pool = FreqPool(FreqPoolConfig(kind="gem", p_init=3.0)).half()
+    for scale in (65, 200, 1000):
+        out = pool((torch.rand(1, 4, 3, 4) * scale).half())
+        assert torch.isfinite(out).all(), f"overflowed at feature scale {scale}"
+        assert out.dtype == torch.float16
+
+
+def test_gem_exponent_can_recover_from_below_one():
+    """`p.clamp(min=1.0)` had exactly zero gradient in the clamped region, so an
+    exponent that drifted below 1.0 was frozen there permanently."""
+    from models.config import FreqPoolConfig
+    from models.heads import FreqPool
+
+    pool = FreqPool(FreqPoolConfig(kind="gem", p_init=0.5, learnable=True))
+    assert float(pool.p) >= 1.0, "the effective exponent must stay >= 1"
+    pool(torch.rand(2, 4, 5, 3) + 0.1).sum().backward()
+    assert float(pool.raw_p.grad) != 0.0, "a frozen exponent can never recover"

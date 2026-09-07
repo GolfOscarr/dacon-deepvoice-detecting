@@ -354,6 +354,15 @@ def test_band_hz_is_actually_applied():
     x = torch.randn(2, SR * 4)
     assert not torch.allclose(banded(x)["file"]["clip_logits"],
                               full(x)["file"]["clip_logits"])
+
+    # 🔴 and the band filter must not reintroduce batch dependence
+    solo = torch.randn(1, SR * 4)
+    lengths = torch.tensor([SR * 4])
+    base = banded.submission_probs(banded(solo, lengths))
+    padded = banded.submission_probs(
+        banded(torch.nn.functional.pad(solo, (0, SR * 5)), lengths))
+    for column in base:
+        assert torch.allclose(base[column], padded[column], atol=1e-6), column
     # ...and a signal that is already low-band should be nearly unaffected.
     t = torch.arange(SR * 4) / SR
     low = torch.sin(2 * torch.pi * 500 * t)[None].repeat(2, 1)

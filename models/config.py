@@ -259,11 +259,21 @@ class LossConfig:
     """
     weights: dict[str, float] = field(default_factory=lambda: {
         "voice": 1.0, "music": 1.0, "file": 1.0, "v_pres": 1.0, "m_pres": 1.0})
-    frame_weight: float = 0.5        # shortcut-exposure knob: frame labels exist
-    ranking_weight: float = 0.0      #   only on composed files (04 §4)
+    ranking_weight: float = 0.0
     distill_weight: float = 1.0
     label_smoothing: float = 0.0
-    frame_resolutions_ms: tuple[int, ...] = (40, 80, 160, 320, 640)
+
+    # ⚠️ There is deliberately no `frame_weight` here. The clip-vs-frame_max blend
+    # is `SEDHeadConfig.clip_weight`, and the loss reads that same field, so
+    # training and inference cannot disagree about it. A separate loss-side knob
+    # existed and was documented as the *frame-supervision* weight of 04 §4 --
+    # a different quantity entirely -- so anyone tuning it per that section was
+    # tuning the blend instead.
+    #
+    # ⚠️ There is also no `frame_resolutions_ms`. Multi-resolution frame
+    # supervision (04 §4) is not implemented; the field was accepted, defaulted,
+    # round-tripped and read nowhere. The plan lives in the doc, not in a config
+    # field that does nothing.
 
 
 @dataclass(frozen=True)
