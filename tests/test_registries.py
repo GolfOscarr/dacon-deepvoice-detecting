@@ -241,6 +241,166 @@ def test_the_menu_entries_that_would_desynchronise_frame_targets_are_absent():
 
 
 # --------------------------------------------------------------------------- #
+# 🔴 The time-invariance contract
+#
+# > Steps 4-5 are time-invariant. Every time-warping decision lives in the draw.
+#
+# Registration *measures* it. These tests exercise one member of each of the four
+# warp classes (docs/pipelines/03 §4) and show it being refused -- a probe that
+# passes everything is the "check that cannot fail" this file exists to avoid.
+
+
+def _fresh(kind="preprocess"):
+    if kind == "preprocess":
+        return Registry("preprocess", ("wav", "sample_rate", "lengths"),
+                        frozenset(), time_invariant=True)
+    return Registry("augment", ("wav", "rng"), frozenset(), time_invariant=True)
+
+
+def test_class_1_an_undeclared_rigid_shift_cannot_be_registered():
+    """A-A8's shape. This is the `align_time` defect at the plugin boundary."""
+    reg = _fresh()
+    with pytest.raises(RegistryError, match="declares group_delay=0"):
+        @reg.register("shifts")
+        def _shifts(wav, sample_rate, lengths):
+            return torch.roll(wav, 37, dims=-1)
+    assert "shifts" not in reg
+
+
+def test_a_declared_group_delay_is_checked_against_the_measurement():
+    """🔴 A declaration the probe believes would be worthless. Declare 37 and
+    shift by 37 and it registers; declare 37 and shift by 12 and it does not."""
+    reg = _fresh()
+
+    @reg.register("honest", group_delay=37)
+    def _honest(wav, sample_rate, lengths):
+        return torch.roll(wav, 37, dims=-1)
+
+    assert reg.group_delay_of("honest") == 37
+
+    with pytest.raises(RegistryError, match="declares group_delay=37"):
+        @reg.register("liar", group_delay=37)
+        def _liar(wav, sample_rate, lengths):
+            return torch.roll(wav, 12, dims=-1)
+
+
+def test_class_2_a_rate_change_cannot_be_registered():
+    """A-C2 time stretch: the head and the tail move by different amounts, so no
+    single delay describes it and `frame_intervals` cannot follow it."""
+    reg = _fresh()
+    with pytest.raises(RegistryError, match="warped the time base"):
+        @reg.register("stretches")
+        def _stretches(wav, sample_rate, lengths):
+            n = wav.shape[-1]
+            src = np.arange(n) * 1.01
+            out = np.stack([np.interp(np.arange(n), src, row)
+                            for row in wav.numpy()])
+            return torch.from_numpy(out.astype(np.float32))
+
+
+def test_class_3_a_non_monotonic_edit_cannot_be_registered():
+    """A-A11's trimming shape: excise 200 samples from the middle and pad the
+    tail. The length is unchanged and the head never moves -- only the two-window
+    comparison sees it."""
+    reg = _fresh()
+    with pytest.raises(RegistryError, match="warped the time base"):
+        @reg.register("excises")
+        def _excises(wav, sample_rate, lengths):
+            n = wav.shape[-1]
+            keep = torch.cat([wav[:, :n // 2], wav[:, n // 2 + 200:]], dim=-1)
+            return torch.cat([keep, torch.zeros(wav.shape[0], 200)], dim=-1)
+
+
+def test_class_4_group_delay_is_measured_not_assumed():
+    """🔴 The class nobody lists. A-A10 RIR convolution shifts by its direct-path
+    offset; `bandpass` is safe only because it is zero-phase and `resample_poly`
+    only because it is linear phase. Those are load-bearing accidents until
+    something measures them."""
+    tail = 0.3 * np.random.default_rng(1).standard_normal(200) * np.exp(-np.arange(200) / 50)
+
+    def convolve(wav, rir):
+        n = wav.shape[-1]
+        out = np.stack([np.convolve(row, rir)[:n] for row in wav.numpy()])
+        return torch.from_numpy(out.astype(np.float32))
+
+    late = np.concatenate([np.zeros(20), [1.0], tail])
+    reg = _fresh()
+    with pytest.raises(RegistryError, match="shifts audio by \\+20"):
+        @reg.register("rir_late")
+        def _late(wav, sample_rate, lengths):
+            return convolve(wav, late)
+
+    # ...and a filter whose direct path is at zero is fine. The contract is
+    # "does not move audio", not "is not a filter".
+    reg2 = _fresh()
+
+    @reg2.register("rir_aligned")
+    def _aligned(wav, sample_rate, lengths):
+        return convolve(wav, np.concatenate([[1.0], tail]))
+
+    assert reg2.group_delay_of("rir_aligned") == 0
+
+
+def test_a_length_change_is_refused_and_named_as_a_draw():
+    reg = _fresh()
+    with pytest.raises(RegistryError, match="changed the sample count by \\+800"):
+        @reg.register("pads")
+        def _pads(wav, sample_rate, lengths):
+            return torch.cat([torch.zeros(wav.shape[0], 800), wav], dim=-1)
+
+
+def test_an_augment_may_not_even_declare_a_delay():
+    """⚠️ A delay an augment wanted is a *draw*. Letting it declare one would
+    reopen the case-by-case tracking the contract exists to close."""
+    reg = _fresh("augment")
+    with pytest.raises(RegistryError, match="cannot move audio in time"):
+        @reg.register("shifts", group_delay=8)
+        def _shifts(wav, rng):
+            return torch.roll(wav, 8, dims=-1)
+
+
+@pytest.mark.parametrize("name", AUGMENT.names())
+def test_every_registered_augment_declares_no_delay(name):
+    assert AUGMENT.group_delay_of(name) == 0
+
+
+@pytest.mark.parametrize("name", PREPROCESS.names())
+def test_every_shipped_preprocess_step_is_zero_delay_today(name):
+    """Recorded rather than assumed: `preprocess_chain(...).group_delay` is the
+    number a caller would have to compensate, and it is 0."""
+    assert PREPROCESS.group_delay_of(name) == 0
+
+
+def test_a_chain_reports_the_delay_it_would_impose():
+    chain = preprocess_chain((("dc_offset", {}), ("pre_emphasis", {})))
+    assert chain.group_delay == 0
+
+
+def test_the_runtime_guard_catches_a_warp_a_default_probe_cannot_see():
+    """⚠️ Registration probes with *default* params, so a warp that only a drawn
+    parameter turns on gets past it. `augment_chain` re-checks on the real audio.
+    A step like this is exactly how A-A11 would come back."""
+    reg = Registry("augment", ("wav", "rng"), frozenset(), time_invariant=True)
+
+    @AUGMENT.register("__pads_only_when_asked")
+    def _sneaky(wav, rng, *, pad=0):
+        return torch.cat([wav, torch.zeros(wav.shape[0], pad)], dim=-1)
+
+    try:
+        chain = augment_chain((("__pads_only_when_asked", {"pad": 160}),))
+        with pytest.raises(RegistryError, match="step 4 is time-invariant"):
+            chain(torch.zeros(1, 1000), np.random.default_rng(0))
+        # ...and the same step with its default is untouched.
+        ok = augment_chain((("__pads_only_when_asked", {}),))
+        assert ok(torch.zeros(1, 1000), np.random.default_rng(0)).shape == (1, 1000)
+    finally:
+        AUGMENT._fns.pop("__pads_only_when_asked", None)
+        AUGMENT._params.pop("__pads_only_when_asked", None)
+        AUGMENT._group_delay.pop("__pads_only_when_asked", None)
+    assert len(reg) == 0
+
+
+# --------------------------------------------------------------------------- #
 # The filter contract -- offline, sidecar, never audio
 
 
