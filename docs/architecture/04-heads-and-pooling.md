@@ -263,15 +263,36 @@ with label at all in our composed corpus, it becomes a shortcut the model can ri
 `for-2sec` variant *purely* to eliminate duration-vs-label bias
 ([kaggle/05 A6](../kaggle/05-transferable-playbook.md)).
 
-Candidate aggregators, none yet tested:
+🔴 **Measured, and it corrects the guess this section originally carried.**
+`tests/test_outputs.py` runs each aggregator over identical per-window score
+distributions while varying only the window count (W = 1 … 12, 20k files each).
+Any movement in the mean file score is pure duration bias:
 
-| Rule | Duration bias | Keeps "any part fake" |
+| Rule | Duration bias (spread over W=1…12) | Keeps "any part fake" |
 |---|---|---|
-| `max` over windows | 🔴 strong | ✅ |
-| `mean` over windows | ✅ none | ❌ dilutes — the problem we started from |
-| **top-k mean**, k fixed | ⚠️ mild | ✅ mostly |
-| **quantile** (e.g. 90th) | ✅ ~none | ✅ mostly |
-| ☆ Confidence-gated aggregation | unknown | ✅ |
+| `max` over windows | 🔴 **1.63** | ✅ |
+| **quantile** (90th) | 🔴 **1.08** | ✅ mostly |
+| **top-k mean**, k=3 | 🔴 **1.18** | ✅ mostly |
+| ☆ Confidence-gated | ⚠️ 0.16 — **an artifact**, see below | ✅ |
+| `mean` over windows | ✅ **0.004** | ❌ dilutes — the problem we started from |
+
+⚠️ **Top-k mean does not fix this.** It was assumed "mild" here and is in fact only
+~28% better than a plain max. The reason is structural: the expected k-th largest of
+W samples grows with W, so *every* order statistic inherits the bias. A fixed
+quantile does not escape it either at these small W.
+
+⚠️ **The confidence-gated row is not the win it looks like.** Its gate requires >40%
+of windows above logit 1.386 (p = 0.8), which on roughly symmetric scores essentially
+never fires — so it falls through to the plain mean and inherits mean's neutrality
+*and* mean's dilution. Measured: it equals `mean` on 99.7% of files. Recorded so the
+number is not misread as evidence.
+
+🔴 **The honest conclusion is that this is an argument for not tiling at all.**
+`segmentation.mode: whole_file` has no windows, so there is no cross-window
+aggregation and no duration bias to trade against dilution — the whole dilemma
+disappears rather than being managed. That is now the default in both shipped
+configs, and it strengthens the case already made in
+[09 B5](09-open-questions.md).
 
 ☆ That last row is worth a look: a confidence-gated frame rule moved a single model
 **0.25 → 0.22** in `[DFDC 2020, 1st]` — mean of predictions >0.8 if enough frames exceed it, mean
@@ -279,8 +300,9 @@ of those <0.2 if almost all are below, else plain mean
 ([kaggle/05 G1](../kaggle/05-transferable-playbook.md)). *"Aggregation beats architecture"* is that
 entry's own summary.
 
-🔷 **Our default until measured: a fixed-k top-k mean**, which keeps the OR semantics while making
-the file score depend on the *k* most suspicious windows rather than on how many windows exist.
+🔷 **If we tile at all, no aggregator is good** — the choice is between a duration bias
+(order statistics) and dilution (mean). `topk_mean` remains the configured default as the
+least-bad order statistic, but the measurement above says the real answer is `whole_file`.
 ⚠️ And whatever we choose, **duration-vs-score correlation on the REAL class must be an explicit
 check**, not an assumption — it is exactly the kind of confound `E-S2`'s metadata-only shortcut
 audit is built to catch ([data/07](../data/07-eda-plan.md#tier-s)).

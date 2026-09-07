@@ -42,6 +42,6 @@ aggregation:  {kind: topk_mean, k: 3}
 file_head:    {mode: learned}
 audio:        {sample_rate: 16000, channels: downmix, band_hz: null}   # band_hz: [0, 4000] for the low-band member (09 B7)
 runtime:      {precision: fp16, compile: false, batch_size: 8, num_workers: 5}
-output:       {dtype: float64, squash: sigmoid, logit_scale: 1.0}
+output:       {dtype: float64, squash: softsign, logit_scale: 1.0}
 distill:      {enabled: true, embed_dim: 1024, stop_gradient: true}
 aux:          {separation_head: false}    # flip to true for C-lite

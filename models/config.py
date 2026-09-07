@@ -171,7 +171,11 @@ class OutputConfig:
     decision region resolvable.
     """
     dtype: str = "float64"
-    squash: str = "sigmoid"          # sigmoid | tanh_affine
+    #: `softsign` is preferred: a float64 sigmoid reaches an exact 1.0 by z~=37
+    #: and every file beyond that becomes an unbreakable tie, while softsign
+    #: holds out to |z| ~ 1e16. Rank normalisation, the usual fix for ties, is
+    #: forbidden by rule 2.4.
+    squash: str = "softsign"         # softsign | sigmoid
     logit_scale: float = 1.0         # <1 widens the unsaturated region
     clamp_eps: float = 1e-12
 
@@ -429,7 +433,7 @@ def validate_model_config(cfg: ModelConfig) -> None:
         raise ConfigError(
             "output.dtype must be float64: saturation cost EER 0.0950 -> 0.3017 in "
             "measurement, and float32 sigmoid manufactures ties across files")
-    if cfg.output.squash not in ("sigmoid", "tanh_affine"):
+    if cfg.output.squash not in ("sigmoid", "softsign"):
         raise ConfigError(f"output.squash invalid: {cfg.output.squash!r}")
     if cfg.output.logit_scale <= 0:
         raise ConfigError("output.logit_scale must be > 0")
