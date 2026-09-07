@@ -64,8 +64,16 @@ CODEC_CONTAINERS = ("wav", "flac", "mp3")
 #: The keys ``SampleSpec.normalize`` may carry. Unknown keys are an error, not a
 #: warning -- ``models.config``'s rule, for the same reason: a typo'd knob that
 #: silently does nothing is how an ablation measures the wrong thing.
+#:
+#: ⚠️ No ``resampler`` key, though docs/pipelines/01 §3's worked example shows
+#: one (``"soxr_vhq"``). A per-sample resampler *draw* is **A-B2**, which
+#: docs/data/06 records as unbuildable as written -- none of the kernels it names
+#: are installed -- and A-S1 since settled on one fixed resampler. It is
+#: therefore a `RenderConfig` injection (one kernel, swappable when G1 lands),
+#: not a field of the draw. Accepting the key and ignoring it would be the
+#: typo'd-knob failure this frozenset exists to prevent.
 NORMALIZE_KEYS = frozenset({
-    "resampler", "container", "bitrate", "channels", "telephone_hz", "companding",
+    "container", "bitrate", "channels", "telephone_hz", "companding",
 })
 
 
@@ -296,7 +304,7 @@ def _place(canvas: np.ndarray, piece: np.ndarray, start: int) -> None:
 
 
 def _to_channels(wav: np.ndarray, channels: int) -> np.ndarray:
-    """Broadcast a mono source across ``channels``, or fold extras down.
+    """Broadcast a mono source across ``channels``, or keep the leading ones.
 
     ⚠️ Mono-duplication is itself a possible cue (docs/data/07 E-B4). It is done
     here rather than downmixing everything to mono because the alternative --
@@ -338,7 +346,6 @@ def _compose(spec: SampleSpec, pieces: Sequence[np.ndarray], cfg: RenderConfig,
         if spec.structure == "sequential" and xfade > 0 and n > 2:
             k = min(xfade, n // 2)
             ramp = _fade(k, cfg.crossfade_shape)
-            piece = piece.copy()
             if start > 0:                       # not the first piece: fade in
                 piece[:, :k] *= ramp
             if start + n < total:               # not the last piece: fade out
