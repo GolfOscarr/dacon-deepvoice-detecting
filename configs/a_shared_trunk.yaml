@@ -12,6 +12,7 @@ frontends:
     output_dim: 768
     fps: 50.0
     adapter: {kind: lora, rank: 16, alpha: 32.0, targets: [q_proj, v_proj]}
+    n_freq: 8              # BEATs tokenises mel into a (F', T') patch grid
     freq_pool: {kind: gem, p_init: 3.0, learnable: true}   # BEATs is a patch grid
 
 branches:

@@ -105,6 +105,10 @@ class FrontendConfig:
     freq_pool: FreqPoolConfig = field(default_factory=lambda: FreqPoolConfig(kind="none"))
     output_dim: int = 1024          # required for `stub`; asserted against real weights
     fps: float = 50.0               # frames per second of audio; used for time alignment
+    #: Height of the patch grid, for frontends that keep a frequency axis. BEATs /
+    #: EAT / SSLAM tokenise a mel spectrogram into a (F', T') grid and the wrapper
+    #: needs F' to reshape. Must be set exactly when freq_pool.kind != "none".
+    n_freq: int | None = None
 
 
 @dataclass(frozen=True)
@@ -349,6 +353,14 @@ def validate_model_config(cfg: ModelConfig) -> None:
             raise ConfigError(f"frontends.{name}.fps must be > 0")
         if fe.freq_pool.kind not in ("gem", "mean", "max", "none"):
             raise ConfigError(f"frontends.{name}.freq_pool.kind invalid: {fe.freq_pool.kind!r}")
+        if (fe.freq_pool.kind == "none") != (fe.n_freq is None):
+            raise ConfigError(
+                f"frontends.{name}: n_freq and freq_pool must agree -- a patch-grid "
+                f"frontend needs n_freq to reshape, and a (B,T,D) frontend has no "
+                f"frequency axis to pool. Got freq_pool.kind={fe.freq_pool.kind!r}, "
+                f"n_freq={fe.n_freq!r}")
+        if fe.n_freq is not None and fe.n_freq < 1:
+            raise ConfigError(f"frontends.{name}.n_freq must be >= 1")
         if fe.adapter.kind not in ("lora", "conv", "none"):
             raise ConfigError(f"frontends.{name}.adapter.kind invalid: {fe.adapter.kind!r}")
         if not fe.freeze and fe.adapter.kind != "none":
