@@ -20,12 +20,38 @@ from pathlib import Path
 import torch
 from torch import Tensor, nn
 
+from models.audio import bandpass
 from models.config import ModelConfig, dump_config, _model_from_dict
 from models.frontends import build_frontend
 from models.heads import SEDHead
+from models.outputs import branch_logit, to_probability
 from models.utils import align_time
 
 __all__ = ["DeepVoiceNet", "load_checkpoint", "save_checkpoint"]
+
+#: Config fields the *model* deliberately does not read, with who owns them.
+#: tests/test_model.py asserts that every other field is read somewhere, so a
+#: knob cannot go quietly unimplemented (see `test_no_config_field_is_silently_ignored`).
+CONSUMED_ELSEWHERE = {
+    "audio.channels":        "models.audio.prepare_waveform, called by the data path",
+    "audio.min_seconds":     "the data loader",
+    "audio.max_seconds":     "the data loader",
+    "runtime.precision":     "the inference script",
+    "runtime.compile":       "the inference script",
+    "runtime.batch_size":    "the inference script",
+    "runtime.num_workers":   "the inference script",
+    "segmentation.window_seconds": "the inference script, when tiling (the model refuses tiling)",
+    "segmentation.hop_seconds":    "the inference script, when tiling",
+    "aggregation.kind":      "models.outputs.aggregate_windows, when tiling",
+    "aggregation.k":         "models.outputs.aggregate_windows, when tiling",
+    "aggregation.quantile":  "models.outputs.aggregate_windows, when tiling",
+    "frontends.layers":      "real frontends; the stub refuses it rather than ignoring it",
+    "frontends.adapter.kind":    "real frontends; the stub refuses it",
+    "frontends.adapter.rank":    "real frontends",
+    "frontends.adapter.alpha":   "real frontends",
+    "frontends.adapter.dropout": "real frontends",
+    "frontends.adapter.targets": "real frontends",
+}
 
 
 class DeepVoiceNet(nn.Module):
@@ -33,6 +59,13 @@ class DeepVoiceNet(nn.Module):
         super().__init__()
         torch.manual_seed(cfg.seed)
         self.cfg = cfg
+
+        if cfg.segmentation.mode != "whole_file":
+            raise NotImplementedError(
+                f"segmentation.mode={cfg.segmentation.mode!r} is not implemented. The "
+                "model consumes a whole waveform; windowing and cross-window pooling "
+                "belong to the inference script, which does not exist yet. Silently "
+                "running whole_file here would make a tiling ablation measure nothing.")
 
         self.frontends = nn.ModuleDict(
             {name: build_frontend(fe, cfg.audio) for name, fe in cfg.frontends.items()})
@@ -78,11 +111,22 @@ class DeepVoiceNet(nn.Module):
     def forward(self, wav: Tensor, lengths: Tensor | None = None) -> dict:
         """``wav`` is (B, S) mono at 16 kHz. Returns one SEDOutput per branch,
         plus any training-only auxiliary outputs under ``_aux``."""
+        wav = bandpass(wav, self.cfg.audio)
         encoded = {name: fe(wav, lengths) for name, fe in self.frontends.items()}
+
+        # 🔴 The stop-gradient of the borrowed distillation recipe: the branch
+        # heads get *detached* features so the distillation loss owns the
+        # backbone, rather than the two losses fighting over it. ⚠️ With a frozen
+        # frontend there is little left for it to own -- see 09 B9, which flags
+        # exactly that -- so this is wired to be measurable, not because the
+        # borrowed number transfers unchanged.
+        detach = self.distill_head is not None and self.cfg.distill.stop_gradient
+        branch_src = ({k: (f.detach(), m) for k, (f, m) in encoded.items()}
+                      if detach else encoded)
 
         out = {}
         for name in self.cfg.branches:
-            feats, mask = self._branch_input(name, encoded)
+            feats, mask = self._branch_input(name, branch_src)
             out[name] = self.heads[name](feats, mask)
 
         aux = {}
@@ -101,6 +145,36 @@ class DeepVoiceNet(nn.Module):
         return out
 
     # ---------------------------------------------------------------- misc
+
+    def submission_probs(self, out: dict,
+                         frame_masks: dict[str, Tensor] | None = None) -> dict[str, Tensor]:
+        """The five submission columns, as float64 probabilities.
+
+        Honours ``file_head.mode``. G3 records the FILE construction as an open
+        question with no prior art, so all three must actually differ -- an
+        earlier version validated the field and then always produced `learned`,
+        which would have made a three-way comparison return one answer.
+        """
+        fm = frame_masks or {}
+        probs = {}
+        by_col = {}
+        for name, br in self.cfg.branches.items():
+            z = branch_logit(out[name], br.head, fm.get(name))
+            by_col[br.column] = z
+            probs[br.column] = to_probability(z, self.cfg.output)
+
+        mode = self.cfg.file_head.mode
+        if mode != "learned":
+            eps = self.cfg.output.clamp_eps
+            v = probs["VOICE_FAKE_PROB"] * probs["VOICE_PRESENT_PROB"]
+            m = probs["MUSIC_FAKE_PROB"] * probs["MUSIC_PRESENT_PROB"]
+            if mode == "noisy_or":
+                probs["FILE_FAKE_PROB"] = (1.0 - (1.0 - v) * (1.0 - m)).clamp(eps, 1.0 - eps)
+            elif mode == "max":
+                probs["FILE_FAKE_PROB"] = torch.maximum(v, m).clamp(eps, 1.0 - eps)
+            else:
+                raise ValueError(f"unknown file_head.mode {mode!r}")
+        return probs
 
     @property
     def columns(self) -> dict[str, str]:

@@ -64,6 +64,20 @@ class Frontend(nn.Module):
         self.output_dim = cfg.output_dim
         self.freq_pool = FreqPool(cfg.freq_pool) if cfg.freq_pool.kind != "none" else None
 
+    def _apply_freeze(self) -> None:
+        """Freeze the pretrained encoder, but not our own pooling.
+
+        Called at the end of a subclass's __init__, once its modules exist.
+        `freq_pool`'s learnable GeM exponent is ours, not the checkpoint's, so
+        freezing the frontend must not freeze it too.
+        """
+        if not self.cfg.freeze:
+            return
+        pool_params = set(id(p) for p in (self.freq_pool.parameters() if self.freq_pool else []))
+        for p in self.parameters():
+            if id(p) not in pool_params:
+                p.requires_grad_(False)
+
     def _encode(self, wav: Tensor) -> Tensor:
         raise NotImplementedError
 
@@ -113,6 +127,22 @@ class StubFrontend(Frontend):
         width = 64
         self.frame = nn.Linear(self.hop, width)
         self.proj = nn.Sequential(nn.GELU(), nn.Linear(width, self.n_freq * cfg.output_dim))
+
+        # ⚠️ Refuse to look like we honoured a knob we did not. The stub has no
+        # transformer layers to truncate and no attention projections to adapt,
+        # so silently accepting these would let an ablation "measure" a setting
+        # that never took effect.
+        if cfg.layers is not None:
+            raise NotImplementedError(
+                "frontends: `layers` (truncation depth) has no meaning for the stub "
+                "encoder and is not applied. It becomes real when a checkpoint is "
+                "wired; until then set `layers: null`.")
+        if cfg.adapter.kind != "none":
+            raise NotImplementedError(
+                f"frontends: adapter.kind={cfg.adapter.kind!r} is not implemented for the "
+                "stub encoder -- there are no attention projections to adapt. Set "
+                "`adapter: {kind: none}` for stub configs.")
+        self._apply_freeze()
 
     def _encode(self, wav: Tensor) -> Tensor:
         b, n = wav.shape

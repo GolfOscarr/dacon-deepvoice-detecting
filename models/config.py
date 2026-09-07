@@ -74,8 +74,13 @@ class AudioConfig:
 
 @dataclass(frozen=True)
 class AdapterConfig:
-    """Parameter-efficient tuning on a frozen frontend (docs/architecture/06 §2)."""
-    kind: str = "lora"                                   # lora | conv | none
+    """Parameter-efficient tuning on a frozen frontend (docs/architecture/06 §2).
+
+    ⚠️ Defaults to `none` because nothing implements adapters yet. Defaulting to
+    `lora` would make every bare FrontendConfig unbuildable, and -- worse -- would
+    read as though adapters were the working default.
+    """
+    kind: str = "none"                                   # lora | conv | none
     rank: int = 16
     alpha: float = 32.0
     dropout: float = 0.0

@@ -92,12 +92,35 @@ def test_determinism_in_eval_mode():
     assert torch.equal(fe(wav)[0], fe(wav)[0])
 
 
-def test_shipped_configs_build_with_the_stub_backend():
+def test_shipped_stub_configs_build():
     """Both candidates must be constructible before any checkpoint exists."""
-    for name in ("a_shared_trunk", "b_three_branch"):
+    for name in ("a_stub", "b_stub"):
         cfg = load_model_config(f"configs/{name}.yaml")
         for fe_cfg in cfg.frontends.values():
-            fe = build_frontend(dataclasses.replace(fe_cfg, name="stub"), cfg.audio).eval()
+            fe = build_frontend(fe_cfg, cfg.audio).eval()
             feats, mask = fe(torch.randn(1, SR * 5))
             assert feats.shape == (1, 250, fe_cfg.output_dim)
             assert mask.all()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("layers", 9),
+    ("adapter", "LORA"),
+])
+def test_stub_refuses_knobs_it_cannot_honour(field, value):
+    """🔴 A knob that validates and then does nothing is how an ablation ends up
+    measuring a setting that never took effect."""
+    from models.config import AdapterConfig
+    kw = {field: (AdapterConfig(kind="lora") if value == "LORA" else value)}
+    with pytest.raises(NotImplementedError):
+        build_frontend(FrontendConfig(name="stub", output_dim=32, **kw), AUDIO)
+
+
+def test_freeze_actually_freezes_the_encoder_but_not_our_pooling():
+    fe = _patch_stub(freeze=True)
+    enc = [p for n, p in fe.named_parameters() if not n.startswith("freq_pool")]
+    assert not any(p.requires_grad for p in enc), "encoder must be frozen"
+    assert fe.freq_pool.p.requires_grad, "GeM exponent is ours, not the checkpoint's"
+
+    thawed = _patch_stub(freeze=False)
+    assert all(p.requires_grad for p in thawed.parameters())

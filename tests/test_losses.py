@@ -13,11 +13,10 @@ from models.model import DeepVoiceNet
 SR = 16_000
 
 
-def _model(name="b_three_branch", **over):
+def _model(name="b_stub", **over):
     cfg = load_model_config(f"configs/{name}.yaml")
-    cfg = dataclasses.replace(
-        cfg, frontends={k: dataclasses.replace(v, name="stub")
-                        for k, v in cfg.frontends.items()}, **over)
+    if over:
+        cfg = dataclasses.replace(cfg, **over)
     return DeepVoiceNet(cfg).eval(), cfg
 
 
@@ -152,7 +151,7 @@ def test_pairwise_ranking_is_zero_for_a_single_class():
 
 
 def test_distillation_requires_a_distill_head():
-    model, cfg = _model("a_shared_trunk")            # distill disabled in A
+    model, cfg = _model("a_stub")            # distill disabled in A
     out = model(torch.randn(2, SR * 4))
     targets = _targets([1, 1], [1, 1])
     with pytest.raises(KeyError, match="distill head"):
@@ -160,7 +159,7 @@ def test_distillation_requires_a_distill_head():
 
 
 def test_distillation_contributes_when_enabled():
-    model, cfg = _model("b_three_branch")            # distill enabled in B
+    model, cfg = _model("b_stub")            # distill enabled in B
     out = model(torch.randn(2, SR * 4))
     targets = _targets([1, 1], [1, 1])
     _, parts = multitask_loss(out, targets, cfg, LossConfig(),

@@ -1,4 +1,4 @@
-# Candidate B's exact shape with weightless `stub` frontends.
+# Candidate A's exact shape with a weightless `stub` frontend.
 #
 # The development config: real checkpoints are not wired, because the licences
 # for SSLAM / EAT / W2V-BERT 2.0 are unverified and a licence that forbids
@@ -9,39 +9,25 @@
 # no transformer layers to truncate and no attention projections to adapt, and
 # build_frontend REFUSES a config that asks for either, rather than accepting it
 # and quietly doing nothing.
-name: b_stub
+name: a_stub
 seed: 0
 
 frontends:
-  speech:
-    name: stub
-    weights: null
-    layers: null           # truncation is meaningless without a real encoder
-    freeze: true
-    output_dim: 1024
-    fps: 50.0
-    adapter: {kind: none}  # no attention projections to adapt in the stub
-    freq_pool: {kind: none}          # wav2vec2 family has no frequency axis
   audio:
-    name: stub
-    weights: null
+    name: stub                # weightless; swap to the real name once licences clear
+    weights: null          # null => randomly initialised (tests / shape work)
     layers: null           # truncation is meaningless without a real encoder
     freeze: true
     output_dim: 768
     fps: 50.0
     adapter: {kind: none}  # no attention projections to adapt in the stub
     n_freq: 8              # BEATs tokenises mel into a (F', T') patch grid
-    freq_pool: {kind: gem, p_init: 3.0, learnable: true}
+    freq_pool: {kind: gem, p_init: 3.0, learnable: true}   # BEATs is a patch grid
 
 branches:
-  voice:  {sources: speech, column: VOICE_FAKE_PROB,    masked_by: voice_present}
-  music:  {sources: audio,  column: MUSIC_FAKE_PROB,    masked_by: music_present}
-  file:
-    sources: [speech, audio]         # concat — needs a common time base
-    align_to: audio
-    column: FILE_FAKE_PROB
-    masked_by: null
-    head: {hidden: 768}              # the only branch reading both frontends
+  voice:  {sources: audio, column: VOICE_FAKE_PROB,     masked_by: voice_present}
+  music:  {sources: audio, column: MUSIC_FAKE_PROB,     masked_by: music_present}
+  file:   {sources: audio, column: FILE_FAKE_PROB,      masked_by: null}
   v_pres: {sources: audio, column: VOICE_PRESENT_PROB,  masked_by: null}
   m_pres: {sources: audio, column: MUSIC_PRESENT_PROB,  masked_by: null}
 
@@ -51,5 +37,5 @@ file_head:    {mode: learned}
 audio:        {sample_rate: 16000, channels: downmix, band_hz: null}   # band_hz: [0, 4000] for the low-band member (09 B7)
 runtime:      {precision: fp16, compile: false, batch_size: 8, num_workers: 5}
 output:       {dtype: float64, squash: softsign, logit_scale: 1.0}
-distill:      {enabled: true, embed_dim: 1024, stop_gradient: true}
-aux:          {separation_head: false}    # flip to true for C-lite
+distill:      {enabled: false}
+aux:          {separation_head: false}

@@ -17,7 +17,8 @@ This file is how to *use* it.
 | `models.heads` | The SED head and frequency pooling |
 | `models.model` | `DeepVoiceNet`, checkpoint save/load |
 | `models.losses` | The masked multi-task objective |
-| `models.outputs` | Logits → the five submission probabilities |
+| `models.outputs` | Logits → probabilities; cross-window pooling |
+| `models.audio` | Channel policy and band restriction |
 
 ---
 
@@ -70,13 +71,14 @@ depending on what is batched with it, which rule 2.4 forbids.
 ## Produce submission numbers
 
 ```python
-from models.outputs import branch_logit, to_probability
-
-probs = {}
-for branch, br_cfg in cfg.branches.items():
-    z = branch_logit(out[branch], br_cfg.head)
-    probs[br_cfg.column] = to_probability(z, cfg.output)
+probs = model.submission_probs(out)      # {column: (B,) float64 in (0, 1)}
+print(sorted(probs))
 ```
+
+`submission_probs` honours `file_head.mode`: `learned` reads the file branch, while `noisy_or`
+and `max` combine the component and presence columns analytically. G3 records the FILE
+construction as an open question with no prior art, so all three must genuinely differ — and a
+test asserts they do.
 
 🔴 Never blend two sigmoids. `branch_logit` blends `clip` and `frame_max` in **logit space** and
 `to_probability` squashes once, in float64, with a non-saturating map. Saturating the operating
@@ -139,3 +141,27 @@ windows on identical content: `max` 1.63, `top-k mean` 1.18, `quantile` 1.08, `m
 files score higher than short ones on the same content, inside a ranking that pools 4–60 s files.
 Both shipped configs therefore use `segmentation.mode: whole_file`, which has no windows and so
 no bias to trade against dilution.
+
+
+---
+
+## What the config does *not* do yet
+
+🔴 A knob that validates and then does nothing is worse than a missing knob — it makes an
+ablation report a difference it never tested. So anything unimplemented **raises** rather than
+being ignored:
+
+| Setting | Behaviour today |
+|---|---|
+| `frontends.layers` (truncation) | ❌ `build_frontend` raises — the stub has no layers to truncate |
+| `frontends.adapter.kind != none` | ❌ raises — no attention projections to adapt |
+| `segmentation.mode: tiling` | ❌ `DeepVoiceNet` raises — windowing belongs to the inference script |
+| `frontends.freeze` | ✅ applied (encoder frozen; the GeM exponent stays trainable — it is ours) |
+| `distill.stop_gradient` | ✅ applied — branch heads get detached features |
+| `file_head.mode` | ✅ all three implemented |
+| `audio.band_hz` | ✅ applied, as a brick wall in the rFFT domain |
+| `audio.channels` | ✅ applied by `models.audio.prepare_waveform`, which the data path calls |
+| `runtime.*`, `audio.min/max_seconds`, `aggregation.*` | consumed by the inference script / data loader |
+
+`tests/test_model.py::test_no_config_field_is_silently_ignored` enforces this: every field must
+be read by a model module or listed in `models.model.CONSUMED_ELSEWHERE` with its owner.
