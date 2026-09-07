@@ -85,6 +85,30 @@ class Frontend(nn.Module):
         """``wav`` is (B, S) at ``audio.sample_rate``; ``lengths`` is (B,) in samples."""
         if wav.dim() != 2:
             raise ValueError(f"frontend expects (B, S) mono audio, got {tuple(wav.shape)}")
+
+        # 🔴 Zero everything past each row's own `lengths` before encoding.
+        # `frames_for` rounds UP, so a row whose length is not a multiple of
+        # `hop` has a last valid frame that is *part padding* -- and that frame
+        # is masked IN, so whatever fills the pad reaches the score through it.
+        # Measured on the stub: two pad fillings moved a submitted probability
+        # by 1.35e-3 on rendered audio, and the same rows trimmed to whole
+        # frames moved by exactly 0.
+        #
+        # ⚠️ A no-op on the shipped path: training and inference both pad with
+        # zeros, so `wav * keep` changes no number we produce today. What it
+        # changes is that "a row's features are a function of its own samples"
+        # stops being incidental -- true only because everyone happens to pad
+        # with zeros -- and becomes structural. Do not go looking for a metric
+        # shift; there isn't one.
+        #
+        # It could not be seen before because every padding test in the suite
+        # used `lengths = SR * 4`, an exact multiple of the 320-sample hop, so
+        # no test had ever had a partial boundary frame. The pipeline draws
+        # U(4, 60)s and renders arbitrary sample counts.
+        if lengths is not None:
+            keep = torch.arange(wav.shape[-1], device=wav.device)[None, :] < \
+                lengths.to(wav.device)[:, None]
+            wav = wav * keep.to(wav.dtype)
         feats = self._encode(wav)
 
         if self.freq_pool is not None:

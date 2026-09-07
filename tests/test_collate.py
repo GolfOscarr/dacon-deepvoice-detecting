@@ -377,6 +377,29 @@ def test_the_submitted_probability_does_not_move_with_the_batch(samples, model, 
         assert moved < GEMM_NOISE, f"{column} moved by {moved}"
 
 
+@pytest.mark.parametrize("pad_value", [0.0, 7.5, -3.0])
+def test_the_pad_value_cannot_reach_the_submitted_probability(samples, model,
+                                                              pad_value):
+    """I16 in its documented form: the padding **value** must not matter.
+
+    🔴 This is exact, and it was not, until `Frontend.forward` started zeroing
+    past `lengths`. `frames_for` rounds up, so a row whose length is not a
+    multiple of the 320-sample hop had a last valid frame that was part padding
+    and masked *in*; two fillings moved a submitted probability by 1.35e-3 on
+    these very samples. Every earlier padding test used `lengths = SR * 4` and
+    could not see it.
+
+    ⚠️ The rows must genuinely be hop-unaligned or this is the old vacuous test
+    in a new costume.
+    """
+    assert any(s.wav.shape[-1] % 320 for s in samples), \
+        "no sample straddles a frame boundary; this test proves nothing"
+    zeros = _submitted(model, collate(samples, pad_value=0.0))
+    filled = _submitted(model, collate(samples, pad_value=pad_value))
+    for column in zeros:
+        assert np.allclose(zeros[column], filled[column], atol=0.0, rtol=0.0), column
+
+
 def test_the_batch_invariance_check_can_fail(samples, model):
     """Mutation for the check above: lie about `lengths` and the padding gets in.
 
@@ -395,56 +418,6 @@ def test_the_batch_invariance_check_can_fail(samples, model):
     moved = max(float(np.abs(np.asarray(a[c]) - np.asarray(b[c])).max()) for c in a)
     assert moved > 1e-3, moved
     assert moved > 100 * GEMM_NOISE
-
-
-def test_the_pad_value_still_reaches_the_score_through_the_boundary_frame(
-        samples, model):
-    """🔴 A live gap against docs/pipelines/04 §2, measured rather than assumed.
-
-    §2 says the padding *value* must not matter. It does, slightly, and not
-    because of the collator: `frontends.frames_for` rounds **up**, so a row whose
-    length is not a multiple of the frontend hop has a last valid frame that is
-    part padding -- and that frame is masked *in*, so whatever fills the pad
-    reaches the score through it. Measured here on the stub: the submitted
-    probability moves by ~1e-3.
-
-    Every earlier padding test used `lengths = SR * 4`, an exact multiple of the
-    320-sample hop, and could not see it. The pipeline draws `U(4, 60)` s and
-    produces arbitrary lengths, which is why it shows up now.
-
-    ⚠️ This is **not** a rule-2.4 violation as shipped: training and inference
-    both pad with zeros, so no file's score depends on another file's content --
-    which is what `test_the_submitted_probability_does_not_move_with_the_batch`
-    above asserts, exactly. The fix belongs in `models.frontends.Frontend.forward`
-    (zero past each row's `lengths` before encoding), and it is deliberately not
-    made here: it changes masking semantics and it makes
-    `tests/test_model.py::test_clip_only_default_makes_frame_max_guards_vacuous`
-    fail, so it is a model-layer decision with a model-layer review.
-
-    🔴 **When that fix lands, this test fails and should be deleted**, and the
-    hop-aligned half below becomes the general statement.
-    """
-    hop = 320                          # 16 kHz / 50 fps, `frontends.hop_length`
-    ragged = [s for s in samples if s.wav.shape[-1] % hop][:3]
-    assert ragged, "no sample has a hop-unaligned length; nothing is being tested"
-
-    zeros = _submitted(model, collate(ragged, pad_value=0.0))
-    garbage = _submitted(model, collate(ragged, pad_value=7.5))
-    moved = max(float(np.abs(np.asarray(zeros[c]) - np.asarray(garbage[c])).max())
-                for c in zeros)
-    assert moved > 0.0, "the boundary-frame leak is gone -- delete this test"
-    assert moved < 1e-2, f"the leak grew to {moved}; it is no longer cosmetic"
-
-    # Trim every row to a whole number of frames and the leak disappears
-    # entirely -- which is the evidence that the boundary frame is the mechanism.
-    trimmed = [RenderedSample(wav=s.wav[:, :(s.wav.shape[-1] // hop) * hop],
-                              sample_rate=s.sample_rate, targets=s.targets,
-                              frame_intervals=s.frame_intervals, spec=s.spec)
-               for s in ragged]
-    a = _submitted(model, collate(trimmed, pad_value=0.0))
-    b = _submitted(model, collate(trimmed, pad_value=7.5))
-    for column in a:
-        assert np.allclose(a[column], b[column], atol=0.0, rtol=0.0), column
 
 
 # --------------------------------------------------------------------------- #

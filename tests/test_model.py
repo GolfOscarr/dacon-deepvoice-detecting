@@ -8,9 +8,33 @@ import torch
 
 from metrics.dacon import PREDICTION_COLUMNS
 from models.config import load_model_config
+from models.frontends import frames_for, hop_length
 from models.model import DeepVoiceNet, load_checkpoint, save_checkpoint
 
 SR = 16_000
+
+
+def ragged(seconds: int = 4) -> int:
+    """A sample count that leaves a **partial** frame at the boundary.
+
+    🔴 The fixture convention this replaces was the blind spot, not one test's
+    oversight. Every padding guard in this suite used `lengths = SR * 4`, which
+    is 200 whole 320-sample frames -- so the four tests defending this repo's
+    most-repeated defect class had never once exercised a frame that is part
+    audio and part padding. `frames_for` rounds up, that frame is masked *in*,
+    and the pipeline draws `U(4, 60)` s, so in production it is the normal case.
+
+    `+ 1` rather than a hardcoded remainder: it is a nonzero remainder against
+    every hop greater than 1, so this keeps working if `fps` changes.
+    """
+    return SR * seconds + 1
+
+
+def assert_partial_frame(cfg, n: int) -> None:
+    """Guard the guard: `n` must actually straddle a frame in every frontend."""
+    for name, fe in cfg.frontends.items():
+        hop = hop_length(cfg.audio.sample_rate, fe.fps)
+        assert n % hop, f"{name}: {n} is a whole number of {hop}-sample frames"
 
 
 def _cfg(name):
@@ -127,12 +151,14 @@ def test_score_does_not_depend_on_the_batch(model):
     preservation is the real contract (docs/architecture/01 §1.4).
     """
     torch.manual_seed(0)
-    solo = torch.randn(1, SR * 4)
-    alone = model(solo, torch.tensor([SR * 4]))
+    n = ragged()
+    assert_partial_frame(model.cfg, n)
+    solo = torch.randn(1, n)
+    alone = model(solo, torch.tensor([n]))
 
     others = torch.randn(7, SR * 9) * 10                       # longer, louder
-    batch = torch.cat([torch.nn.functional.pad(solo, (0, SR * 5)), others])
-    lengths = torch.tensor([SR * 4] + [SR * 9] * 7)
+    batch = torch.cat([torch.nn.functional.pad(solo, (0, SR * 9 - n)), others])
+    lengths = torch.tensor([n] + [SR * 9] * 7)
     batched = model(batch, lengths)
 
     for branch in model.cfg.branches:
@@ -144,7 +170,7 @@ def test_score_does_not_depend_on_the_batch(model):
 def test_ranking_over_a_canned_set_is_batch_invariant(model):
     """Ranking is what EER reads, so it is the property that must hold."""
     torch.manual_seed(1)
-    files = [torch.randn(1, SR * (4 + i)) for i in range(6)]
+    files = [torch.randn(1, ragged(4 + i)) for i in range(6)]
     solo = torch.stack([model(f)["file"]["clip_logits"][0] for f in files])
 
     width = max(f.shape[-1] for f in files)
@@ -165,8 +191,12 @@ def test_padding_content_cannot_leak_into_a_score(blended_model):
     0.519 to 0.847 depending on what shared the batch.
     """
     torch.manual_seed(2)
-    x = torch.randn(1, SR * 4)
-    lengths = torch.tensor([SR * 4])
+    # ⚠️ A length with a partial boundary frame. At `SR * 4` this test passed on
+    # a frontend that read 319 samples of padding into the last valid frame.
+    n = ragged()
+    assert_partial_frame(blended_model.cfg, n)
+    x = torch.randn(1, n)
+    lengths = torch.tensor([n])
     quiet = blended_model.submission_probs(blended_model(torch.nn.functional.pad(x, (0, SR * 4)), lengths))
     loud = torch.cat([x, torch.randn(1, SR * 4) * 50], dim=-1)
     noisy = blended_model.submission_probs(blended_model(loud, lengths))
@@ -177,12 +207,14 @@ def test_padding_content_cannot_leak_into_a_score(blended_model):
 def test_submitted_probabilities_are_batch_invariant(blended_model):
     """The end-to-end contract: what we upload must not move with the batch."""
     torch.manual_seed(3)
-    solo = torch.randn(1, SR * 4)
-    alone = blended_model.submission_probs(blended_model(solo, torch.tensor([SR * 4])))
+    n = ragged()
+    assert_partial_frame(blended_model.cfg, n)
+    solo = torch.randn(1, n)
+    alone = blended_model.submission_probs(blended_model(solo, torch.tensor([n])))
 
     others = torch.randn(7, SR * 9) * 10
-    batch = torch.cat([torch.nn.functional.pad(solo, (0, SR * 5)), others])
-    lengths = torch.tensor([SR * 4] + [SR * 9] * 7)
+    batch = torch.cat([torch.nn.functional.pad(solo, (0, SR * 9 - n)), others])
+    lengths = torch.tensor([n] + [SR * 9] * 7)
     together = blended_model.submission_probs(blended_model(batch, lengths))
 
     for column in alone:
@@ -192,11 +224,16 @@ def test_submitted_probabilities_are_batch_invariant(blended_model):
 def test_frame_max_respects_the_mask_recorded_by_the_head():
     """The head carries its mask so callers cannot forget it."""
     m = _model("b_stub")
-    out = m(torch.nn.functional.pad(torch.randn(1, SR * 4), (0, SR * 4)),
-            torch.tensor([SR * 4]))
+    n = ragged()
+    assert_partial_frame(m.cfg, n)
+    out = m(torch.nn.functional.pad(torch.randn(1, n), (0, SR * 4)),
+            torch.tensor([n]))
+    # Derived, not 200: with a partial boundary frame `frames_for` rounds up, so
+    # hardcoding the count would quietly stop describing the mask.
+    valid = frames_for(n, SR, m.cfg.frontends["audio"].fps)
     assert out["file"]["mask"].shape == out["file"]["frame_logits"].shape
-    assert out["file"]["mask"][0, :200].all()
-    assert not out["file"]["mask"][0, 200:].any()
+    assert out["file"]["mask"][0, :valid].all()
+    assert not out["file"]["mask"][0, valid:].any()
 
 
 def test_deterministic_in_eval_mode(model):
@@ -415,10 +452,27 @@ def test_clip_only_default_makes_frame_max_guards_vacuous():
     torch.manual_seed(0)
     cfg = _cfg("b_stub")
     m = DeepVoiceNet(cfg).eval()
-    n = SR * 4
-    x = torch.cat([torch.randn(1, n), 25.0 * torch.randn(1, SR * 5)], dim=-1)
-    out = m(x, torch.tensor([n]))
+    n = ragged()
+    # Padded, so masked-out frames exist to perturb -- but the pad *content* is
+    # irrelevant here, which is the whole point of the rewrite below.
+    out = m(torch.nn.functional.pad(torch.randn(1, n), (0, SR * 5)),
+            torch.tensor([n]))
 
+    # 🔴 The lever is a masked frame's **logit**, not loud audio in the padding.
+    # The earlier version manufactured the masked/unmasked gap by writing 25x
+    # noise past `lengths` and letting the frontend read it into a valid frame.
+    # That worked only because of the boundary-frame leak `Frontend.forward` now
+    # closes -- i.e. the test was consuming a defect as its instrument. Worse, no
+    # audio-level construction can replace it: with the pad zeroed, everything
+    # outside the mask is silence and the stub maps silence to its floor, so
+    # masked and unmasked `frame_max` coincide for every input (checked with a
+    # 1e-3-scaled signal too: drift 0.0 at both weights).
+    #
+    # Perturbing the logits directly tests `branch_logit`'s blend arithmetic,
+    # which is where the claim actually lives, and is immune to any future
+    # change in how padding is handled.
+    out["voice"]["frame_logits"] = out["voice"]["frame_logits"].clone()
+    out["voice"]["frame_logits"][0, -1] = 50.0
     unmasked = torch.ones_like(out["voice"]["frame_logits"], dtype=torch.bool)
 
     def drift(w):
@@ -428,4 +482,8 @@ def test_clip_only_default_makes_frame_max_guards_vacuous():
 
     assert cfg.branches["voice"].head.clip_weight == 1.0
     assert drift(1.0) == pytest.approx(0.0, abs=1e-9), "clip-only: the defect is invisible"
-    assert drift(0.5) > 1e-3, "at a real blend the defect must be visible"
+    # ⚠️ The threshold is derived from this instrument, not inherited from the
+    # old one. A `+50.0` logit outside the mask against a stub logit of O(0.05)
+    # gives ~25.0 at w=0.5 (`0.5 * 50`), so 1.0 sits ~25x below the signal and
+    # ~7 orders above float noise. The old `1e-3` was sized against a 1.83 drift.
+    assert drift(0.5) > 1.0, "at a real blend the defect must be visible"

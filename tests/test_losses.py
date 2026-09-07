@@ -221,8 +221,12 @@ def test_distillation_contributes_when_enabled():
 def test_loss_frame_max_ignores_padding_by_default():
     """The training signal must not come from padded-frame logits either."""
     model, cfg = _model()
-    x = torch.randn(1, SR * 4)
-    lengths = torch.tensor([SR * 4])
+    # ⚠️ `+ 1`, so the last valid frame is part padding. At `SR * 4` this guard
+    # ran on 200 whole frames and never saw the boundary frame the pipeline's
+    # U(4, 60)s durations produce on almost every sample.
+    n = SR * 4 + 1
+    x = torch.randn(1, n)
+    lengths = torch.tensor([n])
     targets = _targets([1], [1], voice_fake=[1.0], music_fake=[0.0])
 
     quiet = model(torch.nn.functional.pad(x, (0, SR * 4)), lengths)

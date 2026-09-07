@@ -477,17 +477,21 @@ policy that breaks the property fails the suite instead of shipping.
 ⚠️ `collate(..., pad_value=...)` exists for the tests, not for training. §2 of
 [`docs/pipelines/04`](../docs/pipelines/04-collation.md) says the padding value
 must not matter, and the way to know that is to collate twice and compare the
-**submitted probability**.
+**submitted probability** — which
+`tests/test_collate.py::test_the_pad_value_cannot_reach_the_submitted_probability`
+does, at `atol=0.0`.
 
-🔴 Known gap, measured and left open: it does move, by ~1e-3.
-`frontends.frames_for` rounds *up*, so a row whose length is not a multiple of
-the frontend hop has a last valid frame that is part padding, and that frame is
-masked *in*. Every earlier padding test used `lengths = SR * 4`, an exact
-multiple of the 320-sample hop, and could not see it. As shipped it is **not** a
-rule-2.4 violation — training and inference both pad with zeros, so no file's
-score depends on another file, which
-`tests/test_collate.py::test_the_submitted_probability_does_not_move_with_the_batch`
-asserts directly. The fix belongs in `models.frontends.Frontend.forward`.
+🔴 That was not true until M4 measured it. `frontends.frames_for` rounds *up*, so
+a row whose length is not a multiple of the frontend hop has a last valid frame
+that is **part padding**, and that frame is masked *in* — so the pad content was
+reaching the score through it, by 1.35e-3 on rendered audio. It went unseen
+because every padding test in the suite used `lengths = SR * 4`, an exact
+multiple of the 320-sample hop; the pipeline draws `U(4, 60)` s and produces
+arbitrary lengths, so in production the partial frame is the normal case.
+`Frontend.forward` now zeroes past each row's `lengths` before encoding, which is
+a **no-op on the shipped path** (both sides pad with zeros) and makes the
+guarantee structural rather than incidental. `tests/test_model.py::ragged`
+carries the fixture convention forward.
 
 ### Duration bucketing
 

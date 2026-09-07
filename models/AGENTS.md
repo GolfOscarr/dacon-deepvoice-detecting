@@ -104,6 +104,18 @@ padding-safe because attention excludes masked frames, but `frame_max` is not �
 same file, depending only on what shared its batch. Do not recompute `frame_max` yourself
 without passing a mask.
 
+⚠️ `lengths` also decides where the *waveform* stops: `Frontend.forward` zeroes everything past
+each row's `lengths` before encoding. `frames_for` rounds up, so a row whose length is not a
+multiple of the frontend hop has a last valid frame that is **part padding** and is masked *in* —
+without the zeroing, the pad content reached the score through it (measured: 1.35e-3 on a
+submitted probability). It is a no-op on the shipped path, where padding is zeros on both sides;
+what it buys is that the guarantee no longer depends on everyone remembering to pad with zeros.
+
+🔴 Test fixtures must use lengths that are **not** whole multiples of the hop — `tests/test_model.py::ragged`.
+Every padding guard here once used `lengths = SR * 4` (200 whole 320-sample frames), so the tests
+defending this repo's most-repeated defect class had never exercised a partial boundary frame,
+which is the normal case for `U(4, 60)` s audio.
+
 ## Produce submission numbers
 
 ```python

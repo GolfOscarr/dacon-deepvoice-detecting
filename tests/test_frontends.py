@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from models.config import AudioConfig, FreqPoolConfig, FrontendConfig, load_model_config
-from models.frontends import build_frontend, frames_for
+from models.frontends import build_frontend, frames_for, hop_length
 
 AUDIO = AudioConfig()
 SR = AUDIO.sample_rate
@@ -42,9 +42,42 @@ def test_frames_for_matches_the_emitted_length():
 
 def test_mask_marks_exactly_the_valid_frames():
     wav = torch.randn(3, SR * 4)
-    lengths = torch.tensor([SR * 4, SR * 2, SR // 2])
+    # ⚠️ The third row is deliberately NOT a whole number of frames: `frames_for`
+    # rounds up, so it gets 26 frames of which the last is part padding. Every
+    # length here used to divide the 320-sample hop exactly.
+    lengths = torch.tensor([SR * 4, SR * 2, SR // 2 + 1])
     _, mask = _stub()(wav, lengths)
-    assert mask.sum(-1).tolist() == [200, 100, 25]
+    assert mask.sum(-1).tolist() == [200, 100, 26]
+
+
+def test_the_boundary_frame_ignores_what_lies_past_lengths():
+    """🔴 A row's features are a function of its own samples, full stop.
+
+    `frames_for` rounds up, so a row whose length is not a multiple of `hop` has
+    a last valid frame that is part padding -- and it is masked *in*. Before
+    `Frontend.forward` zeroed past `lengths`, whatever filled that pad was
+    encoded into a frame the model attends to and takes `frame_max` over: two
+    pad fillings moved a submitted probability by 1.35e-3 on rendered audio.
+
+    ⚠️ Bitwise, and over the **valid** frames only. The masked-out frames are
+    allowed to differ -- nothing reads them.
+    """
+    fe = _stub()
+    n = SR * 2 + 137                       # 137 samples into the 320-sample hop
+    assert n % hop_length(SR, 50.0)
+    torch.manual_seed(0)
+    row = torch.randn(1, n)
+    lengths = torch.tensor([n])
+
+    quiet = torch.nn.functional.pad(row, (0, SR))
+    loud = torch.cat([row, 50.0 * torch.randn(1, SR)], dim=-1)
+    a, mask = fe(quiet, lengths)
+    b, _ = fe(loud, lengths)
+    assert torch.equal(a[mask], b[mask])
+
+    # And the check is not vacuous: without `lengths` there is nothing to zero
+    # past, so the pad is encoded and the very same frames move.
+    assert not torch.equal(fe(quiet)[0][mask], fe(loud)[0][mask])
 
 
 def test_short_file_still_gets_one_frame():
