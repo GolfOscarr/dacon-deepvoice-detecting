@@ -1,0 +1,33 @@
+# secrets -- never commit
+.env
+*.key
+kaggle.json
+
+# local data & artifacts (anchored to repo root so docs/data/ is NOT ignored)
+/data/
+/datasets/
+/pools/
+/artifacts/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.safetensors
+submit.zip
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# os
+.DS_Store
+
+# omc
+.omc/
