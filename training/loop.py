@@ -110,10 +110,17 @@ STAGES = ("independent", "joint", "codec_aware")
 #: put. The 8 kHz telephone leg is included because ★ ASVspoof 5's hardest
 #: condition is codec-10 (speex, 8 kHz, low bitrate) and that is our telephone
 #: slice, named as the worst case by an independent evaluation.
+#:
+#: ⚠️ **`flac` is the candidate for replacement**, once one of AAC / OPUS /
+#: AMR-NB / GSM has its encoder delay verified the way MP3's was. It is
+#: lossless, so it exercises a different container and decode path but leaves
+#: the signal untouched -- the least signal of the four, for a quarter of S3's
+#: compute. 🔴 That quarter is not cheap: S3 is the strongest-evidenced stage in
+#: the recipe, so its budget is the one the schedule's remaining value sits in.
 CODEC_VARIANTS: tuple[dict[str, Any], ...] = (
     {},                                              # as decoded
     {"container": "mp3", "bitrate": 64},             # ⚠️ 64 kbps cost MusicDET +37 EER pts
-    {"container": "flac"},                           # lossless, but a different container
+    {"container": "flac"},                           # ⚠️ the weak leg -- see below
     {"telephone_hz": 8000, "companding": "ulaw"},    # A-S4, the telephone slice
 )
 
@@ -132,12 +139,35 @@ class StagePlan:
     branch_groups: tuple[tuple[str, ...], ...]
     codec_variants: tuple[Mapping[str, Any], ...]
     train_frontends: bool
+    #: 🔴 Frontends whose ``FrontendConfig.freeze`` disagrees with what this
+    #: stage imposes. Empty on every shipped config; non-empty means a config
+    #: field is not being honoured, and `caveats` says so out loud.
+    freeze_overrides: tuple[str, ...] = ()
+
+    @property
+    def caveats(self) -> tuple[str, ...]:
+        """What this plan does that the config does not say. 🔴 Never silent.
+
+        The house pattern is `training.folds.FoldPlan.caveats`: the thing a
+        reader skips is the thing that has to travel with the result, so it is a
+        field of the plan rather than a log line.
+        """
+        if not self.freeze_overrides:
+            return ()
+        names = ", ".join(self.freeze_overrides)
+        return (
+            f"stage {self.stage!r} freezes the frontend(s) {names}, whose config "
+            f"says `freeze: false`. S1 is defined as 'each branch alone on frozen "
+            f"frontends', so the override is deliberate -- but the field is not "
+            f"being honoured in this stage and a run that reports 'trained with "
+            f"an unfrozen encoder' would be wrong. It IS honoured in S2/S3.",)
 
     def __str__(self) -> str:
         groups = " | ".join("+".join(g) for g in self.branch_groups)
-        return (f"{self.stage}: groups [{groups}], "
+        head = (f"{self.stage}: groups [{groups}], "
                 f"{len(self.codec_variants)}-way codec, "
                 f"frontends {'trainable' if self.train_frontends else 'frozen'}")
+        return "\n".join([head, *(f"  ⚠️ {c}" for c in self.caveats)])
 
 
 def stage_plan(stage: str, cfg: ModelConfig) -> StagePlan:
@@ -149,15 +179,26 @@ def stage_plan(stage: str, cfg: ModelConfig) -> StagePlan:
     | ``joint`` (S2)       | all together  | per config | 1-way |
     | ``codec_aware`` (S3) | all together  | per config | **4-way** |
 
-    ⚠️ S1 freezes the frontends *regardless of* ``FrontendConfig.freeze`` -- that
-    is what "independent, frozen frontends + adapters" means, and reading the
-    model config here instead would make S1 and S2 the same stage on the shipped
-    configs (both stubs already say ``freeze: true``), so an S1-vs-S2 comparison
-    would measure nothing.
+    🔴 S1 **overrides** ``FrontendConfig.freeze`` rather than reading it, and
+    that is a deliberate asymmetry: "independent, frozen frontends + adapters"
+    is what the stage *is*, and reading the field instead would make S1 and S2
+    the same stage on both shipped configs (they already say ``freeze: true``),
+    so an S1-vs-S2 comparison would measure nothing.
+
+    ⚠️ **The override is announced, not silent.** If a config ever says
+    ``freeze: false``, S1 still freezes -- and `StagePlan.caveats` names the
+    frontends whose field is not being honoured, `__str__` prints it, and
+    `StageResult.caveats` carries it to the run report. Reported rather than
+    raised: the field is honoured in S2 and S3, so this is a divergence to
+    announce for one stage, not a config the schedule cannot run. A silent
+    divergence between a config field and actual behaviour is the defect here;
+    the override itself is the schedule.
     """
     branches = tuple(cfg.branches)
     if stage == "independent":
-        return StagePlan(stage, tuple((b,) for b in branches), ({},), False)
+        overrides = tuple(name for name, fe in cfg.frontends.items() if not fe.freeze)
+        return StagePlan(stage, tuple((b,) for b in branches), ({},), False,
+                         freeze_overrides=overrides)
     if stage == "joint":
         return StagePlan(stage, (branches,), ({},), True)
     if stage == "codec_aware":
@@ -530,6 +571,22 @@ class StageResult:
     checkpoints: list[TrainCheckpoint] = field(default_factory=list)
     ema: EMA | None = None
     truncated: bool = False
+
+    @property
+    def caveats(self) -> tuple[str, ...]:
+        """Everything about this stage a result must not be read without.
+
+        ⚠️ Pass these into `aggregate_folds(..., caveats=...)` so they reach the
+        ledger row -- a caveat that stops at the `StageResult` is a caveat
+        nobody reads.
+        """
+        out = list(self.plan.caveats)
+        if self.truncated:
+            out.append(
+                f"stage {self.stage!r} was truncated at {self.steps} step(s) by "
+                f"`LoopConfig.max_steps`: this is a Replay-speed or test run and "
+                f"is not quotable (docs/validation/03 §2)")
+        return tuple(out)
 
 
 def _schedule(plan: StagePlan, epochs: int) -> list[tuple[int, int]]:
@@ -1321,8 +1378,14 @@ def validate_fold(model: DeepVoiceNet, eval_dataset: SpecDataset, *,
 
 
 def aggregate_folds(results: Sequence[FoldResult],
-                    min_pool: int | None = None) -> RunReport:
+                    min_pool: int | None = None,
+                    caveats: Sequence[str] = ()) -> RunReport:
     """Mean of per-fold metrics. 🔴 Never a pooled OOF score.
+
+    ⚠️ ``caveats`` is where `StageResult.caveats` goes -- the frozen-frontend
+    override, a truncated run. They are printed by `RunReport.__str__` and land
+    in `as_ledger_row()`, because a caveat that stops at the training result is
+    one nobody reads.
 
     Each fold is scored by a *different model*, so their score scales differ and
     EER is computed on the merged ranking: concatenating raw OOF scores measured
@@ -1335,7 +1398,7 @@ def aggregate_folds(results: Sequence[FoldResult],
     agg = fold_mean([r.validation.metrics for r in results],
                     min_pool=min_pool,
                     fold_ids=[r.fold for r in results])
-    caveats: list[str] = []
+    caveats: list[str] = list(caveats)
     if agg.n_folds == 1:
         caveats.append(
             "single fold: Score_sd is 0.0 because there is nothing to vary, not "

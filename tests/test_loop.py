@@ -209,6 +209,77 @@ def test_the_frozen_frontend_claim_goes_red_if_s1_stops_freezing(corpus, model_c
     assert {id(p) for p in params} & {id(p) for p in model.frontends.parameters()}
 
 
+def _unfrozen(cfg):
+    return dataclasses.replace(cfg, frontends={
+        k: dataclasses.replace(v, freeze=False) for k, v in cfg.frontends.items()})
+
+
+def test_s1_announces_the_freeze_override_when_the_config_disagrees(model_cfg):
+    """🔴 S1 overrides `FrontendConfig.freeze` rather than reading it, and says so.
+
+    The override is right -- reading the field would make S1 and S2 identical on
+    both shipped stubs and reduce the ablation to measuring nothing. What is not
+    right is a silent divergence between a config field and actual behaviour, so
+    the plan names the frontends whose field is not being honoured.
+    """
+    plan = stage_plan("independent", _unfrozen(model_cfg))
+    assert plan.freeze_overrides == tuple(model_cfg.frontends)
+    assert plan.caveats and "freeze: false" in plan.caveats[0]
+    for name in model_cfg.frontends:
+        assert name in plan.caveats[0]
+    assert "⚠️" in str(plan)
+
+
+def test_s1_is_silent_when_the_config_already_agrees(model_cfg):
+    """Non-vacuity for the test above: the caveat is a *check*, not a banner.
+
+    Both shipped stubs say `freeze: true`, so the shipped path must be quiet --
+    otherwise the warning would be present on every run and stop being read.
+    """
+    plan = stage_plan("independent", model_cfg)
+    assert plan.freeze_overrides == () and plan.caveats == ()
+    assert "⚠️" not in str(plan)
+
+
+def test_only_s1_overrides_the_field_s2_and_s3_honour_it(model_cfg):
+    """⚠️ The divergence is one stage's, not the schedule's. S2/S3 read the
+    config, so they have nothing to announce and must not claim otherwise."""
+    unfrozen = _unfrozen(model_cfg)
+    for stage in ("joint", "codec_aware"):
+        plan = stage_plan(stage, unfrozen)
+        assert plan.train_frontends
+        assert plan.freeze_overrides == () and plan.caveats == (), stage
+
+
+def test_the_override_caveat_reaches_the_run_report(corpus, model_cfg, tmp_path):
+    """A caveat that stops at the `StageResult` is one nobody reads."""
+    torch.manual_seed(0)
+    model = DeepVoiceNet(_unfrozen(model_cfg))
+    result = train_stage(model, _dataset(corpus, n=2),
+                         train_cfg=_train_cfg(stage="independent"),
+                         loop_cfg=LoopConfig(out_dir=tmp_path, n_buckets=1,
+                                             ema_decay=0.0))
+    assert result.caveats and "freeze: false" in result.caveats[0]
+
+    report = aggregate_folds([_fold_result(0, _metric_set(0.10))],
+                             caveats=result.caveats)
+    assert any("freeze: false" in c for c in report.caveats)
+    assert "freeze: false" in str(report)
+    assert "freeze: false" in report.as_ledger_row()["caveats"]
+
+
+def test_a_truncated_stage_says_it_is_not_quotable(corpus, model_cfg, tmp_path):
+    """⚠️ `max_steps` is Replay speed and the tests. Same mechanism, so a
+    truncated run cannot reach the ledger looking like a full one."""
+    torch.manual_seed(0)
+    result = train_stage(_model(model_cfg), _dataset(corpus, n=6),
+                         train_cfg=_train_cfg(stage="joint", epochs=2),
+                         loop_cfg=LoopConfig(out_dir=tmp_path, n_buckets=1,
+                                             ema_decay=0.0, max_steps=2))
+    assert result.truncated
+    assert any("truncated" in c and "not quotable" in c for c in result.caveats)
+
+
 def test_trainable_parameters_refuses_an_empty_set(model_cfg):
     """A fully frozen group is a silently empty run, not a fast one."""
     model = _model(model_cfg)

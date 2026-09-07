@@ -707,9 +707,18 @@ evidence is ★ ArtifactNet P2→P3: hard-negative FPR **98.7% → 8.0%**, cross
 drift **−83%** ([`docs/training/04`](../docs/training/04-schedule.md)). Budget
 accordingly — if time runs out, S3 is the rung to keep.
 
-⚠️ S1 freezes the frontends **regardless of** `FrontendConfig.freeze`. Reading the
-model config instead would make S1 and S2 identical on both shipped stubs (they
-already say `freeze: true`), so an S1-vs-S2 comparison would measure nothing.
+🔴 S1 **overrides** `FrontendConfig.freeze` rather than reading it. Reading the
+field would make S1 and S2 identical on both shipped stubs (they already say
+`freeze: true`), so an S1-vs-S2 comparison would measure nothing.
+
+⚠️ **The override is announced, not silent.** If a config says `freeze: false`,
+S1 still freezes — and `StagePlan.caveats` names the frontends whose field is not
+being honoured, `print(plan)` shows it, `StageResult.caveats` carries it, and
+`aggregate_folds(..., caveats=result.caveats)` puts it in the ledger row.
+Reported rather than raised, because the field *is* honoured in S2 and S3: this
+is a divergence to announce for one stage, not a config the schedule cannot run.
+A silent divergence between a config field and actual behaviour is the defect;
+the override itself is the schedule.
 
 ⚠️ "Each branch alone" is enforced by the **parameter set**, not by zeroing loss
 terms: AdamW's weight decay and momentum move a branch nobody is training this
@@ -938,10 +947,34 @@ they are being used in. `validate_fold` forwards `eval_dataset.slice_` and
 frozen set built from a `slice_="train"` sampler while `SpecDataset.frozen`'s
 default labelled it `"val"`. Without a manifest I5 reports SKIP, never a pass.
 
-⚠️ **VG3 is the honest gap.** It needs a TRAIN-vs-VAL classifier over the VG2
-metadata features. It reports SKIP rather than shipping green, because a stub
-would let a run claim a gate it never ran — and a low VG3 AUC is only weak
-evidence of absence anyway.
+⚠️ **VG3 is the honest gap, and it is deliberately deferred.** It needs a
+TRAIN-vs-VAL classifier over the VG2 metadata features. It reports SKIP rather
+than shipping green, because a stub would let a run claim a gate it never ran —
+and a low VG3 AUC is only weak evidence of absence anyway. It is not implemented
+now because there is no corpus: run against synthetic specs it would tell us
+about `training/synthetic.py`, and the feature matrix it needs
+(`training.audit._feature_frame`) is private — duplicating it would let VG2 and
+VG3 silently disagree about what "metadata" means.
+
+🔴 **If you are building the corpus, this is your exposure.** Two things are
+unguarded until VG3 exists, and both are corpus-side:
+
+- **Label-independent TRAIN/VAL domain drift.** VG2 asks whether metadata
+  predicts the *label*; VG3 asks whether it predicts the *slice*. Nothing else
+  asks the second question, so VAL families skewing to a different bitrate,
+  duration or bandwidth regime move the fold score with every other gate green.
+- **A corpus edit can silently break ledger comparability.** A composition change
+  is supposed to re-trigger VG2 **and** VG3 and reset comparability with earlier
+  ledger rows ([`docs/validation/02 §5`](../docs/validation/02-metric-harness.md#5-what-the-metrics-are-and-are-not-invariant-to));
+  we can detect only the VG2 half of that re-trigger.
+
+⚠️ The direction lost is the decisive one: a **high** VG3 AUC is decisive
+evidence of a problem, a low one only weak evidence of its absence. What makes
+the deferral safe is that the neighbours cover most of the same ground — VG1
+A1–A7 give structural family/source/speaker disjointness, the L1/L2 tripwires
+catch the *symptom* of a leak, and VG4's T3 gap is the matched control for the
+corpus-identity risk VG3 was cited for. The residual is drift that never surfaces
+as a too-good EER.
 
 🔴 A SKIP is not a pass and is not a failure. `RunReport.quotable` is `False` only
 for a *red* gate; skips are listed by name in `skipped_gates()` and printed by
