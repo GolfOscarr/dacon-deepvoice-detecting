@@ -24,8 +24,7 @@ Why each choice was made: [`docs/pipelines/`](../docs/pipelines/README.md) and
 | `training.render` | `SampleSpec` → audio. All the I/O, and `render(spec) == render(spec)` |
 | `training.collate` | `list[RenderedSample]` → batch, and duration bucketing. **I15** lives here |
 | `training.dataset` | The torch `Dataset`: specs → render → collate, plus the frozen eval set |
-
-⬜ `loop` — milestone M5.
+| `training.loop` | S1→S3, resume, EMA, soup, validation, the **VG gates** and the leak tripwires |
 
 ---
 
@@ -593,3 +592,365 @@ assert report.results["I5_split_safety"][0], report.results["I5_split_safety"][1
 allowed `file_id` set from the manifest, so the dataset wires the arguments
 rather than rebuilding the check ([`docs/pipelines/05 §5`](../docs/pipelines/05-invariants.md)).
 Called without a manifest, I5 reports `SKIPPED` — never a pass.
+
+---
+
+## The training loop
+
+Everything above the dataset: when a sample is shown to the model, what the model
+is allowed to learn from it at that point, and **whether the number that comes
+out is allowed to be quoted**.
+
+```python
+import dataclasses, tempfile
+from pathlib import Path
+
+from models.config import load_model_config, load_train_config
+from models.model import DeepVoiceNet
+from training.dataset import SpecDataset
+from training.loop import LoopConfig, train_stage
+from training.render import ManifestIndex, RenderConfig
+from training.sampler import Sampler, SamplerConfig
+from training.synthetic import synthetic_manifest, write_synthetic_corpus
+
+root = Path(tempfile.mkdtemp())
+corpus = synthetic_manifest(n_per_pool=2, n_whole_file=2, seed=0,
+                            duration_range=(6.0, 8.0))
+write_synthetic_corpus(corpus, root, seed=0)
+index, rcfg = ManifestIndex.from_frame(corpus), RenderConfig(root=root)
+
+model = DeepVoiceNet(load_model_config("configs/a_stub.yaml"))
+train = SpecDataset.from_sampler(
+    Sampler(corpus, SamplerConfig(duration_range=(4.0, 5.0))), 2, index, rcfg)
+train_cfg = dataclasses.replace(load_train_config("configs/train_joint.yaml"),
+                                epochs=1, batch_size=2, stage="joint")
+
+result = train_stage(model, train, train_cfg=train_cfg,
+                     loop_cfg=LoopConfig(out_dir=root / "run", n_buckets=1))
+assert result.steps >= 1 and result.checkpoints          # resumable from any of them
+```
+
+⚠️ `train_stage` takes a **training** `SpecDataset` and refuses a frozen one. It
+calls `set_epoch` once per pass, and a frozen eval set refuses `set_epoch` on
+purpose — the two refusals are the same rule seen from both ends.
+
+---
+
+### 🔴 Resume restores the *draw*, not only the weights
+
+```python
+from training.loop import SamplerState
+
+state = SamplerState(pass_index=3, epoch_seed=0, n_specs=4096,
+                     batch_seed=3, batch_index=57)
+```
+
+The corpus is **drawn**. A checkpoint that restores model, optimizer and RNG but
+not *where in the draw it was* resumes onto a different sample stream, reports it
+under the same `exp_id`, and nothing shows it — not an exception, not the loss
+curve, not a green suite.
+
+`Sampler.epoch_specs` is keyed on epoch-local `i`, `epoch` and `seed`, and
+`bucket_batches` on `(durations, seed)`, so there is **no hidden generator to
+serialise** and the whole sampler state is those five numbers. That is the payoff
+of the stateless sampler, and also why it is so easy to forget.
+
+| Restored | Dropping it costs |
+|---|---|
+| `sampler` | a **different corpus**, silently |
+| `rng` | dropout draws (`dropout_in=0.25`, `dropout_out=0.5`) diverge on step 1 |
+| `optimizer` | AdamW's moments restart |
+| `scaler` | the fp16 loss scale replays its warm-up |
+| `ema` | the averaged weights restart from the resume point |
+
+`tests/test_loop.py::test_a_resumed_run_reproduces_an_uninterrupted_run_bitwise`
+asserts the resumed weights are **bitwise** identical, and the four tests after it
+drop one piece each and prove the assertion goes red.
+
+⚠️ Resuming against a dataset that draws a different `n`, or at a different seed,
+**raises**. So does resuming into a different stage: the optimizer was built over
+a different parameter set.
+
+---
+
+### The three stages, and the one that is gone
+
+```python
+from models.config import load_model_config
+from training.loop import STAGES, stage_plan
+
+cfg = load_model_config("configs/a_stub.yaml")
+assert STAGES == ("independent", "joint", "codec_aware")
+
+print(stage_plan("independent", cfg))     # 5 groups of 1 branch, frontends frozen
+print(stage_plan("codec_aware", cfg))     # 1 group of 5, 4-way codec
+
+try:
+    stage_plan("rank_polish", cfg)        # S4
+except NotImplementedError as exc:
+    assert "DROPPED" in str(exc)
+else:                                     # pragma: no cover
+    raise AssertionError("S4 ran")
+```
+
+| Stage | Branches | Frontends | Codec | Grade |
+|---|---|---|---|---|
+| **S1** `independent` | one at a time | **frozen** | 1-way | ☆ both component papers do it |
+| **S2** `joint` | all together | per config | 1-way | ⚠️ EER delta 0.5 pts — *below* our resolution |
+| **S3** `codec_aware` | all together | per config | **4-way** | ★ **the best-evidenced stage in the recipe** |
+| ~~S4 `rank_polish`~~ | — | — | — | ❌ refuted; `stage_plan` raises |
+
+🔴 **S2 is kept by argument, S3 by measurement.** The famous "largest single gain"
+(ACC 69.40 → 85.12) is a *thresholded* result; the EER deltas from the same
+ablation are 3.59 → 3.12 and 8.72 → 7.86, below our ≈1 pt local resolution. S3's
+evidence is ★ ArtifactNet P2→P3: hard-negative FPR **98.7% → 8.0%**, cross-codec
+drift **−83%** ([`docs/training/04`](../docs/training/04-schedule.md)). Budget
+accordingly — if time runs out, S3 is the rung to keep.
+
+⚠️ S1 freezes the frontends **regardless of** `FrontendConfig.freeze`. Reading the
+model config instead would make S1 and S2 identical on both shipped stubs (they
+already say `freeze: true`), so an S1-vs-S2 comparison would measure nothing.
+
+⚠️ "Each branch alone" is enforced by the **parameter set**, not by zeroing loss
+terms: AdamW's weight decay and momentum move a branch nobody is training this
+pass, so a loss-only restriction would make "alone" a claim rather than a fact.
+
+---
+
+### 🔴 S3's codec expansion is a cross product, never a draw
+
+```python
+from training.loop import CODEC_VARIANTS, codec_variant_specs
+from training.sampler import Sampler, SamplerConfig
+from training.synthetic import synthetic_manifest
+
+corpus = synthetic_manifest(n_per_pool=20, n_whole_file=20, seed=0)
+specs = list(Sampler(corpus, SamplerConfig()).epoch_specs(50))
+expanded = codec_variant_specs(specs, CODEC_VARIANTS)
+
+assert len(expanded) == 4 * len(specs)
+assert sorted(s.cell for s in expanded) == sorted(c for s in specs
+                                                  for c in [s.cell] * 4)
+```
+
+Every variant is paired with **every** spec, so `P(normalize | label) = P(normalize)`
+is structural rather than a property the sampler has to remember. A per-spec draw
+is the known leak: `container = mp3 if fake else wav` scored **AUC 1.000** on the
+I1b metadata probe while every other invariant stayed green
+([`docs/pipelines/05 §1`](../docs/pipelines/05-invariants.md)).
+
+The four legs, and why these four:
+
+| Variant | Why |
+|---|---|
+| `{}` | as decoded |
+| `mp3 @ 64 kbps` | ⚠️ 64 kbps cost MusicDET **+37 EER points** |
+| `flac` | lossless, but a different container |
+| `telephone 8 kHz + µ-law` | ★ ASVspoof 5's hardest condition is codec-10 — 8 kHz, low bitrate — and that is our telephone slice |
+
+⚠️ Short of the full A-S3 menu (AAC / OPUS / AMR-NB / GSM) for `render`'s reason:
+each needs its encoder delay verified the way MP3's is, and an uncancelled delay
+moves the audio while `frame_intervals` stay put.
+
+🔴 **Do not audit the expanded stream with I1b.** The expansion emits four
+near-duplicates of every spec and I1b's probe is *cross-validated*, so a row's
+twins land in the other folds and the classifier memorises. Measured: expanding
+four ways with **no codec at all** trips I1b at AUC **1.0000**. Audit the stream
+the expansion is built from — `tests/test_loop.py::test_i1b_must_not_be_run_on_the_expanded_stream`
+pins this so nobody "improves" it back.
+
+---
+
+### EMA and the soup
+
+```python
+from models.config import load_model_config
+from models.model import DeepVoiceNet
+from training.loop import EMA
+
+model = DeepVoiceNet(load_model_config("configs/a_stub.yaml"))
+ema = EMA(model, decay=0.999)
+ema.update(model)
+model.load_state_dict(ema.state_dict_for(model), strict=True)   # strict, always
+```
+
+🔴 The EMA is **bias-corrected**, like Adam's moments. A raw EMA is initialised at
+the starting weights, so at decay 0.999 it is still 63% initialisation after 1,000
+steps — on a short schedule the "EMA weights" would mostly be the random init and
+the run would report a number for a model it never trained. With the correction,
+the EMA after one update is *exactly* the current weights, which is an identity a
+test can assert.
+
+```python
+from training.loop import checkpoint_soup
+```
+
+`checkpoint_soup([a, b, c])` is ★ free ensembling at zero inference cost, across
+**epochs and seeds** — hence a list of files rather than an in-run buffer, since
+the across-seed soup comes from separate runs. It **refuses** a mismatched key
+set, a shape mismatch or a differing config rather than averaging what it can:
+the average of two architectures is not a model, and a partial average is a
+`load_state_dict` failure deferred onto whoever ships it. Integer buffers are
+carried, not averaged.
+
+---
+
+### Validating a fold
+
+```python
+from training.loop import evaluate
+```
+
+`evaluate(model, frozen_dataset)` → a `ValidationReport` carrying the `MetricSet`
+**and** `per_cell` **and** `per_generator`. The breakdowns are fields, not
+something a caller may forget to ask for: a good pooled EER routinely hides a
+collapsed cell, and cells 6/7 are the entire reason the competition has two fake
+heads.
+
+🔴 **Nothing here computes a metric.** `metrics.dacon.dacon_score`,
+`metrics.breakdown` and `metrics.aggregate.fold_mean` do, and
+`tests/test_loop.py` proves it by breaking `roc_curve` and watching `evaluate`
+fail. Three details of the official estimator are load-bearing and a
+reimplementation that "cleans up" any of them disagrees with the leaderboard.
+
+⚠️ `evaluate` refuses a redrawable dataset, and `predict` uses `eval_batches` —
+in order, unbucketed, nothing dropped.
+
+🔴 **`LoopConfig.eval_precision` defaults to `fp32` and should stay there**, even
+though inference ships fp16. bf16 carries 8 mantissa bits, and squashing a bf16
+logit *ties files together*. Measured, and 🔴 the effect is size-dependent:
+
+| n | bf16 unique | fp16 | fp32 | VG5 gate is `> 0.5 n` |
+|---|---|---|---|---|
+| 400 (a convenient fixture) | 241 ✅ | 370 ✅ | 400 ✅ | passes |
+| **1,200 (the VAL floor)** | **399 ❌** | 996 ✅ | 1,200 ✅ | **fails** |
+
+A bf16 evaluation passes VG5 on any fixture small enough to be convenient and
+fails at the size we actually validate on.
+
+---
+
+### 🔴 Aggregation: the mean of per-fold metrics
+
+```python
+from training.loop import aggregate_folds
+```
+
+Each fold is scored by a **different model**, their score scales differ, and EER
+is computed on the merged ranking — so concatenating raw OOF scores measured
+**0.1705 against a true 0.100**
+([`docs/validation/02 §4`](../docs/validation/02-metric-harness.md#4-how-we-aggregate)).
+`aggregate_folds` delegates to `metrics.aggregate.fold_mean` and nothing in
+`training.loop` concatenates a score column.
+
+⚠️ **A single-fold run is first-class**, not a degraded mode — the 5-fold sweep is
+often unaffordable and Replay speed is fold 0 by definition. What it does *not*
+give is `Score_sd`, which is P4's input and the ★ E5 tiebreaker; `fold_mean`
+returns **0.0** there, which reads as "perfectly stable". So `RunReport` carries
+a caveat saying that 0.0 is an absence rather than a measurement, and
+`sd_is_a_measurement` is `False`.
+
+---
+
+### 🔴 Tripwires: numbers too good to be true
+
+```python
+from metrics.dacon import MetricSet, roll_up
+from training.loop import leak_tripwires
+
+def metrics(eer_file, eer_voice, eer_music, auc=0.9):
+    ads, cps, score = roll_up(eer_file, eer_voice, eer_music, auc, auc)
+    return MetricSet(eer_file, eer_voice, eer_music, auc, auc, ads, cps, score,
+                     2000, 2000, 2000)
+
+fired = leak_tripwires(metrics(0.10, 0.09, 0.005), "generator_disjoint")
+assert not fired.ok                                   # music EER 0.5% -- suspect a leak
+
+blind = leak_tripwires(metrics(0.10, 0.0, 0.0), "generator_overlapping")
+assert "L1_music_unseen_generator" in blind.skipped   # SKIP, never PASS
+assert not blind.results["L3_perfect_separation"][0]  # the row that *does* apply
+```
+
+| Head | Suspicious if | Because |
+|---|---|---|
+| music fake, unseen generator | **< 3% EER** | published cross-generator is **46.4%** |
+| voice fake, unseen generator | **< 1% EER** | ASVspoof 5's best is ~4% |
+| any head | perfect separation on a random split | re-split by generator |
+
+⚠️ It takes the `MetricSet` the **official harness already produced**, not a
+prediction frame — re-deriving these EERs would put a second EER implementation
+in the one repo that forbids them, and the tripwire could then disagree with the
+number it guards.
+
+🔴 **"Unseen generator" is measured, not declared.**
+
+```python
+from training.loop import measured_split_kind
+```
+
+`measured_split_kind(train_specs, val_specs, index)` compares the *realised*
+generator families of the two drawn streams. A `split_kind=` argument would be
+switched off by the same mistake the tripwires exist to catch — the caller who
+believes the split is family-disjoint is exactly the caller whose 0.5% music EER
+needs explaining. It is the house pattern of `training.registries`, which
+*measures* time invariance rather than trusting a declaration field.
+
+⚠️ A stream with no generated component returns `"undecidable"`, and L1/L2 then
+SKIP. "Disjoint from nothing" is vacuously true and would arm the tripwires on a
+split they cannot speak about.
+
+---
+
+### The gates, and the one that is missing
+
+```python
+from training.loop import run_gates, validate_fold
+```
+
+`validate_fold(model, eval_dataset, train_specs=...)` is the composed form: it
+scores the fold, runs the gates and runs the tripwires, and returns one
+`FoldResult`. 🔴 `train_specs` is a **required** argument, and that is why the
+function exists — the tripwires need to know whether VAL is generator-disjoint
+from TRAIN, that question is *measured*, and measuring it needs both streams. So
+a `FoldResult` cannot be produced without the tripwires having run, or having
+said by name why they could not.
+
+| Gate | Wired to |
+|---|---|
+| **VG1** A1–A7, A10 | `training.folds.check_split_integrity` |
+| **VG1** A8/A9 | `training.audit.audit_specs(..., eval_floors=True)` |
+| **VG2** | the same audit's **I1b** — E-S2 at spec level |
+| **VG3** adversarial validation | ⚠️ **SKIP — not implemented** |
+| **VG4** | `metrics.breakdown.t3_gap` |
+| **VG5** B1–B5 | `training.loop.output_sanity` |
+| **VG6** | the `probe_openings.log` line count, refused at 4 |
+
+⚠️ **VG3 is the honest gap.** It needs a TRAIN-vs-VAL classifier over the VG2
+metadata features. It reports SKIP rather than shipping green, because a stub
+would let a run claim a gate it never ran — and a low VG3 AUC is only weak
+evidence of absence anyway.
+
+🔴 A SKIP is not a pass and is not a failure. `RunReport.quotable` is `False` only
+for a *red* gate; skips are listed by name in `skipped_gates()` and printed by
+`__str__`, so the shortfall lands in the ledger rather than in a docstring. If a
+SKIP blocked, nothing would ever be quotable and the distinction would stop being
+read.
+
+⚠️ **No experiment is quotable without a VG1–VG6 pass recorded alongside it**
+([`docs/validation/04`](../docs/validation/04-audit-gates.md)). `run_gates` +
+`aggregate_folds` produce that record; `RunReport.as_ledger_row()` is the subset
+of [`docs/validation/03 §5`](../docs/validation/03-decision-protocol.md#5-experiment-ledger)'s
+schema this module can fill. The rest — `hypothesis`, `git_sha`, `parent_exp_id` —
+is the experiment runner's, and 🔴 `hypothesis` is written **before** the run.
+
+---
+
+### What is deliberately not here
+
+| Missing | Why |
+|---|---|
+| A `DataLoader` with workers | Worker processes would put the draw behind a second, per-worker RNG and the bitwise-resume guarantee would become a claim about `torch.utils.data`'s seeding. There is no corpus yet, so nothing is waiting on throughput. When there is: `DataLoader(dataset, batch_sampler=plan, collate_fn=collate)` **plus** a new resume test, in that order |
+| Distributed training | Same reason, one level up. `_masked_mean` already keeps the graph connected so DDP does not deadlock on unused params |
+| Teacher wiring / distillation | `TrainConfig.teachers` is validated (frozen, known frontend) but no teacher is loadable — `build_frontend` raises for anything but `stub` while the SSLAM / EAT / W2V-BERT licences are unverified. `multitask_loss` takes `teacher_emb` when there is one |
+| An LR schedule | Rung 4 of [`architecture/08 §4b`](../docs/architecture/08-training-recipe.md)'s ladder is `optimizer`, and ★ the Kaggle ordering puts it **last**: *"common mistake: over-searching schedules before solving data shift and imbalance"*. A constant LR is the honest default until T1 has run |
+| Running an experiment | **T1** (`clip_weight` 1.0 vs 0.5, Medium speed, never Replay) is the first one, and there is no corpus. This module is the instrument |
