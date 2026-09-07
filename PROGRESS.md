@@ -3,7 +3,7 @@
 **DACON 236749 — 딥보이스 범죄 대응을 위한 AI 탐지 모델 경진대회**
 Updated 2026-09-07 · **22 days to LB close** (2026-09-29 10:00 KST) · 2nd-stage materials 2026-10-05
 
-Docs: 51 files under [`docs/`](docs/README.md) · Code: none yet
+Docs: 57 files under [`docs/`](docs/README.md) · Code: none yet
 
 ---
 
@@ -15,7 +15,7 @@ Docs: 51 files under [`docs/`](docs/README.md) · Code: none yet
 | **+** | Kaggle intelligence | ✅ done → [`docs/kaggle/`](docs/kaggle/README.md) |
 | **+** | Paper research | ✅ done → [`docs/papers/`](docs/papers/INDEX.md) — ~75 indexed, 12 deep-read |
 | **B** | Data strategy | ✅ planned, ⬜ **not executed** → [`docs/data/`](docs/data/README.md) |
-| **C** | Validation design | ⬜ **next** |
+| **C** | Validation design | ✅ designed → [`docs/validation/`](docs/validation/README.md), ⬜ **not implemented** |
 | **D** | Model architecture | ⬜ |
 | **E** | Score fusion & calibration | ⬜ |
 | **F** | Engineering / submission | ⬜ |
@@ -73,17 +73,22 @@ Docs: 51 files under [`docs/`](docs/README.md) · Code: none yet
 - [ ] Email AI-Hub (safezone1@aihub.kr) re: NIA / competition use
 - [ ] **G1** dummy-file forensics → `signal_chain.yaml`
 - [ ] **G2** license audit of `docs/data/11-source-inventory.md` (top 10 first)
-- [ ] `submit.zip` skeleton + trivial model → validate I/O, runtime, offline packaging
+- [ ] `submit.zip` skeleton + trivial model → validate I/O, runtime, offline packaging (`metrics/submission.py` is ready to vendor)
 - [ ] LB probe: all-constant 0.5 submission → **must score exactly 0.5000**
 
 **Highest-value single experiment**
 - [ ] 🔴 `E-A1` **16 kHz survivability probe** — ArtifactNet's Table XI shows AI residual bandwidth ~291 Hz vs human ~1,996 Hz, which *looks* like it should survive an 8 kHz Nyquist, yet the paper insists 44.1 kHz is required. Settling this decides the whole music-head approach
 
-**Then (C — validation design)**
-- [ ] Generator-disjoint + source-disjoint split scheme; shadow split for domain shift
-- [ ] LB decomposition probe: 5 submissions isolate per-head test metrics
-- [ ] Local metric harness mirroring the official EER/AUC code
-- [ ] Confound / shortcut audit gate wired in (`E-S2`, AUC < 0.60)
+**Then (C — validation, now design-complete → [`docs/validation/`](docs/validation/README.md))**
+- [x] Split scheme: artifact-family-disjoint + source-disjoint, 4 slices (TRAIN/VAL/SHADOW/PROBE)
+- [x] Metric harness spec + verified properties (all-constant = exactly 0.5000; saturation risk)
+- [x] Decision protocol: 3 speeds, paired-bootstrap promotion rule, experiment ledger
+- [x] Gates **VG1–VG6** defined with pre-committed thresholds
+- [x] 🔴 LB decomposition solved: **4 marginal submissions** recover all 3 fake EERs *and* CPS
+- [x] **Implemented** `metrics/` — dacon · submission · aggregate · breakdown, 47 tests green under the server's scikit-learn 1.8.0 (branch `feat/metrics-harness`)
+- [ ] **Implement** `folds.parquet` builder + VG1 assertions
+- [ ] Wire VG2/VG3 (`E-S2`, `E-A2`) to run per-experiment, not ad hoc
+- [ ] 🔴 Resolve the **music-family shortfall** below before any fold is built
 
 **Then (B execution — days 3–12)**
 - [ ] Acquire top-5 sources: CompSpoof V2, MLAAD, MUSDB18-HQ, Codecfake, ASVspoof21 LA
@@ -120,6 +125,7 @@ Docs: 51 files under [`docs/`](docs/README.md) · Code: none yet
 - [ ] **CtrSVDD** CC BY-NC-**ND** — accept the risk or self-generate only? (307 h singing @16 kHz at stake). ⏳ #417333 Q5 asks exactly this — may resolve itself
 - [ ] ⚠️ **#417333 Q1/Q6 could invalidate planned work** — codec-resynthesis labelling (T3 twins) and whether mixed public data must be shipped as files (on-the-fly composition). Monitor before building either
 - [ ] **G6** preprocessing policy: channel handling, loudness normalization, silence trimming
+- [ ] 🔴 **Music generator families: raise the floor from ≥5 to ≥8** — at 5, a family-disjoint 5-fold puts *one* family per validation fold and the sealed PROBE slice cannot be carved out at all, on the highest-weighted component head (0.27). Costs more Phase-B synthesis. [`validation/01`](docs/validation/01-split-scheme.md#-the-music-head-cannot-support-the-planned-split)
 - [ ] **Korean slice size** — unknown test-set language composition
 - [ ] **Review packs** — build the listenable HTML threshold-review generator now, or at first threshold?
 - [ ] ⚠️ **ArtifactNet patents (KR + PCT)** cover bounded-mask residual extraction and codec-invariant training. Reimplementing those specific methods in a Korean government competition may warrant a legal look — or we simply avoid that exact formulation
@@ -141,3 +147,8 @@ Docs: 51 files under [`docs/`](docs/README.md) · Code: none yet
 | Data volume | **Domain balance beats hours** — 3% of data can win (DOSS) |
 | Separation | Never as a frozen preprocessor. Skip it, train it jointly, or use it as a residual *teacher* |
 | 16 kHz | Kills most published music detectors. But **ranking metrics degrade far less than thresholded F1** |
+| LB noise floor | 1,200 files ⇒ **±1.7 pts** EER on the File head, **±2.5** on each component head. Sub-1-point LB moves are not evidence |
+| VAL size floor | **≥1,200 per class per masked pool** to resolve a 1-pt gap at 95% (paired) |
+| Aggregation | **Mean of per-fold EER.** Pooling raw OOF scores across folds gave 0.171 for a true 0.100 |
+| Invariance | EER is invariant to monotone transforms and to class prevalence — **not** to cell composition within a class (0.034 → 0.297) |
+| Rule 2.4 | Per-file independence — cross-file normalization and **rank calibration are forbidden** in `script.py` |

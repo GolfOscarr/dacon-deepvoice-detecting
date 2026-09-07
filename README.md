@@ -36,6 +36,7 @@ offline on one L4 GPU within 60 minutes.
 | **[docs/survey/](docs/survey/README.md)** | Synthesized prior art — SOTA per head, model/dataset catalogs |
 | **[docs/kaggle/](docs/kaggle/README.md)** | Winners' practical recipes, incl. code pulled from top notebooks |
 | **[docs/data/](docs/data/README.md)** | Data strategy — tiered method catalogs, review gates, ~70 vetted sources |
+| **[docs/validation/](docs/validation/README.md)** | How we measure — splits, metric harness, decision protocol, gates, LB decomposition |
 | **[docs/papers/](docs/papers/INDEX.md)** | ~75 papers indexed with links; 12 read in depth |
 
 Start at **[docs/README.md](docs/README.md)** for a reading order.
@@ -67,6 +68,18 @@ python3 -m venv .venv && .venv/bin/pip install kaggle
 
 `.env` is gitignored. The Kaggle API is used for dataset discovery and pulling public notebooks;
 it is not required to read the documentation.
+
+## Verification
+
+`scripts/verify_metric.py` reproduces every quantitative claim in
+[docs/validation/](docs/validation/README.md) — that an all-constant submission scores exactly
+0.5000, that the leaderboard decomposes exactly into per-head metrics, and the EER noise /
+saturation tables.
+
+```bash
+.venv/bin/pip install scikit-learn scipy
+.venv/bin/python scripts/verify_metric.py
+```
 
 ## Skill
 
