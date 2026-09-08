@@ -227,6 +227,26 @@ def prediction_frame(specs: Sequence[SampleSpec], preds: Mapping[str, np.ndarray
     return frame
 
 
+def _worst_slice(table: pd.DataFrame) -> float:
+    """The Tier-2 worst slice of a breakdown: **max**, file head, thin excluded.
+
+    Critical: every qualifier is load-bearing and each one used to be unheld.
+    `breakdown_table` emits three heads, so an unfiltered max reported the worst
+    *voice*- or *music*-head slice under a name P2 and P3 read as the file head.
+    Thin slices are excluded because a per-family EER over 40 files is not
+    evidence (`metrics.breakdown`, same rule one layer down), and it is a max
+    because the criterion is "no cell regresses" / "no family collapses" -- a
+    min would report the healthiest slice and pass every run.
+
+    Cells and families are label-determining keys, so their file-head rows are
+    scored against the shared contrast pool by construction; `tests/test_validate.py`
+    pins that rather than filtering on a column that cannot vary.
+    """
+    usable = table[(table["head"] == "file") & (~table["thin"])
+                   & table["eer"].notna()]
+    return float(usable["eer"].max()) if len(usable) else float("nan")
+
+
 @dataclass(frozen=True)
 class ValidationReport:
     """One fold's numbers. Pooled *and* sliced, because pooled alone is not a result.
@@ -246,8 +266,18 @@ class ValidationReport:
 
     @property
     def worst_cell_eer(self) -> float:
-        usable = self.per_cell[(~self.per_cell["thin"]) & self.per_cell["eer"].notna()]
-        return float(usable["eer"].max()) if len(usable) else float("nan")
+        """P2's input: the worst of cells 1-9 on the **file** head."""
+        return _worst_slice(self.per_cell)
+
+    @property
+    def worst_family_eer(self) -> float:
+        """P3's input -- "no family may collapse" (docs/validation/03 §3).
+
+        Critical: `worst_cell_eer` had no family counterpart, so P3's Tier-2 input was
+        the one promotion criterion nothing here could fill, although
+        `per_generator` has held the data all along.
+        """
+        return _worst_slice(self.per_generator)
 
     def __str__(self) -> str:
         m = self.metrics

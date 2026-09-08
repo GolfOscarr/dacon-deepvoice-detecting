@@ -261,6 +261,58 @@ def test_generator_key_never_invents_a_family_for_a_real_row(corpus):
             assert key.startswith("real:") or key == "unknown", (spec.cell, key)
 
 
+def _slices(rows):
+    """A breakdown frame with `metrics.breakdown.by`'s columns, row by row."""
+    return pd.DataFrame([
+        {"value": v, "head": head, "eer": eer_, "contrast": "shared",
+         "n_slice": 40 if thin else 300, "n_slice_fake": 20, "n_pool": 900,
+         "thin": thin, "note": ""}
+        for v, head, eer_, thin in rows])
+
+
+def test_the_worst_slice_is_a_max_over_the_file_heads_usable_slices():
+    """Every qualifier of the Tier-2 definition, one mutation each.
+
+    P2 reads the worst *cell* and P3 the worst *family*, both on the file head
+    and both over slices thick enough to mean anything. An unfiltered max
+    reported a voice-head slice under a file-head name, a min reported the
+    healthiest slice, and a thin slice is not evidence.
+    """
+    per_cell = _slices([(1, "file", 0.20, False), (2, "file", 0.44, False),
+                        (3, "file", 0.98, True),        # thin: not evidence
+                        (4, "voice", 0.91, False),      # another head entirely
+                        (5, "file", float("nan"), False)])
+    per_family = _slices([("hifigan", "file", 0.30, False),
+                          ("suno_v3", "file", 0.51, False),
+                          ("vits", "file", 0.99, True),
+                          ("vits", "music", 0.95, False)])
+    report = ValidationReport(0, _metric_set(0.10), per_cell, per_family,
+                              pd.DataFrame({"file_id": ["s0"]}))
+
+    assert report.worst_cell_eer == 0.44          # max, not 0.20 and not 0.98
+    assert report.worst_family_eer == 0.51
+
+
+def test_the_worst_slice_is_nan_when_nothing_is_usable():
+    thin_only = _slices([(1, "file", 0.9, True), (2, "voice", 0.9, False)])
+    report = ValidationReport(0, _metric_set(0.10), thin_only, thin_only,
+                              pd.DataFrame({"file_id": ["s0"]}))
+    assert np.isnan(report.worst_cell_eer)
+    assert np.isnan(report.worst_family_eer)
+
+
+def test_cells_and_families_are_scored_against_the_shared_contrast_pool(scored):
+    """Why `_worst_slice` filters on the head and not on the contrast: both keys
+    are label-determining, so their file-head rows can only be shared-contrast.
+    A filter on a column that cannot vary would be a check nobody could see
+    fail; this is the statement itself."""
+    _, _, report = scored
+    for table in (report.per_cell, report.per_generator):
+        file_rows = table[table["head"] == "file"]
+        assert len(file_rows)
+        assert set(file_rows["contrast"]) == {"shared"}
+
+
 # --------------------------------------------------------------------------- #
 # 3. Aggregation
 
