@@ -118,8 +118,8 @@ def test_the_fp32_eval_default_is_the_value_that_ships(scored):
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
 def test_a_bf16_probability_column_loses_ranking_resolution_at_val_size(seed):
-    """Why `LoopConfig.eval_precision` is fp32, measured at the size that
-    matters.
+    """Why `predict`, `evaluate` and `validate_fold` default `precision` to
+    fp32, measured at the size that matters.
 
     VG5's gate is `n_unique > 0.5 n`. At n=400 -- a comfortable fixture size --
     bf16 passes; at the 1,200-per-class VAL floor it does not. A test written at
