@@ -27,10 +27,11 @@ from metrics.dacon import PREDICTION_COLUMNS, eer
 from training.audit import AuditReport
 from training.dataset import SpecDataset, fold_manifest, frozen_eval_specs
 from training.folds import FoldConfig, build_folds
+from training.loop import StageResult, stage_plan
 from training.render import ManifestIndex
 from training.sampler import Sampler
 from training.synthetic import synthetic_manifest
-from training.validate import (RESOLUTION_FLOOR, ValidationReport,
+from training.validate import (NOT_QUOTABLE, RESOLUTION_FLOOR, ValidationReport,
                                aggregate_folds, evaluate, generator_key,
                                leak_tripwires, measured_split_kind,
                                output_sanity, prediction_frame, run_gates,
@@ -477,6 +478,45 @@ def test_a_fold_with_no_usable_slice_does_not_poison_the_worst_columns():
         row = aggregate_folds(list(order)).as_ledger_row()
         assert row["worst_cell_eer"] == 0.35
         assert row["worst_family_eer"] == 0.35
+
+
+def test_a_truncated_run_is_not_quotable(model_cfg):
+    """Two docstrings used to contradict each other: `LoopConfig.max_steps` says
+    a truncated run "is not quotable", `RunReport.quotable` said only a red gate
+    voids a result, and the flag agreed with the second. The existing test
+    asserted the caveat *string* contained "not quotable" and never looked at
+    the column a Replay-vs-Full ledger filter reads.
+
+    Asserted here on the flag, through the real `StageResult.caveats` rather
+    than an invented string, because that wiring is the claim.
+    """
+    plan = stage_plan("joint", model_cfg)
+    truncated = StageResult("joint", plan, steps=3, passes_done=1, truncated=True)
+    full = StageResult("joint", plan, steps=3, passes_done=1)
+
+    green = [_fold_result(0, _metric_set(0.10))]
+    stopped = aggregate_folds(green, caveats=truncated.caveats)
+    assert not stopped.quotable
+    assert stopped.as_ledger_row()["quotable"] is False
+    assert stopped.blocking_caveats and "truncated" in stopped.blocking_caveats[0]
+    assert "NOT QUOTABLE" in str(stopped)
+    # Every gate is still green: this is not a gate failure being renamed.
+    assert set(stopped.gate_status().values()) == {"na"}
+
+    assert aggregate_folds(green, caveats=full.caveats).quotable
+
+
+def test_only_a_caveat_that_says_not_quotable_voids_the_run():
+    """The marker is a phrase, so the boundary is worth pinning: an ordinary
+    caveat -- the single-fold one, which every Replay run carries -- must not
+    void a result, or `quotable` would go the way of the SKIP."""
+    single = aggregate_folds([_fold_result(0, _metric_set(0.12))])
+    assert single.caveats and single.quotable
+    assert single.blocking_caveats == ()
+
+    voided = aggregate_folds([_fold_result(0, _metric_set(0.12))],
+                             caveats=[f"subsampled VAL: {NOT_QUOTABLE}"])
+    assert not voided.quotable
 
 
 def test_a_skipped_gate_does_not_block_but_is_reported():

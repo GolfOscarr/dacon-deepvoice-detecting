@@ -54,7 +54,7 @@ from training.spec import SampleSpec
 from training.stages import autocast_for
 
 __all__ = [
-    "FoldResult", "RunReport", "ValidationReport",
+    "NOT_QUOTABLE", "FoldResult", "RunReport", "ValidationReport",
     "aggregate_folds", "eval_file_id", "evaluate", "generator_key",
     "leak_tripwires", "measured_split_kind", "output_sanity", "predict",
     "prediction_frame", "run_gates", "validate_fold",
@@ -627,6 +627,19 @@ def run_gates(report: ValidationReport, *,
 # 4. Folds, and the run record
 # --------------------------------------------------------------------------- #
 
+#: Critical: a caveat carrying this phrase **voids the run**: `RunReport.quotable` is
+#: False whatever the gates say. It is how a condition the gates cannot see
+#: reaches the flag -- today that is `LoopConfig.max_steps`, whose truncated run
+#: is Replay speed and therefore a filter rather than evidence
+#: (docs/validation/03 §2), and whose caveat already ends "is not quotable".
+#:
+#: Caveat: a phrase rather than a field because `caveats` is the channel that is
+#: actually wired: `StageResult.caveats` documents itself as the thing to pass
+#: into `aggregate_folds(..., caveats=...)`, and `training.validate` does not
+#: import the trainer. A run whose caveat *says* it is not quotable and whose
+#: `quotable` column says otherwise is the contradiction this removes.
+NOT_QUOTABLE = "not quotable"
+
 @dataclass(frozen=True)
 class FoldResult:
     """One fold, end to end: what it scored and whether it is allowed to count."""
@@ -671,16 +684,29 @@ class RunReport:
         return self.aggregate.n_folds > 1
 
     @property
+    def blocking_caveats(self) -> tuple[str, ...]:
+        """The caveats that void the run, by the `NOT_QUOTABLE` convention."""
+        return tuple(c for c in self.caveats if NOT_QUOTABLE in c)
+
+    @property
     def quotable(self) -> bool:
-        """Every gate green and no tripwire fired. A red gate voids the result.
+        """Every gate green, no tripwire fired, and no caveat that voids the run.
 
         Caveat: SKIPs do not block -- they are recorded and printed. VG3 is skipped on
         every run today, so treating a SKIP as a failure would make nothing
         quotable and the distinction would stop being read. Where the shortfall
         does land is `gate_status()`, which reports a gate with any skipped
         sub-check as `na` rather than `pass`, in the ledger row a filter reads.
+
+        Critical: the gates are not the only way to lose the right to quote a number.
+        A **truncated** run is not quotable however green it is -- it is Replay
+        speed, and Replay is a filter rather than evidence (docs/validation/03
+        §2) -- and truncation is a fact about the trainer, which this module
+        deliberately does not import. `NOT_QUOTABLE` is the channel: it travels
+        on `caveats`, the one `StageResult.caveats` is already documented to be
+        passed through, and it is read here rather than left to a reader.
         """
-        return all(f.ok for f in self.folds)
+        return all(f.ok for f in self.folds) and not self.blocking_caveats
 
     def skipped_gates(self) -> dict[str, str]:
         out: dict[str, str] = {}
@@ -814,7 +840,9 @@ def aggregate_folds(results: Sequence[FoldResult],
     Caveat: ``caveats`` is where `StageResult.caveats` goes -- the frozen-frontend
     override, a truncated run. They are printed by `RunReport.__str__` and land
     in `as_ledger_row()`, because a caveat that stops at the training result is
-    one nobody reads.
+    one nobody reads. One of them is more than a note: a caveat containing
+    `NOT_QUOTABLE` voids the run, which is how a truncated (Replay-speed) stage
+    reaches the `quotable` column rather than only the prose beside it.
 
     Each fold is scored by a *different model*, so their score scales differ and
     EER is computed on the merged ranking: concatenating raw OOF scores measured
