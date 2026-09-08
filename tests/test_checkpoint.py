@@ -11,6 +11,9 @@ shaped head is refused here rather than deferred to a `load_state_dict` failure
 in whoever ships it.
 """
 
+import dataclasses
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -26,6 +29,28 @@ from training.loop import LoopConfig, train_stage
 
 # --------------------------------------------------------------------------- #
 # 1. The checkpoint file
+
+
+_COUNT_WORD = {4: "four", 5: "five", 6: "six", 7: "seven"}
+
+
+def test_the_sampler_state_docstrings_name_the_fields_that_exist():
+    """Three docstrings enumerate `SamplerState`, and all three had drifted.
+
+    They said "these **six** numbers" of a five-field dataclass and listed
+    `(pass_index, epoch, seed, n, batch_seed, batch_index)`, where `epoch` was
+    really `pass_index` counted twice and `seed` was `epoch_seed`. This is a
+    textual check because the text is what is under test: the tuple a reader is
+    told to serialise is the whole resume contract, and it is the one thing here
+    that no behavioural test can be wrong about.
+    """
+    names = [f.name for f in dataclasses.fields(SamplerState)]
+    listed = f"`({', '.join(names)})`"
+    for source in (Path("training/checkpoint.py"), Path("training/loop.py")):
+        flat = " ".join(source.read_text().split())
+        assert listed in flat, f"{source} does not list {listed}"
+    checkpoint = " ".join(Path("training/checkpoint.py").read_text().split())
+    assert f"these {_COUNT_WORD[len(names)]} numbers" in checkpoint
 
 
 def test_a_checkpoint_without_sampler_state_is_refused_not_guessed(tmp_path):

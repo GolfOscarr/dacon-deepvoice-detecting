@@ -12,8 +12,8 @@ and the optimizer is not enough: the corpus is drawn, so a resume that forgets
 *where in the draw it was* silently trains on a different corpus and reports it
 under the same exp_id. `Sampler.epoch_specs` is keyed on epoch-local `i`,
 `epoch` and `seed` for exactly this reason -- there is no hidden generator to
-serialise, so the sampler's state is the tuple `(pass_index, epoch, seed, n,
-batch_seed, batch_index)` and it lives in the checkpoint
+serialise, so the sampler's state is the tuple `(pass_index, epoch_seed,
+n_specs, batch_seed, batch_index)` and it lives in the checkpoint
 (`training.checkpoint`). `tests/test_loop.py` proves a resumed run reproduces an
 uninterrupted one **bitwise**, and proves the check goes red when that tuple is
 dropped.
@@ -373,6 +373,15 @@ def run_schedule(model: DeepVoiceNet, dataset: SpecDataset, *,
     frontend question resolves (docs/training/04 §3). Caveat: ``joint`` is kept
     on different grounds -- its EER delta is 0.5 pts, below our local
     resolution -- so it is cheap, not measured.
+
+    Caveat: **the caveats do not travel on their own.** Every stage carries its
+    own `StageResult.caveats`, and a caller that reports only the last result
+    silently drops S1's -- which is the stage that has one, since S1 is the only
+    stage that overrides `FrontendConfig.freeze`. Whatever finally scores the
+    run owes the ledger the union: `aggregate_folds(..., caveats=tuple(c for r
+    in results for c in r.caveats))`. Nothing here can do it, because scoring
+    happens in `training.validate` against a frozen eval set this function never
+    sees.
     """
     for s in stages:
         stage_plan(s, model.cfg)              # refuse rank_polish before any work

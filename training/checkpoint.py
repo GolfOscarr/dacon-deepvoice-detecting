@@ -9,8 +9,8 @@ and the optimizer is not enough: the corpus is drawn, so a resume that forgets
 *where in the draw it was* silently trains on a different corpus and reports it
 under the same exp_id. `Sampler.epoch_specs` is keyed on epoch-local `i`,
 `epoch` and `seed` for exactly this reason -- there is no hidden generator to
-serialise, so the sampler's state is the tuple `(pass_index, epoch, seed, n,
-batch_seed, batch_index)` and it lives in the checkpoint. `tests/test_loop.py`
+serialise, so the sampler's state is the tuple `(pass_index, epoch_seed,
+n_specs, batch_seed, batch_index)` and it lives in the checkpoint. `tests/test_loop.py`
 proves a resumed run reproduces an uninterrupted one **bitwise**, and proves the
 check goes red when that tuple is dropped.
 """
@@ -107,7 +107,7 @@ class SamplerState:
 
     There is no hidden generator to serialise -- `Sampler.epoch_specs` is a pure
     function of `(i, epoch, seed)` and `bucket_batches` a pure function of
-    `(durations, seed)` -- so the whole sampler state is these six numbers. That
+    `(durations, seed)` -- so the whole sampler state is these five numbers. That
     is the *reason* the sampler was built stateless (docs/pipelines/02 §6), and
     it is why forgetting them is so easy: nothing crashes, the loss curve looks
     fine, and the run trains on a corpus it never reports.

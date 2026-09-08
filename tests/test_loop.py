@@ -224,6 +224,33 @@ def test_the_override_caveat_reaches_the_run_report(corpus, model_cfg, tmp_path)
 
 #: What `_mean_parts` adds around the loss terms, plus `multitask_loss`'s own
 #: `total`. Everything else in a row is one branch's head loss.
+def test_the_schedules_caveats_are_the_union_of_its_stages(corpus, model_cfg,
+                                                           tmp_path):
+    """`run_schedule` returns one result per stage, and only S1 has a caveat.
+
+    Critical: a caller that reports the last result -- the obvious thing to do
+    with a list whose stages carry the weights forward -- drops it. Nothing in
+    this module can wire the union into `aggregate_folds` itself, because
+    scoring happens in `training.validate` against a frozen eval set the loop
+    never sees, so the union is the caller's obligation and this is what states
+    it.
+    """
+    torch.manual_seed(0)
+    model = DeepVoiceNet(_unfrozen(model_cfg))
+    results = run_schedule(model, _dataset(corpus, n=2),
+                           train_cfg=_train_cfg(epochs=1),
+                           loop_cfg=LoopConfig(out_dir=tmp_path, n_buckets=1,
+                                               ema_decay=0.0),
+                           stages=("independent", "joint"))
+    assert [bool(r.caveats) for r in results] == [True, False], (
+        "only S1 overrides FrontendConfig.freeze, so only S1 has anything to say")
+
+    union = tuple(c for r in results for c in r.caveats)
+    report = aggregate_folds([_fold_result(0, _metric_set(0.10))], caveats=union)
+    assert any("freeze: false" in c for c in report.caveats)
+    assert "freeze: false" in report.as_ledger_row()["caveats"]
+
+
 _ROW_META = {"stage", "pass", "group", "n_batches", "total"}
 
 
