@@ -5,11 +5,11 @@ The split that everything rests on (docs/pipelines/01 §1)::
     sample_spec(rng, manifest, slice, fold) -> SampleSpec   # pure, microseconds
     render(spec, manifest)                  -> RenderedSample
 
-🔴 **`render(spec) == render(spec)`, bitwise.** The only entropy is
-``spec.rng`` -- blake2b-keyed on ``(sample_id, epoch, seed)`` -- and every stage
-below is a deterministic function of the spec, the files it names and that one
-generator. This is I10, and it is what makes the 2nd-stage submission able to
-reproduce the Private score (docs/data/06 A-S2, docs/data/09 R9).
+Critical: **`render(spec) == render(spec)`, bitwise.** The only entropy is
+``spec.rng`` -- blake2b-keyed on ``(sample_id, epoch, seed)`` -- and every
+stage below is a deterministic function of the spec, the files it names and
+that one generator. This is I10, and it is what makes the 2nd-stage submission
+able to reproduce the Private score (docs/data/06 A-S2, docs/data/09 R9).
 
 The stages, in the order docs/data/06 fixes::
 
@@ -18,9 +18,9 @@ The stages, in the order docs/data/06 fixes::
     augment       step 4 -- the AUGMENT registry, label-independent by signature
     normalize     step 5 -- TEST-CHAIN, always last
 
-⚠️ **The preprocess registry is not run here**, and that is deliberate. A
-preprocess step is train/test *symmetric* (docs/data/10 P2), so its call site is
-the model boundary -- next to ``models.audio.prepare_waveform`` and
+Caveat: **The preprocess registry is not run here**, and that is deliberate. A
+preprocess step is train/test *symmetric* (docs/data/10 P2), so its call site
+is the model boundary -- next to ``models.audio.prepare_waveform`` and
 ``models.audio.bandpass``, in the training loop and in ``submit.zip`` alike. A
 rendered sample is the analogue of a *raw test file*: the last thing done to it
 is what the organizers did to theirs.
@@ -54,21 +54,20 @@ __all__ = [
     "frame_intervals_for", "load_audio", "render", "resample_poly_to",
 ]
 
-#: Containers A-S3 can round-trip through. ⚠️ Short of the full menu: AAC, OPUS,
-#: AMR-NB, GSM and G.722 are named in A-S3/A-S4 but are not wired, because each
-#: needs its encoder delay verified the way MP3's is below and the local ffmpeg
-#: does not carry every encoder. The 8 kHz telephone leg is implemented (see
-#: `_normalize`); the narrowband *codecs* are not.
+#: Containers A-S3 can round-trip through. Caveat: short of the full menu: AAC,
+#: OPUS, AMR-NB, GSM and G.722 are named in A-S3/A-S4 but are not wired,
+#: because each needs its encoder delay verified the way MP3's is below and the
+#: local ffmpeg does not carry every encoder. The 8 kHz telephone leg is
+#: implemented (see `_normalize`); the narrowband *codecs* are not.
 CODEC_CONTAINERS = ("wav", "flac", "mp3")
 
 #: The keys ``SampleSpec.normalize`` may carry. Unknown keys are an error, not a
 #: warning -- ``models.config``'s rule, for the same reason: a typo'd knob that
 #: silently does nothing is how an ablation measures the wrong thing.
-#:
-#: ⚠️ No ``resampler`` key, though docs/pipelines/01 §3's worked example shows
-#: one (``"soxr_vhq"``). A per-sample resampler *draw* is **A-B2**, which
-#: docs/data/06 records as unbuildable as written -- none of the kernels it names
-#: are installed -- and A-S1 since settled on one fixed resampler. It is
+#:  Caveat: no ``resampler`` key, though docs/pipelines/01 §3's worked example
+#: shows one (``"soxr_vhq"``). A per-sample resampler *draw* is **A-B2**, which
+#: docs/data/06 records as unbuildable as written -- none of the kernels it
+#: names are installed -- and A-S1 since settled on one fixed resampler. It is
 #: therefore a `RenderConfig` injection (one kernel, swappable when G1 lands),
 #: not a field of the draw. Accepting the key and ignoring it would be the
 #: typo'd-knob failure this frozenset exists to prevent.
@@ -124,15 +123,15 @@ class ManifestIndex(Mapping[str, Mapping[str, Any]]):
 def resample_poly_to(x: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
     """``scipy.signal.resample_poly`` over ``(C, n)``.
 
-    ✅ The resampler is decided (docs/data/06, A-S1): the requirement is *one
+    The resampler is settled (docs/data/06, A-S1): the requirement is *one
     fixed resampler applied identically in train and test*, not a specific
     library, and ``scipy`` is already a dependency while ``soxr`` is not --
     adding a shipped dependency costs against the offline-install budget and
     buys quality we cannot measure.
 
-    🔴 Injectable on purpose. If G1's dummy-file forensics reveal which resampler
-    the organizers used, *matching them* is worth more than kernel quality, and
-    the swap is then one argument (``RenderConfig.resampler``).
+    Critical: injectable on purpose. If G1's dummy-file forensics reveal which
+    resampler the organizers used, *matching them* is worth more than kernel
+    quality, and the swap is then one argument (``RenderConfig.resampler``).
 
     ``resample_poly`` is linear phase and compensates its own filter delay, so
     this introduces no time shift -- which the frame targets depend on.
@@ -147,12 +146,12 @@ def resample_poly_to(x: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
 def _ffmpeg_decode(path: Path, file_id: str = "") -> tuple[np.ndarray, int]:
     """Fallback decode for anything libsndfile refuses (P-S1's second path).
 
-    🔴 Decodes at the file's **native** rate and leaves resampling to the caller's
-    injected resampler. Passing ``-ar`` here would put ffmpeg's swr on the
-    fallback path and ``resample_poly`` on the main one, so which resampler a
-    file met would depend on its container -- the opposite of "one fixed
-    resampler applied identically" (P-S2), and invisible in any test that only
-    checks the sample count.
+    Critical: decodes at the file's **native** rate and leaves resampling to
+    the caller's injected resampler. Passing ``-ar`` here would put ffmpeg's
+    swr on the fallback path and ``resample_poly`` on the main one, so which
+    resampler a file met would depend on its container -- the opposite of "one
+    fixed resampler applied identically" (P-S2), and invisible in any test that
+    only checks the sample count.
     """
     proc = subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
@@ -205,10 +204,11 @@ def load_audio(path: str | Path, *, sample_rate: int, offset_s: float = 0.0,
 
     wav = resampler(wav, orig_sr, sample_rate)
     if want is not None:
-        # 🔴 A file shorter than the manifest says would otherwise be padded with
-        # silence, and a training sample that is 40% silence because a corpus
-        # row lies about its duration is exactly the kind of defect a green
-        # suite hides. Only resampler rounding (a few samples) is absorbed.
+        # Critical: A file shorter than the manifest says would otherwise be
+        # padded with silence, and a training sample that is 40% silence
+        # because a corpus row lies about its duration is exactly the kind of
+        # defect a green suite hides. Only resampler rounding (a few samples)
+        # is absorbed.
         slack = max(4, int(0.01 * sample_rate))
         if wav.shape[-1] < want - slack:
             raise DecodeError(
@@ -230,16 +230,17 @@ def load_audio(path: str | Path, *, sample_rate: int, offset_s: float = 0.0,
 class RenderedSample:
     """What ``render`` returns, and the only thing the collator sees.
 
-    ⚠️ ``wav`` is ``(C, S)`` **as decoded, not downmixed**. The channel policy is
-    ``AudioConfig.channels``, applied by ``models.audio.prepare_waveform`` at the
-    *same call site* in training and inference. Downmixing here would fork that
-    policy into two places, disable the A-B3 channel augmentations and make the
-    ``mid_side`` leak test impossible to run (docs/pipelines/01 §4).
+    Caveat: ``wav`` is ``(C, S)`` **as decoded, not downmixed**. The channel
+    policy is ``AudioConfig.channels``, applied by
+    ``models.audio.prepare_waveform`` at the *same call site* in training and
+    inference. Downmixing here would fork that policy into two places, disable
+    the A-B3 channel augmentations and make the ``mid_side`` leak test
+    impossible to run (docs/pipelines/01 §4).
 
-    🔴 ``frame_intervals`` are **absolute times in seconds**, never a rasterised
-    frame grid. Frame rate is a property of the frontend; the collator does not
-    know it and must not guess. Hard-coding one here reproduces the `align_time`
-    bug in a place the existing tests do not look.
+    Critical: ``frame_intervals`` are **absolute times in seconds**, never a
+    rasterised frame grid. Frame rate is a property of the frontend; the
+    collator does not know it and must not guess. Hard-coding one here
+    reproduces the `align_time` bug in a place the existing tests do not look.
     """
 
     wav: Tensor                          # (C, S) float32
@@ -260,9 +261,10 @@ class RenderConfig:
     #: Manifest paths are relative to this.
     root: Path = Path(".")
     audio: AudioConfig = field(default_factory=AudioConfig)
-    #: 🔴 Injected so G1 can swap it (see ``resample_poly_to``).
+    #: Critical: injected so G1 can swap it (see ``resample_poly_to``).
     resampler: Callable[[np.ndarray, int, int], np.ndarray] = resample_poly_to
-    #: ⚠️ ``sigmoid`` beats a hard cut, which becomes a splice shortcut (A-A4).
+    #: Caveat: ``sigmoid`` beats a hard cut, which becomes a splice shortcut
+    #: (A-A4).
     crossfade_shape: str = "sigmoid"
     #: I12 -- the rendered duration must sit in the length regime the model and
     #: the competition agree on. Off only for tests that build a deliberate
@@ -287,8 +289,9 @@ def _fade(n: int, shape: str) -> np.ndarray:
     if shape == "linear":
         w = t
     else:
-        # ★ `[Freesound 2019, 1st]` SigmoidConcatMixer -- a smooth transition
-        # rather than a hard cut. Rescaled so the endpoints are exact.
+        # Strong evidence, `[Freesound 2019, 1st]`: SigmoidConcatMixer -- a
+        # smooth transition rather than a hard cut. Rescaled so the endpoints
+        # are exact.
         s = 1.0 / (1.0 + np.exp(-8.0 * (2.0 * t - 1.0)))
         w = (s - s[0]) / (s[-1] - s[0])
     return w.astype(np.float32)
@@ -306,11 +309,11 @@ def _place(canvas: np.ndarray, piece: np.ndarray, start: int) -> None:
 def _to_channels(wav: np.ndarray, channels: int) -> np.ndarray:
     """Broadcast a mono source across ``channels``, or keep the leading ones.
 
-    ⚠️ Mono-duplication is itself a possible cue (docs/data/07 E-B4). It is done
-    here rather than downmixing everything to mono because the alternative --
-    collapsing the sample -- would fork the channel policy away from
-    ``prepare_waveform``. The test set has both mono and stereo per sample, so
-    the composed sample carries whatever its sources had.
+    Caveat: mono-duplication is itself a possible cue (docs/data/07 E-B4). It
+    is done here rather than downmixing everything to mono because the
+    alternative -- collapsing the sample -- would fork the channel policy away
+    from ``prepare_waveform``. The test set has both mono and stereo per
+    sample, so the composed sample carries whatever its sources had.
     """
     if wav.shape[0] == channels:
         return wav
@@ -323,16 +326,16 @@ def _compose(spec: SampleSpec, pieces: Sequence[np.ndarray], cfg: RenderConfig,
              sample_rate: int) -> np.ndarray:
     """Place the drawn components on the timeline the spec fixed.
 
-    🔴 The renderer does not invent placement. ``target_start_s`` and
+    Critical: the renderer does not invent placement. ``target_start_s`` and
     ``duration_s`` are drawn before any file is opened and the spec *is* the
     ledger, so what lands here is exactly what ``frame_intervals`` reports.
 
-    ⚠️ Consequence for A-A4: sequential components are drawn back-to-back with
-    no overlap, so a true constant-power crossfade would have to move one of
-    them off the timeline the spec fixed. Instead the joint gets complementary
-    sigmoid tapers -- a smooth transition rather than a hard cut, which is the
-    property A-A4 is after (a splice edge is a shortcut), without the renderer
-    overruling the draw.
+    Caveat, and the consequence for A-A4: sequential components are drawn
+    back-to-back with no overlap, so a true constant-power crossfade would have
+    to move one of them off the timeline the spec fixed. Instead the joint gets
+    complementary sigmoid tapers -- a smooth transition rather than a hard cut,
+    which is the property A-A4 is after (a splice edge is a shortcut), without
+    the renderer overruling the draw.
     """
     total = int(round(spec.duration_s * sample_rate))
     channels = max(p.shape[0] for p in pieces)
@@ -381,19 +384,21 @@ def _codec_roundtrip(wav: np.ndarray, sample_rate: int, container: str,
                      bitrate: int | None) -> np.ndarray:
     """A-S3 -- encode and decode again, at the drawn container and bitrate.
 
-    ⚠️ MP3 at 64 kbps cost MusicDET **+37 EER points** (docs/survey/02) and the
-    test set is MP3/WAV/FLAC, so this is not a cosmetic stage.
+    Caveat: MP3 at 64 kbps cost MusicDET **+37 EER points** (docs/survey/02)
+    and the test set is MP3/WAV/FLAC, so this is not a cosmetic stage.
 
-    🔴 **The round trip must not move the audio.** A lossy encoder has an
-    algorithmic delay -- LAME's is 1105 samples, 69 ms -- which would slide the
-    waveform out from under ``frame_intervals`` while they stayed put: the
-    `align_time` defect, in a place the existing tests do not look. The delay is
-    cancelled by the encoder's own gapless (Xing/LAME) header, which ffmpeg can
-    only write when it can seek back over its output, i.e. to a **file**, never
-    to a pipe. Encoding to a pipe here silently shifts every MP3 sample by 69 ms.
+    Critical: **The round trip must not move the audio.** A lossy encoder has
+    an algorithmic delay -- LAME's is 1105 samples, 69 ms -- which would slide
+    the waveform out from under ``frame_intervals`` while they stayed put: the
+    `align_time` defect, in a place the existing tests do not look. The delay
+    is cancelled by the encoder's own gapless (Xing/LAME) header, which ffmpeg
+    can only write when it can seek back over its output, i.e. to a **file**,
+    never to a pipe. Encoding to a pipe here silently shifts every MP3 sample
+    by 69 ms.
 
-    ⚠️ So the length is checked rather than trusted: if the header is ever lost,
-    the decoded frame count stops matching and this raises instead of shifting.
+    Caveat: the length is therefore checked rather than trusted. If the header
+    is ever lost, the decoded frame count stops matching and this raises
+    instead of shifting.
     """
     if container not in CODEC_CONTAINERS:
         raise ValueError(f"container must be one of {CODEC_CONTAINERS}, "
@@ -431,13 +436,15 @@ def _normalize(wav: np.ndarray, draw: Mapping[str, Any], sample_rate: int,
                resampler: Callable[[np.ndarray, int, int], np.ndarray]) -> np.ndarray:
     """A-S1 / A-S3 / A-S4 -- what the organizers did to the test set.
 
-    🔴 Always last, and **not** in the augment registry: this is the one stage
-    that models the test chain rather than adding variety, which is why it is
-    drawn into ``SampleSpec.normalize`` and applied here (docs/pipelines/03 §2).
+    Critical: always last, and **not** in the augment registry: this is the one
+    stage that models the test chain rather than adding variety, which is why
+    it is drawn into ``SampleSpec.normalize`` and applied here
+    (docs/pipelines/03 §2).
 
-    ⚠️ Its parameters come from **G1** ``signal_chain.yaml``, which does not
-    exist yet. Until the dummy-file forensics land (E-S1), an empty draw is a
-    no-op and every field is optional -- the stage is written, not parameterised.
+    Caveat: its parameters come from **G1** ``signal_chain.yaml``, which does
+    not exist yet. Until the dummy-file forensics land (E-S1), an empty draw is
+    a no-op and every field is optional -- the stage is written, not
+    parameterised.
     """
     unknown = sorted(set(draw) - NORMALIZE_KEYS)
     if unknown:
@@ -488,11 +495,12 @@ def frame_intervals_for(spec: SampleSpec) -> dict[str, tuple[tuple[float, float,
     end_s, label)``. Whole-file rows carry empty tuples -- there is no
     composition to describe.
 
-    ⚠️ The default loss does not consume these: ``SEDHeadConfig.clip_weight`` is
-    committed at 1.0 (clip-only), so frame targets are produced but unused.
-    🔴 Produce them anyway. T1 is the first training experiment and cannot run
-    without them, they are near-free here (the placement arithmetic is already
-    done), and retrofitting them later means re-rendering the corpus
+    Caveat: the default loss does not consume these:
+    ``SEDHeadConfig.clip_weight`` is committed at 1.0 (clip-only), so frame
+    targets are produced but unused.
+    Critical: produce them anyway. T1 is the first training experiment and
+    cannot run without them, they are near-free here (the placement arithmetic
+    is already done), and retrofitting them later means re-rendering the corpus
     (docs/pipelines/01 §4).
     """
     empty: dict[str, tuple[tuple[float, float, int], ...]] = {
@@ -510,7 +518,7 @@ def frame_intervals_for(spec: SampleSpec) -> dict[str, tuple[tuple[float, float,
         label = int(fake_for_role.get(draw.role) or 0)
         if draw.role in ("voice", "music"):
             out[draw.role].append((start, end, label))
-        # 🔴 The file branch is fake wherever a fake component is: the
+        # Critical: the file branch is fake wherever a fake component is: the
         # competition defines FILE_FAKE as OR over *present* components, and a
         # frame is a smaller "present" than a file.
         out["file"].append((start, end, label))
@@ -525,8 +533,8 @@ def render(spec: SampleSpec, manifest: pd.DataFrame | ManifestIndex,
            cfg: RenderConfig | None = None) -> RenderedSample:
     """Decode, compose, augment, normalise. ``render(spec) == render(spec)``.
 
-    🔴 The augment chain is called as ``fn(wav, rng)`` and there is no third
-    argument to put a label in -- ``P(T | L) = P(T)`` is enforced by the
+    Critical: the augment chain is called as ``fn(wav, rng)`` and there is no
+    third argument to put a label in -- ``P(T | L) = P(T)`` is enforced by the
     signature, not by this function's good behaviour (docs/pipelines/03 §2).
     """
     cfg = cfg or RenderConfig()
@@ -560,8 +568,8 @@ def render(spec: SampleSpec, manifest: pd.DataFrame | ManifestIndex,
     duration = wav.shape[-1] / sr
     if cfg.check_duration:
         lo, hi = cfg.audio.min_seconds, cfg.audio.max_seconds
-        # ⚠️ Asserted on the rendered length -- the quantity that reaches the
-        # model -- not on `spec.duration_s`, which is the adjacent one.
+        # Caveat: asserted on the rendered length -- the quantity that reaches
+        # the model -- not on `spec.duration_s`, which is the adjacent one.
         if not lo - 1e-6 <= duration <= hi + 1e-6:
             raise ValueError(
                 f"rendered {duration:.3f}s, outside the [{lo}, {hi}]s length "

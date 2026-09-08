@@ -1,11 +1,11 @@
 """`render`, against real files on disk.
 
-⚠️ Nothing here is mocked. A mock decode cannot catch a decode, resample, codec
-or alignment defect, and those are exactly where this stage fails -- so the
-fixture writes an actual corpus (`training.synthetic.write_synthetic_corpus`)
+Caveat: nothing here is mocked. A mock decode cannot catch a decode, resample,
+codec or alignment defect, and those are exactly where this stage fails -- so
+the fixture writes an actual corpus (`training.synthetic.write_synthetic_corpus`)
 with mixed containers, sample rates and channel counts.
 
-🔴 Each invariant is mutation-tested: the check is shown failing on a
+Critical: each invariant is mutation-tested: the check is shown failing on a
 deliberately broken version before it is trusted on the real one.
 """
 
@@ -93,7 +93,7 @@ def test_rendering_twice_is_bitwise_identical(corpus, cfg):
 
 
 def test_rendering_in_another_process_is_bitwise_identical(corpus, cfg):
-    """🔴 I10 says *across processes*, and that is not pedantry: `hash()` is
+    """Critical: I10 says *across processes*, and that is not pedantry: `hash()` is
     salted per process, so an RNG keyed on it reproduces within a run and
     differs across runs -- the exact failure A-S2 exists to prevent. A
     same-process check cannot see it."""
@@ -194,7 +194,7 @@ def test_a_sample_below_the_floor_is_refused(corpus, cfg):
 
 
 def test_frame_intervals_are_absolute_seconds_inside_the_timeline(corpus, cfg):
-    """🔴 Never a rasterised frame grid: frame rate belongs to the frontend, and
+    """Critical: never a rasterised frame grid: frame rate belongs to the frontend, and
     hard-coding one reproduces the `align_time` bug (docs/pipelines/01 §4)."""
     _, manifest, index = corpus
     spec = _spec(manifest, cell=6, duration=6.0, structure="sequential",
@@ -238,9 +238,10 @@ def test_a_whole_file_row_carries_no_frame_targets(corpus, cfg):
             0.0, 5.0, 0.0, 0.0),))
     out = render(spec, index, cfg)
     assert out.frame_intervals == {"voice": (), "music": (), "file": ()}
-    # ⚠️ Written out rather than read back from `spec.labels`: an assertion
-    # against the expression that produced the value can only ever pass. This is
-    # the competition's own definition -- OR over *present* components.
+    # Caveat: written out rather than read back from `spec.labels`: an
+    # assertion against the expression that produced the value can only ever
+    # pass. This is the competition's own definition -- OR over *present*
+    # components.
     assert out.targets == {
         "voice_present": vp, "music_present": mp,
         "voice_fake": int(vf or 0), "music_fake": int(mf or 0),
@@ -259,7 +260,7 @@ def test_frame_intervals_track_a_moved_component(corpus):
 
 
 # --------------------------------------------------------------------------- #
-# 🔴 A warp that lives in the draw moves the audio AND the frame targets
+# Critical: A warp that lives in the draw moves the audio AND the frame targets
 #
 # A-A8 and A-A11 are not step-4 augments; they are `target_start_s`. That is the
 # whole payoff of the contract: the frame targets are *computed from* the
@@ -326,7 +327,7 @@ def test_targets_are_exactly_the_loss_keys(corpus, cfg):
 
 
 def test_an_absent_component_gets_zero_not_none(corpus, cfg):
-    """⚠️ `None` survives `np.asarray(None).astype(bool)` as True and is only
+    """Caveat: `None` survives `np.asarray(None).astype(bool)` as True and is only
     saved by the presence mask zeroing it. That is incidental, not a contract."""
     _, manifest, index = corpus
     row = manifest[(manifest.row_kind == "whole_file") & (manifest.cell == 1)].iloc[0]
@@ -340,7 +341,7 @@ def test_an_absent_component_gets_zero_not_none(corpus, cfg):
 
 
 def test_wav_is_channels_by_samples_and_not_downmixed(corpus, cfg):
-    """⚠️ Downmixing here would fork the channel policy away from
+    """Caveat: downmixing here would fork the channel policy away from
     `models.audio.prepare_waveform`, disable the A-B3 channel augmentations and
     make the mid_side leak test impossible (docs/pipelines/01 §4)."""
     root, manifest, index = corpus
@@ -403,7 +404,7 @@ def test_overlap_sums_the_components(corpus, cfg):
 
 
 def test_a_sequential_joint_is_faded_rather_than_cut(corpus, cfg):
-    """A-A4: a hard cut becomes a splice shortcut. ⚠️ The taper is complementary
+    """A-A4: a hard cut becomes a splice shortcut. Caveat: the taper is complementary
     at the joint rather than an overlapping crossfade, because the components
     are drawn back-to-back and the renderer does not overrule the spec."""
     _, manifest, index = corpus
@@ -424,7 +425,7 @@ def test_a_sequential_joint_is_faded_rather_than_cut(corpus, cfg):
 
 
 def test_a_codec_round_trip_does_not_move_the_audio(corpus, cfg):
-    """🔴 LAME's 1105-sample (69 ms) delay would slide the waveform out from
+    """Critical: LAME's 1105-sample (69 ms) delay would slide the waveform out from
     under `frame_intervals` while they stayed put -- the `align_time` defect in
     a place the existing tests do not look."""
     _, manifest, index = corpus
@@ -492,7 +493,7 @@ def test_an_unknown_normalize_key_is_an_error(corpus, cfg):
 
 
 def test_an_empty_normalize_draw_is_a_no_op(corpus, cfg):
-    """⚠️ G1's `signal_chain.yaml` does not exist yet, so the stage is written
+    """Caveat: G1's `signal_chain.yaml` does not exist yet, so the stage is written
     and not parameterised. It must not invent parameters in the meantime."""
     _, manifest, index = corpus
     assert torch.equal(render(_spec(manifest, normalize={}), index, cfg).wav,
@@ -516,7 +517,7 @@ def test_a_render_does_not_depend_on_the_rest_of_the_manifest(corpus, cfg):
 
 
 def test_the_augment_call_site_can_only_pass_wav_and_rng(corpus, cfg):
-    """🔴 `P(T | L) = P(T)` made structural: whatever `render` knows about the
+    """Critical: `P(T | L) = P(T)` made structural: whatever `render` knows about the
     sample, it has no argument to pass it in. A convention would be a code
     review; this is the call site."""
     seen = {}
@@ -566,7 +567,7 @@ def test_the_extension_is_never_trusted(corpus, tmp_path):
 
 
 def test_a_container_libsndfile_refuses_goes_through_ffmpeg(tmp_path):
-    """The second decode path. ⚠️ Untested, it is a `pass` in a `try`."""
+    """The second decode path. Caveat: untested, it is a `pass` in a `try`."""
     src = tmp_path / "tone.wav"
     sr, sr_n = 16_000, 16_000 * 5
     import soundfile as sf
@@ -586,7 +587,7 @@ def test_a_container_libsndfile_refuses_goes_through_ffmpeg(tmp_path):
 
 
 def test_the_fallback_path_uses_the_injected_resampler_too(tmp_path):
-    """🔴 P-S2 is "one fixed resampler applied identically", so which resampler
+    """Critical: P-S2 is "one fixed resampler applied identically", so which resampler
     a file meets must not depend on its container. Passing `-ar` to ffmpeg would
     put swr on this path and `resample_poly` on the other, and every test that
     only checks the sample count would still pass."""
@@ -643,7 +644,7 @@ def test_decoding_returns_exactly_the_requested_span(corpus):
 
 
 def test_a_source_shorter_than_the_manifest_says_is_loud(corpus):
-    """🔴 Padding it with silence would make a sample that is mostly silence
+    """Critical: padding it with silence would make a sample that is mostly silence
     because a corpus row lies -- and nothing downstream could tell."""
     root, manifest, _ = corpus
     row = manifest.iloc[0]
@@ -675,7 +676,7 @@ def test_the_offset_is_honoured(corpus):
 
 
 def test_the_resampler_is_injectable(corpus, cfg):
-    """🔴 G1 may reveal which resampler the organizers used, and matching them
+    """Critical: G1 may reveal which resampler the organizers used, and matching them
     is worth more than kernel quality (docs/data/06 A-S1)."""
     calls = []
 
