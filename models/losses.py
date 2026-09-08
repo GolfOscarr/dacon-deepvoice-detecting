@@ -193,7 +193,11 @@ def multitask_loss(
         # GradScaler backoff resets the tracker. The coupling is unintended and
         # undocumented at the test; if you land here from that failure, check for
         # an fp16 overflow in the loss before suspecting the checkpoint path.
-        weight = loss_cfg.weights.get(WEIGHT_KEY_FOR_COLUMN[br_cfg.column], 1.0)
+        # 🔴 Indexed, not `.get(..., 1.0)`. The fallback made a partial
+        # `weights` dict silently train the absent heads at 1.0 -- 20x the 0.05
+        # a presence head is worth. `LossConfig` now requires all five keys, and
+        # this reads them as required so the two cannot drift apart.
+        weight = loss_cfg.weights[WEIGHT_KEY_FOR_COLUMN[br_cfg.column]]
         contribution = weight * head_loss
         parts[branch] = float(head_loss.detach())
         total = contribution if total is None else total + contribution

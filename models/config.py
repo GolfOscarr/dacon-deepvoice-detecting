@@ -52,6 +52,13 @@ KNOWN_FRONTENDS = (
 #: voice-present files (docs/competition/03-evaluation.md).
 MASK_KEYS = ("voice_present", "music_present")
 
+#: The per-head keys `LossConfig.weights` must carry -- one per submission
+#: column, matching `models.losses.WEIGHT_KEY_FOR_COLUMN`. 🔴 All five are
+#: **required**, not optional: a YAML `weights: {file: 0.45}` used to load clean
+#: and train the two presence heads at the loss's 1.0 fallback instead of 0.05,
+#: a 20x over-weighting with nothing to see in the config or the logs.
+LOSS_WEIGHT_KEYS = ("voice", "music", "file", "v_pres", "m_pres")
+
 
 class ConfigError(ValueError):
     """A config that would build a model we do not mean to build."""
@@ -292,6 +299,26 @@ class LossConfig:
     ranking_weight: float = 0.0
     distill_weight: float = 1.0
     label_smoothing: float = 0.0
+
+    def __post_init__(self):
+        # 🔴 Checked here rather than in `load_train_config` so that the rule
+        # holds for every LossConfig, however it was built -- a YAML load, a
+        # `dataclasses.replace`, a checkpoint round-trip or a test. A partial
+        # dict is a config error, not a set of defaults: the loss reads
+        # `weights[key]` with no fallback, so an absent head has no meaning.
+        got = set(self.weights)
+        unknown = sorted(got - set(LOSS_WEIGHT_KEYS))
+        if unknown:
+            raise ConfigError(
+                f"loss.weights: unknown head(s) {unknown}; the five heads are "
+                f"{list(LOSS_WEIGHT_KEYS)}")
+        missing = [k for k in LOSS_WEIGHT_KEYS if k not in got]
+        if missing:
+            raise ConfigError(
+                f"loss.weights: missing head(s) {missing}. All five must be set "
+                "explicitly -- a partial dict used to leave the absent heads at "
+                "1.0, which is 20x the 0.05 the metric gives a presence head "
+                "(docs/training/02 §4)")
 
     # ⚠️ There is deliberately no `frame_weight` here. The clip-vs-frame_max blend
     # is `SEDHeadConfig.clip_weight`, and the loss reads that same field, so
@@ -539,10 +566,10 @@ def load_train_config(path: str | Path) -> TrainConfig:
     d = dict(yaml.safe_load(Path(path).read_text()) or {})
     teachers = {k: _build(FrontendConfig, v, f"train.teachers.{k}")
                 for k, v in (d.pop("teachers", None) or {}).items()}
+    # The per-head weight keys are checked in `LossConfig.__post_init__`, which
+    # `_build` has already run -- and which also rejects a *partial* dict, the
+    # case this loop never covered.
     cfg = dataclasses.replace(_build(TrainConfig, d, "train"), teachers=teachers)
-    for key in cfg.loss.weights:
-        if key not in {"voice", "music", "file", "v_pres", "m_pres"}:
-            raise ConfigError(f"train.loss.weights: unknown head {key!r}")
     for name, fe in cfg.teachers.items():
         if fe.name not in KNOWN_FRONTENDS:
             raise ConfigError(f"train.teachers.{name}: unknown frontend {fe.name!r}")

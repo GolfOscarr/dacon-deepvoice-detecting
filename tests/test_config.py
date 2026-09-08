@@ -13,7 +13,9 @@ import yaml
 
 from metrics.dacon import PREDICTION_COLUMNS
 from models.config import (
+    LOSS_WEIGHT_KEYS,
     ConfigError,
+    LossConfig,
     ModelConfig,
     dump_config,
     load_model_config,
@@ -203,6 +205,42 @@ def test_train_config_rejects_unknown_head():
         yaml.safe_dump(raw, fh)
         with pytest.raises(ConfigError, match="unknown head"):
             load_train_config(fh.name)
+
+
+def test_train_config_requires_every_head_weight():
+    """🔴 A partial `weights` dict used to load clean and default the rest.
+
+    `weights: {file: 0.45}` passed the unknown-key check -- every key it carried
+    *was* known -- and `multitask_loss` filled the four absent heads in at its
+    own 1.0 fallback. That trains both presence heads at 20x the 0.05 the metric
+    gives them, with nothing wrong-looking in the YAML to see (docs/training/02
+    §4). Now the five keys are required, and the loss indexes rather than
+    `.get`s them.
+    """
+    import tempfile
+    raw = yaml.safe_load((CONFIGS / "train_joint.yaml").read_text())
+    raw["loss"]["weights"] = {"file": 0.45}
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
+        yaml.safe_dump(raw, fh)
+        with pytest.raises(ConfigError, match="missing head"):
+            load_train_config(fh.name)
+
+
+def test_loss_config_rejects_a_partial_weights_dict_however_it_is_built():
+    """The rule is on LossConfig, not on the YAML loader.
+
+    A `dataclasses.replace` or a checkpoint round-trip reaches the same object
+    without passing through `load_train_config`, so the check lives where every
+    path meets.
+    """
+    with pytest.raises(ConfigError, match="missing head"):
+        LossConfig(weights={"file": 0.45})
+    with pytest.raises(ConfigError, match="unknown head"):
+        LossConfig(weights=dict(LossConfig().weights, drums=1.0))
+    # The default is complete, and replacing one weight keeps it so.
+    assert set(LossConfig().weights) == set(LOSS_WEIGHT_KEYS)
+    assert dataclasses.replace(
+        LossConfig(), weights=dict(LossConfig().weights, file=0.9)).weights["file"] == 0.9
 
 
 def test_configs_are_frozen():

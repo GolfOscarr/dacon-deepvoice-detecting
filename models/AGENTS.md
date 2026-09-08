@@ -161,6 +161,12 @@ metric weighted its components equally and ours does not. Set by argument, not s
 ([training/02 §4](../docs/training/02-the-loss.md#4-per-head-weights--metric-proportional-by-argument));
 [09 B11](../docs/architecture/09-open-questions.md) is closed.
 
+🔴 **All five keys are required.** `LossConfig.__post_init__` rejects a partial `weights` dict,
+however the config was built. `weights: {file: 0.45}` used to load clean — every key it carried
+*was* known — and `multitask_loss` filled the four absent heads in at a `.get(..., 1.0)` fallback,
+training both presence heads at 20× the 0.05 the metric gives them. The fallback is gone; the loss
+indexes.
+
 ⚠️ The weight *in effect* is `w_c / p_c`, not `w_c` — `_masked_mean` divides by the present-count,
 so a masked head is amplified by how rare its component is. Log both before tuning.
 
