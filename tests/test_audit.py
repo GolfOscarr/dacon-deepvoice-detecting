@@ -1,8 +1,8 @@
 """The spec audit, and proof that each invariant can actually fail.
 
-🔴 A green audit that cannot go red is worse than no audit. Every check here is
-mutation-tested: the constraint is deliberately broken and the corresponding
-invariant must fire.
+Critical: A green audit that cannot go red is worse than no audit. Every check
+here is mutation-tested: the constraint is deliberately broken and the
+corresponding invariant must fire.
 """
 
 import dataclasses
@@ -47,11 +47,11 @@ def _spec(cell, composed=True, sample_id=0, transforms=(), file_id="A00001"):
 #: Every invariant `audit_specs` emits, mapped to the test **in this module**
 #: that proves it can go RED.
 #:
-#: 🔴 `report.ok` on the reference stream is worth exactly as much as the checks
-#: behind it can fail. A review found this file greening a bag of invariants of
-#: which several could not go red, and a skipped check reads as a pass on the
-#: `.ok` property. This map is the fix: adding an invariant without a mutation
-#: test, renaming one, or silently dropping one, all fail
+#: Critical: `report.ok` on the reference stream is worth exactly as much as
+#: the checks behind it can fail. A review found this file greening a bag of
+#: invariants of which several could not go red, and a skipped check reads as a
+#: pass on the `.ok` property. This map is the fix: adding an invariant without
+#: a mutation test, renaming one, or silently dropping one, all fail
 #: `test_reference_sampler_passes_every_invariant`.
 MUTATION_TESTS = {
     "I1_transform_name_independence": "test_I1_catches_a_label_dependent_transform",
@@ -76,7 +76,7 @@ EXPECTED_SKIPS = {"I7_eval_size_floors"}
 
 
 def test_reference_sampler_passes_every_invariant(manifest, specs):
-    """🔴 And every invariant is one that could have failed.
+    """Critical: and every invariant is one that could have failed.
 
     Three things, because "the reference config is green" alone is compatible
     with a suite of unfalsifiable checks and silent skips:
@@ -102,7 +102,7 @@ def test_reference_sampler_passes_every_invariant(manifest, specs):
 def test_measured_rates_match_the_designed_mix(specs):
     """The stream must reproduce the arithmetic, not just agree with itself.
 
-    ⚠️ All FIVE of C1's quantities. The earlier version checked
+    Caveat: all FIVE of C1's quantities. The earlier version checked
     `file`/`voice`/`music` and skipped `v_pres`/`m_pres` -- the two the naive
     6/7-heavy mix actually breaks (`test_I8_catches_the_naive_6_7_heavy_mix`),
     so the presence rates were designed, gated, and never measured.
@@ -125,7 +125,7 @@ def test_measured_rates_match_the_designed_mix(specs):
 
 
 # --------------------------------------------------------------------------- #
-# 🔴 mutation tests -- each invariant must be able to fail
+# Critical: mutation tests -- each invariant must be able to fail
 
 def test_I8_catches_the_naive_6_7_heavy_mix(manifest):
     """The advice "over-weight cells 6 and 7" violates C1 on both presence heads.
@@ -168,7 +168,7 @@ def test_I2b_catches_mixedness_predicting_fakeness(manifest):
 
 
 def test_I2_catches_a_marginally_balanced_within_stratum_shortcut():
-    """🔴 The stratified form, not the marginal one.
+    """Critical: the stratified form, not the marginal one.
 
     f1=1, f2=0 balances marginally while "composed" predicts REAL perfectly
     among voice-only files. I2 must see it.
@@ -178,9 +178,9 @@ def test_I2_catches_a_marginally_balanced_within_stratum_shortcut():
     report = audit_specs(specs)
     passed, why = report.results["I2_stratified_composedness"]
     assert not passed
-    # ⚠️ WHICH stratum, not just the size of the gap. `"1.0" in why` matched the
-    # tolerance, the sample count, any float -- so a mutation that tripped the
-    # wrong stratum still passed.
+    # Caveat: WHICH stratum, not just the size of the gap. `"1.0" in why`
+    # matched the tolerance, the sample count, any float -- so a mutation that
+    # tripped the wrong stratum still passed.
     assert "= 1.0000 in 'voice-only'" in why, why
 
 
@@ -201,7 +201,7 @@ def _voice_only_stream(gap, n=1000, base=0.5):
 
 @pytest.mark.parametrize("gap", [0.25, 0.15])
 def test_I2_still_fires_on_a_real_gap_under_the_noise_aware_bound(gap):
-    """🔴 The bound must not have bought stability with blindness.
+    """Critical: the bound must not have bought stability with blindness.
 
     At n = 1,000 a side and a composed rate near 0.5 the gap's standard error is
     0.022, so the noise-aware tolerance is 0.089 -- and a 0.15 gap is still 6.7
@@ -215,7 +215,7 @@ def test_I2_still_fires_on_a_real_gap_under_the_noise_aware_bound(gap):
 
 
 def test_I2_is_stable_across_seeds_on_a_clean_corpus(manifest):
-    """🔴 The flakiness this bound was written for. A guardrail that fails at
+    """Critical: the flakiness this bound was written for. A guardrail that fails at
     random on a clean corpus gets switched off, and then it does not catch the
     composition trap it exists for.
 
@@ -226,8 +226,8 @@ def test_I2_is_stable_across_seeds_on_a_clean_corpus(manifest):
     that is the one stratum with any variance at the shipped config. The suite
     passed only because it draws seed 0.
 
-    ⚠️ Deliberately more than one seed and more than one config. A single-seed
-    assertion is how this went unnoticed.
+    Caveat: deliberately more than one seed and more than one config. A
+    single-seed assertion is how this went unnoticed.
     """
     for a in (0.0, 0.5):
         for seed in range(4):
@@ -240,7 +240,7 @@ def test_I2_is_stable_across_seeds_on_a_clean_corpus(manifest):
 
 
 def test_the_noise_aware_tolerance_keeps_the_floor_where_the_estimate_is_exact():
-    """⚠️ Widening must be earned by variance, not applied everywhere.
+    """Caveat: widening must be earned by variance, not applied everywhere.
 
     The shipped `single_composed_rate = 0.0` leaves the two single-component
     strata with no composed samples on either side: p = 0, so the standard error
@@ -261,7 +261,7 @@ def test_the_noise_aware_tolerance_keeps_the_floor_where_the_estimate_is_exact()
 
 
 def test_an_unresolvable_stratum_reports_a_skip_not_a_pass():
-    """🔴 A stream too thin to resolve anything must not read as green.
+    """Critical: A stream too thin to resolve anything must not read as green.
 
     The ceiling is derived rather than picked: for a binary feature
     `AUC = 0.5 + gap / 2`, so the E-S2 shortcut gate of 0.60 is a gap of 0.20. A
@@ -307,9 +307,9 @@ def test_I9_catches_a_starved_masked_head():
 def test_I7a_fires_on_a_scraped_cell_6(cell):
     """Cells 6/7 cannot be scraped. Two layers, and the test must exercise both.
 
-    🔴 The earlier version was named for I7 and never called the audit: it
-    asserted only that `SampleSpec.__post_init__` refuses to construct such a
-    spec, which is `test_spec.py`'s job, and carried an unused `monkeypatch`
+    Critical: the earlier version was named for I7 and never called the audit:
+    it asserted only that `SampleSpec.__post_init__` refuses to construct such
+    a spec, which is `test_spec.py`'s job, and carried an unused `monkeypatch`
     fixture. I7a is declared defense-in-depth precisely *because* the type
     refuses first -- so the only way to know it works is to defeat the type and
     hand the audit a spec that should never exist.
@@ -355,13 +355,13 @@ def test_strict_policy_is_the_f8_equals_one_endpoint(manifest):
 def test_conditional_policy_keeps_genuine_whole_file_audio(manifest):
     """f8 = 0 is primary precisely because it does.
 
-    🔴 The quantity the docs mean by "~13.8% of the corpus genuine whole-file
-    audio" is the MIXED-stratum whole-file mass: cells 5 (natural songs) and 8
-    (AI songs), the two `f8` decides. The earlier version measured
-    `len(whole) / len(specs)` -- 0.588, because cells 1/2/3/4/9 are whole-file at
-    `a = b = 0`, an unrelated knob. It cleared its 0.10 bar six times over while
-    saying nothing about the policy, and would have kept clearing it with the
-    cell-5/8 mass at zero.
+    Critical: the quantity the docs mean by "~13.8% of the corpus genuine
+    whole-file audio" is the MIXED-stratum whole-file mass: cells 5 (natural
+    songs) and 8 (AI songs), the two `f8` decides. The earlier version measured
+    `len(whole) / len(specs)` -- 0.588, because cells 1/2/3/4/9 are whole-file
+    at `a = b = 0`, an unrelated knob. It cleared its 0.10 bar six times over
+    while saying nothing about the policy, and would have kept clearing it with
+    the cell-5/8 mass at zero.
     """
     specs = list(Sampler(manifest, SamplerConfig(f8=0.0)).epoch_specs(N))
     whole = [s for s in specs if s.render_mode == "whole_file"]
@@ -372,8 +372,9 @@ def test_conditional_policy_keeps_genuine_whole_file_audio(manifest):
     assert any(s.cell == 8 for s in genuine), "AI songs must be usable as-is"
     assert any(s.cell == 5 for s in genuine), "natural songs must be usable as-is"
 
-    # ⚠️ And it is `f8` that produces it: the strict endpoint drives the same
-    # quantity to exactly zero. Without this, `mass` could come from anywhere.
+    # Caveat: and it is `f8` that produces it: the strict endpoint drives the
+    # same quantity to exactly zero. Without this, `mass` could come from
+    # anywhere.
     strict = list(Sampler(manifest, SamplerConfig(f8=1.0)).epoch_specs(3_000))
     assert not [s for s in strict
                 if s.render_mode == "whole_file" and s.cell in (5, 8)]
@@ -397,13 +398,13 @@ def test_I1b_passes_for_both_policies(manifest):
 
 
 def test_I1b_excludes_cell_9_and_why(manifest):
-    """🔴 Cell 9 is always REAL and never composed, so it contributes an
+    """Critical: cell 9 is always REAL and never composed, so it contributes an
     unfixable "not composed => REAL" correlation.
 
     Including it, the strict policy fails the gate -- a false alarm blocking a
     policy we deliberately support.
 
-    ⚠️ Measured with the audit's OWN feature matrix and AUC estimator. The
+    Caveat: measured with the audit's OWN feature matrix and AUC estimator. The
     earlier version pasted a copy of `_feature_frame`'s feature list inline and
     fit its own in-sample logistic regression. When the audit dropped
     `source_offset_s` and moved to cross-validated AUC, this test kept passing
@@ -448,7 +449,7 @@ def test_I1b_catches_a_duration_shortcut():
 
 
 # --------------------------------------------------------------------------- #
-# 🔴 regression: three leaks that passed the whole audit clean
+# Critical regression tests: three leaks that passed the whole audit clean
 
 def _retimed(spec, seconds):
     k = seconds / spec.duration_s
@@ -491,7 +492,7 @@ def test_audit_catches_all_three_leaks_together(manifest, specs):
 
 
 def test_the_name_only_check_is_genuinely_blind_to_a_parameter(manifest, specs):
-    """🔴 Pins why I1 is not sufficient, so nobody deletes I1b as redundant."""
+    """Critical: pins why I1 is not sufficient, so nobody deletes I1b as redundant."""
     trapped = [LEAKS["transform_parameter"](s, s.file_fake) for s in specs]
     report = audit_specs(trapped, manifest=manifest, slice_="train")
     passed, why = report.results["I1_transform_name_independence"]
@@ -509,7 +510,7 @@ def test_reference_stream_keeps_headroom_under_the_stricter_probe(manifest):
 
 
 def test_audit_is_stable_across_draw_budgets_and_manifests(manifest):
-    """🔴 A guardrail that cries wolf gets switched off.
+    """Critical: A guardrail that cries wolf gets switched off.
 
     Two false alarms were found this way: `source_offset_s` as a feature (the
     model cannot observe where in a source file we started reading, and with a
@@ -517,15 +518,16 @@ def test_audit_is_stable_across_draw_budgets_and_manifests(manifest):
     counting components drawn only once (a file drawn once cannot appear on
     both sides -- that measures the draw budget, not the sampler).
 
-    🔴 **And it must vary the SEED.** An earlier version swept manifest size,
-    policy and draw budget -- every axis except the one that produces flakiness.
-    Both `synthetic_manifest(seed=0)` and `run_audit(seed=0)` default to the same
-    seed, so "every test draws seed 0" is a property of this harness rather than
-    a habit of any one test. The I2 tolerance bug tripped 6 of 16 seeds in the
-    shipped config and this guard could not see it.
+    Critical: **And it must vary the SEED.** An earlier version swept manifest
+    size, policy and draw budget -- every axis except the one that produces
+    flakiness. Both `synthetic_manifest(seed=0)` and `run_audit(seed=0)`
+    default to the same seed, so "every test draws seed 0" is a property of
+    this harness rather than a habit of any one test. The I2 tolerance bug
+    tripped 6 of 16 seeds in the shipped config and this guard could not see
+    it.
 
-    ⚠️ It also asserts on `skipped`, not only on `ok`: `.ok` counts a SKIP as a
-    pass, so without this the guard would green on a check's *absence*.
+    Caveat: it also asserts on `skipped`, not only on `ok`: `.ok` counts a SKIP
+    as a pass, so without this the guard would green on a check's *absence*.
     """
     from training.synthetic import synthetic_manifest
     expected_skips = {"I7_eval_size_floors"}
@@ -552,7 +554,8 @@ def test_source_offset_is_not_a_feature():
 
 
 # --------------------------------------------------------------------------- #
-# 🔴 review findings 2 and 4: checks that could not fail, and one that lied
+# Critical -- review findings 2 and 4: checks that could not fail, and one that
+# lied
 
 def test_I4_is_falsifiable(manifest):
     """The old I4 compared `s.file_fake` to the expression that defines it.
@@ -595,7 +598,7 @@ def test_I6_is_gone_not_silently_passing():
 
 
 def test_I7_reports_a_skip_not_a_pass_for_the_size_floors(manifest, specs):
-    """🔴 It used to print PASS for a check implemented nowhere."""
+    """Critical: it used to print PASS for a check implemented nowhere."""
     report = audit_specs(specs, manifest=manifest, slice_="train")
     assert "I7_eval_size_floors" in report.skipped
     assert "PASS  I7_eval_size_floors" not in str(report)
@@ -628,7 +631,7 @@ def test_I5_checks_the_fold_not_only_the_slice(manifest):
 
 
 def test_I21_catches_generator_monoculture(manifest):
-    """🔴 domain_cap is a weight over what is PRESENT.
+    """Critical: domain_cap is a weight over what is PRESENT.
 
     A fold split leaving TRAIN generator-poor reproduces the DOSS failure with a
     green audit. Nothing measured realized family diversity before.
@@ -650,7 +653,7 @@ def test_I21_passes_on_a_diverse_slice(manifest):
 
 
 def test_I3_can_actually_fail(manifest):
-    """🔴 I3 measured 400/400 = 1.000 and had no mutation test.
+    """Critical: I3 measured 400/400 = 1.000 and had no mutation test.
 
     With a = b = 0 every drawn pool-A/C file necessarily lands in both cell 5
     and cell 6/7, so the check is structurally saturated. Prove it can go red.

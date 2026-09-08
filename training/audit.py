@@ -1,14 +1,15 @@
 """The spec-level invariants, I1-I9 and I21 (docs/pipelines/05 §1).
 
-🔴 These exist because of a measured pattern in this repo: six defects were
-found in one review session, **none by a green test suite**, and two shapes
-recurred -- a test asserting an *adjacent* quantity, and a component inherited
-from a source recipe that was correct in its regime and silently wrong in ours.
+Critical: these exist because of a measured pattern in this repo: six defects
+were found in one review session, **none by a green test suite**, and two
+shapes recurred -- a test asserting an *adjacent* quantity, and a component
+inherited from a source recipe that was correct in its regime and silently
+wrong in ours.
 
-⚠️ Every check here measures an **empirically drawn stream**, never the config
-it was drawn from. The constraint arithmetic can be right while the sampler
-implementing it is wrong, and only the stream catches that. They need no
-corpus, no model and no GPU, so they can run before the corpus exists.
+Caveat: every check here measures an **empirically drawn stream**, never the
+config it was drawn from. The constraint arithmetic can be right while the
+sampler implementing it is wrong, and only the stream catches that. They need
+no corpus, no model and no GPU, so they can run before the corpus exists.
 """
 
 from __future__ import annotations
@@ -26,7 +27,8 @@ from training.spec import (CELL_TABLE, SampleSpec, cell_labels, is_fake_cell,
 
 __all__ = ["AuditReport", "SHORTCUT_AUC_GATE", "audit_specs", "run_audit"]
 
-#: ★ docs/data/07 E-S2. Above this, neutralise before training anything.
+#: Strong evidence (docs/data/07 E-S2). Above this, neutralise before training
+#: anything.
 SHORTCUT_AUC_GATE = 0.60
 
 
@@ -36,9 +38,9 @@ class AuditReport:
 
     results: dict[str, tuple[bool, str]]
 
-    #: A detail beginning with this marks a check that did not run. 🔴 A skipped
-    #: check must never read as a pass: a review found `I7` printing PASS for a
-    #: size floor that was not implemented anywhere.
+    #: A detail beginning with this marks a check that did not run. Critical: a
+    #: skipped check must never read as a pass: a review found `I7` printing
+    #: PASS for a size floor that was not implemented anywhere.
     SKIP = "SKIPPED: "
 
     @property
@@ -75,17 +77,18 @@ def _fraction(num: float, den: float) -> float:
 
 
 #: How many standard errors of the gap a difference must clear before it counts
-#: as real. ★ Chosen from measurement, not taste: over 16 seeds the max-over-
-#: strata |z| had mean 1.36 and p95 2.89, topping out at 3.62 on a clean corpus.
-#: At k = 4 the per-audit false-alarm rate is ~2e-4 over the three strata, and
-#: every mutation test in the suite still fires at 11-31 sigma.
+#: as real. Strongly evidenced, and chosen from measurement rather than taste:
+#: over 16 seeds the max-over-strata |z| had mean 1.36 and p95 2.89, topping out
+#: at 3.62 on a clean corpus. At k = 4 the per-audit false-alarm rate is ~2e-4
+#: over the three strata, and every mutation test in the suite still fires at
+#: 11-31 sigma.
 NOISE_K = 4.0
 
 #: Above this the estimator cannot see anything worth acting on, so the check
-#: reports SKIP rather than a pass it did not earn. 🔴 Derived, not picked: for a
-#: binary feature `AUC = 0.5 + gap / 2`, so the E-S2 shortcut gate of 0.60 is a
-#: gap of 0.20. A stratum whose noise floor exceeds that cannot resolve a leak
-#: this pipeline would act on.
+#: reports SKIP rather than a pass it did not earn. Critical, and derived
+#: rather than picked: for a binary feature `AUC = 0.5 + gap / 2`, so the E-S2
+#: shortcut gate of 0.60 is a gap of 0.20. A stratum whose noise floor exceeds
+#: that cannot resolve a leak this pipeline would act on.
 RESOLVABLE_GAP = 2.0 * (SHORTCUT_AUC_GATE - 0.5)
 
 
@@ -93,19 +96,20 @@ def _gap_tolerance(x1: int, n1: int, x0: int, n0: int, floor: float,
                    k: float = NOISE_K) -> tuple[float, float]:
     """`(effective tolerance, noise floor)` for `|x1/n1 - x0/n0|`.
 
-    🔴 The flat tolerance this replaces was below its own estimator's noise. Both
-    proportions are binomial, so under H0 the gap has
-    ``se = sqrt(p(1-p)(1/n1 + 1/n0))`` with `p` pooled -- measured to fit: mean
+    Critical: the flat tolerance this replaces was below its own estimator's
+    noise. Both proportions are binomial, so under H0 the gap has ``se =
+    sqrt(p(1-p)(1/n1 + 1/n0))`` with `p` pooled -- measured to fit: mean
     |z| 0.72-0.95 against the 0.798 of a standard normal. At `tol = 0.02` and the
     ~1,200 specs cell 3 gets in a 20k draw, `se` is 0.017, so the check tripped
     on 2 of 4 seeds on a corpus with nothing wrong with it. A guardrail that
     cries wolf gets switched off, and then it does not catch the composition
     trap it exists for (docs/pipelines/05).
 
-    ⚠️ The floor still binds wherever the estimate is sharp enough to honour it.
-    In particular a stratum with no composed samples on either side has `p = 0`,
-    hence `se = 0`, hence the full `tol` -- which is exactly the shipped
-    `single_composed_rate = 0.0` case for the two single-component strata.
+    Caveat: the floor still binds wherever the estimate is sharp enough to
+    honour it. In particular a stratum with no composed samples on either side
+    has `p = 0`, hence `se = 0`, hence the full `tol` -- which is exactly the
+    shipped `single_composed_rate = 0.0` case for the two single-component
+    strata.
     """
     n = n1 + n0
     p = (x1 + x0) / n if n else 0.0
@@ -116,13 +120,14 @@ def _gap_tolerance(x1: int, n1: int, x0: int, n0: int, floor: float,
 def _feature_frame(specs: Sequence[SampleSpec]) -> tuple[np.ndarray, list[str]]:
     """Every structural knob the sampler controls, as a numeric matrix.
 
-    🔴 Includes ``transforms`` **parameters** and the whole ``normalize`` draw,
-    not just transform names. A review found that a name-only frequency table is
-    blind to a leak carried in a parameter -- ``rawboost(strength=0.9 if fake
-    else 0.1)`` puts the *name* on both sides at exactly equal rate, so the
-    frequency check reports 0.0000 while the parameter separates the labels at
-    AUC 1.000. ``normalize`` was read by nothing at all, and it is the A-S1
-    test-chain draw: the single highest-leverage stage in the pipeline.
+    Critical: includes ``transforms`` **parameters** and the whole
+    ``normalize`` draw, not just transform names. A review found that a
+    name-only frequency table is blind to a leak carried in a parameter --
+    ``rawboost(strength=0.9 if fake else 0.1)`` puts the *name* on both sides
+    at exactly equal rate, so the frequency check reports 0.0000 while the
+    parameter separates the labels at AUC 1.000. ``normalize`` was read by
+    nothing at all, and it is the A-S1 test-chain draw: the single
+    highest-leverage stage in the pipeline.
     """
     rows: list[dict[str, float]] = []
     for s in specs:
@@ -136,15 +141,16 @@ def _feature_frame(specs: Sequence[SampleSpec]) -> tuple[np.ndarray, list[str]]:
             "gain_spread_db": float(max(gains) - min(gains)),
             "crossfade_ms": s.crossfade_ms,
         }
-        # ⚠️ `source_offset_s` is deliberately NOT a feature. It is where inside
-        # the source file we start reading -- the model sees rendered audio and
-        # cannot observe it, so it cannot be a shortcut. It IS correlated with
-        # the source pool's duration statistics, which differ between the fake
-        # and real whole-file pools by chance when those pools are small: with
-        # 12 real and 9 fake instrumental whole-file rows it reached AUC 0.764
-        # inside the music-only stratum and failed this gate on a corpus with no
-        # actual leak. Source-duration imbalance is a manifest property worth
-        # knowing about, but it is not a spec-level shortcut.
+        # Caveat: `source_offset_s` is deliberately NOT a feature. It is where
+        # inside the source file we start reading -- the model sees rendered
+        # audio and cannot observe it, so it cannot be a shortcut. It IS
+        # correlated with the source pool's duration statistics, which differ
+        # between the fake and real whole-file pools by chance when those pools
+        # are small: with 12 real and 9 fake instrumental whole-file rows it
+        # reached AUC 0.764 inside the music-only stratum and failed this gate
+        # on a corpus with no actual leak. Source-duration imbalance is a
+        # manifest property worth knowing about, but it is not a spec-level
+        # shortcut.
         for name, params in s.transforms:
             feat[f"t:{name}"] = 1.0
             for k, v in params.items():
@@ -173,11 +179,11 @@ def _feature_frame(specs: Sequence[SampleSpec]) -> tuple[np.ndarray, list[str]]:
 def _auc_or_none(X: np.ndarray, y: np.ndarray) -> float | None:
     """Cross-validated AUC. `None` when the sample cannot support an estimate.
 
-    ⚠️ Cross-validated, not in-sample: the feature matrix one-hots categorical
-    transform and normalize values, and an in-sample fit over many sparse
-    columns inflates AUC and manufactures false alarms. A real leak survives
-    cross-validation trivially -- the trapped stream this was built against
-    scores 1.000 either way.
+    Caveat: cross-validated, not in-sample: the feature matrix one-hots
+    categorical transform and normalize values, and an in-sample fit over many
+    sparse columns inflates AUC and manufactures false alarms. A real leak
+    survives cross-validation trivially -- the trapped stream this was built
+    against scores 1.000 either way.
     """
     from sklearn.linear_model import LogisticRegression
     from sklearn.model_selection import StratifiedKFold, cross_val_predict
@@ -205,21 +211,22 @@ def _auc_se(n1: int, n0: int) -> float:
 def _metadata_shortcut(specs: Sequence[SampleSpec]) -> tuple[bool, str]:
     """Can structural metadata alone predict FILE_FAKE? (E-S2 / VG2 at spec level.)
 
-    ⚠️ ``stratum`` is not a feature. Presence is a legitimate signal the model is
-    *asked* to predict, so including it would measure the label space rather than
-    our corpus.
+    Caveat: ``stratum`` is not a feature. Presence is a legitimate signal the
+    model is *asked* to predict, so including it would measure the label space
+    rather than our corpus.
 
-    🔴 But the probe runs **per stratum as well as pooled, and takes the worst**.
-    Because the model is trained to predict presence, it effectively knows the
-    stratum for free -- so a leak that cancels marginally while pointing opposite
-    ways inside two strata is fully available to it. A review built exactly that:
-    a duration shift of opposite sign in mixed vs non-mixed files scored 0.4986
-    marginally (invisible) and 0.7719 with the interaction.
+    Critical: but the probe runs **per stratum as well as pooled, and takes the
+    worst**. Because the model is trained to predict presence, it effectively
+    knows the stratum for free -- so a leak that cancels marginally while
+    pointing opposite ways inside two strata is fully available to it. A review
+    built exactly that: a duration shift of opposite sign in mixed vs non-mixed
+    files scored 0.4986 marginally (invisible) and 0.7719 with the interaction.
 
-    🔴 **Cell 9 is excluded**, for the same reason it is excluded from the
-    mixedness balance: it is always REAL *and* never composed, contributing an
-    unfixable correlation. Including it, the strict policy (``f8 = 1``) scored
-    0.6003 and failed this gate -- a false alarm blocking a policy we support.
+    Critical: **cell 9 is excluded**, for the same reason it is excluded from
+    the mixedness balance: it is always REAL *and* never composed, contributing
+    an unfixable correlation. Including it, the strict policy (``f8 = 1``)
+    scored 0.6003 and failed this gate -- a false alarm blocking a policy we
+    support.
     """
     specs = [s for s in specs if s.cell != 9]
     if not specs:
@@ -248,11 +255,12 @@ def _metadata_shortcut(specs: Sequence[SampleSpec]) -> tuple[bool, str]:
         return True, AuditReport.SKIP + "not enough samples to estimate an AUC"
     worst, where = max(scored)
 
-    # 🔴 Noise-aware, for the same reason I2 is. A fixed 0.60 against a per-probe
-    # AUC whose own standard error is ~0.033 in a thin stratum is a false-alarm
-    # generator, and taking the MAX over four probes inflates the tail further.
-    # A seed sweep caught it: voice-only scored 0.6023 on a clean corpus at
-    # n=1500. Under H0 (A = 0.5) the AUC's se is sqrt((n1+n0+1)/(12*n1*n0)).
+    # Critical: noise-aware, for the same reason I2 is. A fixed 0.60 against a
+    # per-probe AUC whose own standard error is ~0.033 in a thin stratum is a
+    # false-alarm generator, and taking the MAX over four probes inflates the
+    # tail further. A seed sweep caught it: voice-only scored 0.6023 on a clean
+    # corpus at n=1500. Under H0 (A = 0.5) the AUC's se is
+    # sqrt((n1+n0+1)/(12*n1*n0)).
     n_worst = counts[where]
     se = _auc_se(*n_worst)
     gate = max(SHORTCUT_AUC_GATE, 0.5 + NOISE_K * se)
@@ -279,11 +287,11 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
     real = [s for s in specs if s.file_fake == 0]
 
     # -- I1: P(T | L) = P(T) for every transform NAME ------------------------ #
-    # ⚠️ Names only, and deliberately so -- it is cheap and interpretable, and it
-    # localises which transform is skewed. It is NOT sufficient on its own: a
-    # review showed `rawboost(strength=0.9 if fake else 0.1)` puts the name on
-    # both sides at exactly equal rate, so this reports 0.0000 while the
-    # parameter separates the labels at AUC 1.000. I1b covers parameters.
+    # Caveat: names only, and deliberately so -- it is cheap and interpretable,
+    # and it localises which transform is skewed. It is NOT sufficient on its
+    # own: a review showed `rawboost(strength=0.9 if fake else 0.1)` puts the
+    # name on both sides at exactly equal rate, so this reports 0.0000 while
+    # the parameter separates the labels at AUC 1.000. I1b covers parameters.
     by_label: dict[int, Counter] = {0: Counter(), 1: Counter()}
     for s in specs:
         for name, _ in s.transforms:
@@ -299,24 +307,24 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
         worst <= tol,
         f"worst |P(T|FAKE) - P(T|REAL)| = {worst:.4f} on {worst_name!r} "
         f"over {len(names)} transform NAME(s), tol {tol}. "
-        f"⚠️ names only -- parameter-level leaks are I1b's job")
+        f"caveat: names only -- parameter-level leaks are I1b's job")
 
     # -- I1b: the metadata shortcut audit, E-S2 at spec level ---------------- #
-    # 🔴 The joint check. Each balance above can hold individually while a
-    # *combination* of structural features still separates the labels -- and
+    # Critical: the joint check. Each balance above can hold individually while
+    # a *combination* of structural features still separates the labels -- and
     # nothing else here would see it. This is docs/data/07 E-S2 ("logistic
     # regression on metadata-only features, gate AUC < 0.60"), promoted to VG2,
     # run over specs instead of over decoded audio.
     r["I1b_metadata_shortcut_auc"] = _metadata_shortcut(specs)
 
     # -- I2: composedness label-independent WITHIN each presence stratum ----- #
-    # ⚠️ The stratified form. A marginal balance can hold while composedness
-    # predicts the label inside a stratum (docs/pipelines/02 §3).
-    # ⚠️ The tolerance is per stratum and noise-aware (`_gap_tolerance`): the
-    # thin strata cannot resolve a flat 0.02 at the draw budgets we use, and a
-    # check that fails at random on a clean corpus gets switched off. Strata are
-    # ranked by how far each EXCEEDS its own tolerance, not by raw gap, because
-    # the tolerances now differ between them.
+    # Caveat: the stratified form. A marginal balance can hold while
+    # composedness predicts the label inside a stratum (docs/pipelines/02 §3).
+    # Caveat: the tolerance is per stratum and noise-aware (`_gap_tolerance`):
+    # the thin strata cannot resolve a flat 0.02 at the draw budgets we use,
+    # and a check that fails at random on a clean corpus gets switched off.
+    # Strata are ranked by how far each EXCEEDS its own tolerance, not by raw
+    # gap, because the tolerances now differ between them.
     strat: dict[tuple[str, int], list[int]] = defaultdict(list)
     for s in specs:
         strat[(s.stratum, s.file_fake)].append(int(s.render_mode == "composed"))
@@ -348,12 +356,12 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
             + (f"; unresolvable: {'; '.join(unresolvable)}" if unresolvable else ""))
 
     # -- I2c: the MARGINAL composedness residual ----------------------------- #
-    # 🔴 Measured, not asserted. The stratified constraint leaves a marginal gap
-    # because cell 9 is its own presence stratum with no FAKE counterpart: 0.127
-    # without `balance_marginal_composedness`, 0.253 at a = b = 1. The defence
-    # ("composedness is uninformative given presence, and the model is
-    # supervised on presence") is sound but lived in three docstrings and was
-    # measured nowhere.
+    # Critical: measured, not asserted. The stratified constraint leaves a
+    # marginal gap because cell 9 is its own presence stratum with no FAKE
+    # counterpart: 0.127 without `balance_marginal_composedness`, 0.253 at a =
+    # b = 1. The defence ("composedness is uninformative given presence, and
+    # the model is supervised on presence") is sound but lived in three
+    # docstrings and was measured nowhere.
     x_f = sum(s.render_mode == "composed" for s in fake)
     x_r = sum(s.render_mode == "composed" for s in real)
     m_f = _fraction(x_f, len(fake))
@@ -375,10 +383,10 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
     f8_, r8_ = [s for s in c8 if s.file_fake], [s for s in c8 if not s.file_fake]
     pm_f = _fraction(sum(s.stratum == "mixed" for s in f8_), len(f8_))
     pm_r = _fraction(sum(s.stratum == "mixed" for s in r8_), len(r8_))
-    # ⚠️ Noise-aware, like I2/I2c. This is the same difference-of-binomials
-    # estimator, and it was left on a flat 0.02 when they were fixed -- a seed
-    # sweep caught it immediately at n=1500, seed 1: gap 0.0220 against 0.02,
-    # a false alarm on a clean corpus.
+    # Caveat: noise-aware, like I2/I2c. This is the same
+    # difference-of-binomials estimator, and it was left on a flat 0.02 when
+    # they were fixed -- a seed sweep caught it immediately at n=1500, seed 1:
+    # gap 0.0220 against 0.02, a false alarm on a clean corpus.
     mix_f = sum(1 for s in f8_ if s.stratum == "mixed")
     mix_r = sum(1 for s in r8_ if s.stratum == "mixed")
     mix_tol, mix_noise = _gap_tolerance(mix_f, len(f8_), mix_r, len(r8_), tol)
@@ -398,10 +406,10 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
     if manifest is not None:
         real_ids = set(manifest.loc[
             manifest.pool.isin(["A", "C"]), "file_id"].astype(str))
-        # ⚠️ Only files drawn at least twice can testify. A file drawn once
-        # cannot appear on both sides, and counting it measures the draw budget
-        # rather than the sampler -- at 1,500 draws over a 400-file real pool
-        # this reported a failure on a corpus with nothing wrong with it.
+        # Caveat: only files drawn at least twice can testify. A file drawn
+        # once cannot appear on both sides, and counting it measures the draw
+        # budget rather than the sampler -- at 1,500 draws over a 400-file real
+        # pool this reported a failure on a corpus with nothing wrong with it.
         drawn_real = {fid for fid in sides if fid in real_ids}
         eligible = {fid for fid in drawn_real if draw_counts[fid] >= 2}
         both = {fid for fid in eligible if sides[fid] == {0, 1}}
@@ -421,10 +429,10 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
         r["I3_real_components_on_both_sides"] = (True, AuditReport.SKIP + "no manifest given")
 
     # -- I4: the drawn components' POOLS must imply the cell's labels -------- #
-    # 🔴 Rewritten. The old check compared `s.file_fake` to
-    # `cell_labels(s.cell)["file_fake"]` -- but `SampleSpec.file_fake` *is* that
-    # expression, so it was unfalsifiable: a brute force over all nine cells
-    # found 0 constructible specs that could trip it.
+    # Critical: rewritten. The old check compared `s.file_fake` to
+    # `cell_labels(s.cell)["file_fake"]` -- but `SampleSpec.file_fake` *is*
+    # that expression, so it was unfalsifiable: a brute force over all nine
+    # cells found 0 constructible specs that could trip it.
     #
     # This version cross-checks against an INDEPENDENT source: the pool each
     # drawn component actually came from. A sampler that drew a fake-voice
@@ -461,10 +469,10 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
 
     # -- I5: no drawn file lies outside the active slice --------------------- #
     if manifest is not None and slice_ is not None:
-        # 🔴 Now checks the FOLD as well as the slice, and reports which grouping
-        # keys the drawn stream actually spans. The documented I5 is "outside the
-        # active slice; family/source/speaker/pair/dup constraints hold" -- the
-        # first version implemented only the first clause.
+        # Critical: now checks the FOLD as well as the slice, and reports which
+        # grouping keys the drawn stream actually spans. The documented I5 is
+        # "outside the active slice; family/source/speaker/pair/dup constraints
+        # hold" -- the first version implemented only the first clause.
         sel = manifest["slice"] == slice_
         if fold is not None:
             sel &= manifest["fold"] == fold
@@ -473,18 +481,19 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
                   if c.file_id not in allowed}
         where = f"slice={slice_!r}" + (f" fold={fold!r}" if fold is not None else "")
 
-        # 🔴 I5 is a TWO-clause statement ("outside the active slice *and*
-        # fold"), so a run with `fold=None` must not report a bare PASS for the
-        # half it did not evaluate -- `AuditReport.SKIP` exists for exactly this
-        # and a review found the frozen evaluation set, the instrument this
-        # project trusts over the leaderboard, passing that way.
+        # Critical: I5 is a TWO-clause statement ("outside the active slice
+        # *and* fold"), so a run with `fold=None` must not report a bare PASS
+        # for the half it did not evaluate -- `AuditReport.SKIP` exists for
+        # exactly this and a review found the frozen evaluation set, the
+        # instrument this project trusts over the leaderboard, passing that
+        # way.
         #
-        # ⚠️ Whether the fold clause is live is MEASURED, not assumed. After
-        # `folds.apply_folds(..., fold=k)` the fold is baked into `slice` and the
-        # frame's `fold` column is uniformly `k`, so the clause has nothing left
-        # to say and PASS is honest. On an unresolved frame the column spans
-        # several folds, the clause is real, and skipping it silently is the
-        # failure mode.
+        # Caveat: whether the fold clause is live is MEASURED, not assumed.
+        # After `folds.apply_folds(..., fold=k)` the fold is baked into `slice`
+        # and the frame's `fold` column is uniformly `k`, so the clause has
+        # nothing left to say and PASS is honest. On an unresolved frame the
+        # column spans several folds, the clause is real, and skipping it
+        # silently is the failure mode.
         spanned = sorted(manifest.loc[sel, "fold"].dropna().unique().tolist()) \
             if "fold" in manifest.columns else []
         if fold is None and len(spanned) > 1:
@@ -503,28 +512,29 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
         r["I5_split_safety"] = (True, AuditReport.SKIP + "no manifest/slice given")
 
     # -- I6 is deliberately absent ------------------------------------------- #
-    # 🔴 There used to be an "I6_labels_come_from_the_cell" here comparing the
-    # four label properties to CELL_TABLE[s.cell]. Those properties ARE literal
-    # indexes into CELL_TABLE (spec.py), so it could not fail -- a brute force
-    # over all nine cells found 0 constructible specs that trip it. "Labels are
-    # a function of the cell alone" is a property of the TYPE, and it is
-    # asserted where it belongs: tests/test_spec.py asserts SampleSpec has no
-    # label fields at all. A per-spec loop over derived properties adds nothing
-    # but false confidence.
+    # Critical: there used to be an "I6_labels_come_from_the_cell" here
+    # comparing the four label properties to CELL_TABLE[s.cell]. Those
+    # properties ARE literal indexes into CELL_TABLE (spec.py), so it could not
+    # fail -- a brute force over all nine cells found 0 constructible specs
+    # that trip it. "Labels are a function of the cell alone" is a property of
+    # the TYPE, and it is asserted where it belongs: tests/test_spec.py asserts
+    # SampleSpec has no label fields at all. A per-spec loop over derived
+    # properties adds nothing but false confidence.
 
     # -- I7: the VG1 size floors, and the cheap tripwire that used to squat here #
     scraped = [s.sample_id for s in specs
                if s.cell in (6, 7) and s.render_mode != "composed"]
     r["I7a_cells_6_7_always_composed"] = (
         not scraped,
-        f"{len(scraped)} spec(s) in cells 6/7 not composed. ⚠️ defense-in-depth "
+        f"{len(scraped)} spec(s) in cells 6/7 not composed. Caveat: defense-in-depth "
         f"only: SampleSpec refuses to construct one, so this cannot fail today")
 
-    # 🔴 The real I7. It previously printed PASS for a check that existed
-    # nowhere -- the "adjacent quantity" pattern docs/pipelines/05 opens by
-    # warning about. VG1 A8/A9: >=1,200 per class per masked head pool, and
-    # >=100 per cell. These bind on an EVALUATION stream; a training stream is
-    # not required to meet them, so it is reported as skipped, not as a pass.
+    # Critical: the real I7. It previously printed PASS for a check that
+    # existed nowhere -- the "adjacent quantity" pattern docs/pipelines/05
+    # opens by warning about. VG1 A8/A9: >=1,200 per class per masked head
+    # pool, and >=100 per cell. These bind on an EVALUATION stream; a training
+    # stream is not required to meet them, so it is reported as skipped, not as
+    # a pass.
     if eval_floors:
         short: list[str] = []
         for head, pool, pred in (
@@ -564,14 +574,14 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
         + f"; bounds [{lo}, {hi}]" + (f"; OUT: {out}" if out else ""))
 
     # -- I21: realized generator diversity in the drawn stream --------------- #
-    # 🔴 `domain_cap` is a weight over what is PRESENT. It cannot create
+    # Critical: `domain_cap` is a weight over what is PRESENT. It cannot create
     # diversity that the slice does not have, so a fold split leaving TRAIN
     # generator-poor reproduces the DOSS failure (6.4k h naive 3.29% vs 0.2k h
     # balanced 2.77%) with a green audit and superb local CV.
     #
-    # ⚠️ Measured against an ABSOLUTE floor, not against what the slice happens
-    # to hold: a monoculture slice trivially realizes 100% of its own two
-    # families. Below ~3 families you cannot measure cross-generator
+    # Caveat: measured against an ABSOLUTE floor, not against what the slice
+    # happens to hold: a monoculture slice trivially realizes 100% of its own
+    # two families. Below ~3 families you cannot measure cross-generator
     # generalization at all, and that is the binding constraint of this
     # competition -- so the default is deliberately low, catching catastrophe
     # rather than tuning balance.
@@ -605,27 +615,30 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
         r["I21_generator_diversity"] = (True, AuditReport.SKIP + "no manifest given")
 
     # -- I9 (C2): per-head present-count floor per batch --------------------- #
-    # 🔴 "Audit the same order you train in" is the whole assumption, and M4
-    # changed the training order: `training.dataset.training_batches` buckets by
-    # duration, so contiguous draw-order slices are batches the optimiser never
-    # sees. Pass `batches=` -- the index plan itself -- and this measures what is
-    # actually stepped on. Without it the check still cuts draw order, which is
-    # correct for an unbucketed loader and is what the eval path uses.
+    # Critical: "audit the same order you train in" is the whole assumption,
+    # and M4 changed the training order: `training.dataset.training_batches`
+    # buckets by duration, so contiguous draw-order slices are batches the
+    # optimiser never sees. Pass `batches=` -- the index plan itself -- and
+    # this measures what is actually stepped on. Without it the check still
+    # cuts draw order, which is correct for an unbucketed loader and is what
+    # the eval path uses.
     #
-    # ⚠️ The trailing partial batch is EXCLUDED, and that is a reversal. It was
-    # included on the argument that it is smallest and likeliest to starve a
-    # head -- but C2's floor is absolute (the gradient norm scales as 1/sqrt(n),
-    # not with the batch fraction), so a short final batch can never satisfy it:
-    # a seed sweep found 1/188 batches failing on a clean corpus for exactly
-    # this reason. Training uses `drop_last=True`, so that batch is never
-    # stepped on; auditing it measures a batch the optimiser will not see.
+    # Caveat: the trailing partial batch is EXCLUDED, and that is a reversal.
+    # It was included on the argument that it is smallest and likeliest to
+    # starve a head -- but C2's floor is absolute (the gradient norm scales as
+    # 1/sqrt(n), not with the batch fraction), so a short final batch can never
+    # satisfy it: a seed sweep found 1/188 batches failing on a clean corpus
+    # for exactly this reason. Training uses `drop_last=True`, so that batch is
+    # never stepped on; auditing it measures a batch the optimiser will not
+    # see.
     starved: Counter = Counter()
-    # ⚠️ The two branches drop rows for different reasons, so they must not share
-    # one phrase. In draw order the remainder is what `drop_last` eats; in a
-    # supplied plan it is whatever the plan never indexes -- which is the same
-    # thing for a `bucket_batches` plan and NOT the same thing for a partial or
-    # overlapping one. Reporting both as "excluded (drop_last)" would be a number
-    # that quietly means something else, so each says what it counted.
+    # Caveat: the two branches drop rows for different reasons, so they must
+    # not share one phrase. In draw order the remainder is what `drop_last`
+    # eats; in a supplied plan it is whatever the plan never indexes -- which
+    # is the same thing for a `bucket_batches` plan and NOT the same thing for
+    # a partial or overlapping one. Reporting both as "excluded (drop_last)"
+    # would be a number that quietly means something else, so each says what it
+    # counted.
     if batches is None:
         groups = [specs[start:start + batch_size]
                   for start in range(0, n - batch_size + 1, batch_size)]
@@ -652,9 +665,9 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
         for head, key in (("voice", "voice_present"), ("music", "music_present")):
             if sum(getattr(s, key) for s in batch) < min_present:
                 starved[head] += 1
-    # ⚠️ The default floor is 8, not 2. `docs/pipelines/02 §4`'s own table puts
-    # n=2 at 3.9x the gradient norm of n=32 and n=8 at 2.0x -- a floor of 2
-    # accepts exactly the case C2 exists to prevent.
+    # Caveat: the default floor is 8, not 2. `docs/pipelines/02 §4`'s own table
+    # puts n=2 at 3.9x the gradient norm of n=32 and n=8 at 2.0x -- a floor of
+    # 2 accepts exactly the case C2 exists to prevent.
     r["I9_C2_present_count_floor"] = (
         not starved,
         f"{sum(starved.values())}/{len(groups)} batch(es) below {min_present} present "
