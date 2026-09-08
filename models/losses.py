@@ -185,6 +185,14 @@ def multitask_loss(
             head_loss = head_loss + loss_cfg.ranking_weight * pairwise_ranking_loss(
                 blended, y, sample_mask)
 
+        # ⚠️ Changing the objective's *magnitude* -- these weights, the blend, a
+        # new term -- can turn `tests/test_loop.py::
+        # test_the_mid_epoch_checkpoint_carries_the_fp16_loss_scale` red for a
+        # reason that has nothing to do with checkpointing. That test asserts
+        # `_growth_tracker == steps` as its non-vacuity guard, and a single fp16
+        # GradScaler backoff resets the tracker. The coupling is unintended and
+        # undocumented at the test; if you land here from that failure, check for
+        # an fp16 overflow in the loss before suspecting the checkpoint path.
         weight = loss_cfg.weights.get(WEIGHT_KEY_FOR_COLUMN[br_cfg.column], 1.0)
         contribution = weight * head_loss
         parts[branch] = float(head_loss.detach())

@@ -119,6 +119,116 @@ def test_per_head_weights_are_applied():
     assert float(equal) != pytest.approx(float(metric_shaped))
 
 
+#: What the competition metric weights each submission column at
+#: (metrics.dacon.SCORE_WEIGHTS, docs/validation/02 §1).
+#:
+#: 🔴 Written out here, column-keyed and by hand, on purpose. The two tests below
+#: must not reach for `losses.WEIGHT_KEY_FOR_COLUMN` or `losses.TARGET_FOR_COLUMN`
+#: to say what they expect: those mappings are the thing under test, and a test
+#: that looks a weight up through the same mapping the loss uses survives every
+#: permutation of it. `test_per_head_weights_are_applied` above checks the weights
+#: *dict*; these check the weights *in effect*.
+METRIC_WEIGHT_FOR_COLUMN = {
+    "FILE_FAKE_PROB": 0.45,
+    "MUSIC_FAKE_PROB": 0.27,
+    "VOICE_FAKE_PROB": 0.18,
+    "VOICE_PRESENT_PROB": 0.05,
+    "MUSIC_PRESENT_PROB": 0.05,
+}
+
+#: The ground-truth key each column is scored against, likewise by hand.
+METRIC_TARGET_FOR_COLUMN = {
+    "FILE_FAKE_PROB": "file_fake",
+    "MUSIC_FAKE_PROB": "music_fake",
+    "VOICE_FAKE_PROB": "voice_fake",
+    "VOICE_PRESENT_PROB": "voice_present",
+    "MUSIC_PRESENT_PROB": "music_present",
+}
+
+
+def test_each_head_is_weighted_at_its_own_metric_weight():
+    """🔴 The weight *in effect* per head, recovered without the mapping.
+
+    `multitask_loss` walks `cfg.branches`, so restricting the config to one
+    branch -- exactly what `training.stages._stage_loss_config` does for real --
+    makes the returned total that branch's weighted contribution alone, while
+    `parts[branch]` is the same head loss unweighted. Their ratio is the weight
+    the objective actually applied to that head, and it is compared against the
+    metric weight for the branch's own column.
+
+    ⚠️ Every part of the head-to-weight path is then covered: permuting
+    `WEIGHT_KEY_FOR_COLUMN` moves the ratio and not the expectation. Mutating it
+    so both presence heads read `"file"` trains two 0.05 heads at 0.45; the whole
+    suite passed that mutation before this test existed.
+    """
+    from metrics.dacon import SCORE_WEIGHTS
+    assert sorted(METRIC_WEIGHT_FOR_COLUMN.values()) == sorted(SCORE_WEIGHTS.values()), \
+        "the metric's head weights moved; this table is stale"
+
+    model, cfg = _model()
+    torch.manual_seed(3)
+    out = model(torch.randn(4, SR * 4))
+    targets = _targets([1, 1, 1, 0], [1, 0, 1, 1],
+                       voice_fake=[1, 0, 1, 0], music_fake=[0, 1, 1, 0])
+
+    assert set(br.column for br in cfg.branches.values()) == set(METRIC_WEIGHT_FOR_COLUMN)
+    for name, br in cfg.branches.items():
+        one_branch = dataclasses.replace(cfg, branches={name: br})
+        total, parts = multitask_loss(out, targets, one_branch, LossConfig())
+        # Non-vacuity: a zero head loss would make every weight look right.
+        assert parts[name] > 1e-3, f"{name}: head loss too small to divide by"
+        in_effect = float(total) / parts[name]
+        assert in_effect == pytest.approx(METRIC_WEIGHT_FOR_COLUMN[br.column], rel=1e-4), \
+            f"{name} ({br.column}) is trained at {in_effect}"
+
+
+def test_each_head_is_trained_against_its_own_column_label():
+    """🔴 The target *in effect* per head, recovered without the mapping.
+
+    Companion to the weight test: permuting `TARGET_FOR_COLUMN` would train each
+    head on a label the metric scores a different column against, and no shape,
+    mask or weight assertion notices.
+
+    The two presence keys are also the masks, so they are perturbed separately
+    and only the two presence heads are checked against them -- flipping
+    `voice_present` legitimately moves the voice head through its mask.
+    """
+    model, cfg = _model()
+    torch.manual_seed(4)
+    out = model(torch.randn(4, SR * 4))
+    base = {"voice_present": torch.ones(4), "music_present": torch.ones(4),
+            "voice_fake": torch.tensor([1.0, 0.0, 1.0, 0.0]),
+            "music_fake": torch.tensor([0.0, 1.0, 1.0, 0.0]),
+            "file_fake": torch.tensor([1.0, 1.0, 1.0, 0.0])}
+    _, ref = multitask_loss(out, base, cfg, LossConfig())
+
+    def moved(perturbed):
+        _, got = multitask_loss(out, perturbed, cfg, LossConfig())
+        return {n for n in cfg.branches
+                if got[n] != pytest.approx(ref[n], abs=1e-6)}
+
+    column_of = {n: br.column for n, br in cfg.branches.items()}
+
+    # All masks stay all-ones here, so a fake label can only reach a head that is
+    # trained against it.
+    for key in ("voice_fake", "music_fake", "file_fake"):
+        flipped = dict(base, **{key: 1.0 - base[key]})
+        expected = {n for n, col in column_of.items()
+                    if METRIC_TARGET_FOR_COLUMN[col] == key}
+        assert moved(flipped) == expected, f"{key} reached the wrong head(s)"
+
+    # Presence keys: check only the presence heads, whose masks are all null.
+    presence_heads = {n for n, col in column_of.items()
+                      if METRIC_TARGET_FOR_COLUMN[col] in ("voice_present", "music_present")}
+    assert len(presence_heads) == 2
+    for key in ("voice_present", "music_present"):
+        one_absent = dict(base, **{key: torch.tensor([1.0, 1.0, 1.0, 0.0])})
+        expected = {n for n, col in column_of.items()
+                    if METRIC_TARGET_FOR_COLUMN[col] == key}
+        assert moved(one_absent) & presence_heads == expected, \
+            f"{key} reached the wrong presence head(s)"
+
+
 def test_loss_blend_comes_from_the_head_config_not_a_separate_knob():
     """🔴 Training and inference must use the same clip/frame_max blend.
 
