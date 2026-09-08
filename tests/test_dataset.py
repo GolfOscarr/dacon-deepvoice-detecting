@@ -129,6 +129,39 @@ def test_the_eval_plan_is_unbucketed_in_order_and_drops_nothing(corpus):
         training_batches(ds, 3)
 
 
+def test_an_omitted_slice_is_not_a_declaration_either(folded):
+    """🔴 The `fold` trap, one argument over -- and this one drew blood.
+
+    `slice_` names where the specs were **drawn from**, not the role they are
+    used in. The old `"val"` default silently asserted a provenance the caller
+    never stated, and when `training.loop` wired I5 in properly it reported **23
+    file_ids outside the declared slice** for an eval set drawn from a
+    `slice_="train"` sampler. The specs were right; the declaration was invented.
+    """
+    corpus, folds = folded
+    resolved = fold_manifest(corpus, folds, fold=0)
+    specs = list(Sampler(resolved, SamplerConfig(), slice_="train").epoch_specs(
+        200, seed=0))
+    index = ManifestIndex.from_frame(resolved)
+
+    omitted = SpecDataset.frozen(specs, index, fold=None)
+    assert omitted.slice_ is None, "an omitted slice must not invent one"
+    why = omitted.audit(resolved).results["I5_split_safety"][1]
+    assert why.startswith("SKIPPED"), why
+
+    # Non-vacuity: naming the slice the specs were drawn from makes I5 run clean.
+    stated = SpecDataset.frozen(specs, index, slice_="train", fold=None)
+    ok, ran = stated.audit(resolved).results["I5_split_safety"]
+    assert ok and not ran.startswith("SKIPPED"), ran
+
+    # And the old default was not merely unstated, it was wrong: declaring "val"
+    # for train-drawn specs is what produced the 23 outside-the-slice report.
+    lied = SpecDataset.frozen(specs, index, slice_="val", fold=None)
+    bad, why_bad = lied.audit(resolved).results["I5_split_safety"]
+    assert not bad, "the mislabelled provenance must be caught, not tolerated"
+    assert "outside" in why_bad
+
+
 def test_the_eval_plan_refuses_a_training_dataset(corpus):
     """🔴 The mirror of `training_batches` refusing a frozen list.
 
@@ -197,6 +230,49 @@ def test_audit_measures_the_plan_the_optimiser_will_see(dataset, corpus):
     draw_order = dataset.audit(manifest, batch_size=2, min_present=0).results[
         "I9_C2_present_count_floor"][1]
     assert "draw order" in draw_order
+
+
+def test_the_dropped_row_count_says_what_it_counted(corpus):
+    """🔴 Report text, but the kind that goes quietly wrong.
+
+    The two I9 branches drop rows for different reasons -- `drop_last`'s
+    remainder in draw order, versus whatever a supplied plan never indexes -- and
+    both used to print "trailing spec(s) excluded (drop_last)". For a
+    `bucket_batches` plan those coincide; for a partial or overlapping plan they
+    do not, and the number would mean something other than what it says.
+
+    Neither branch's count was asserted anywhere before this, which is how the
+    supplied-plan one was added wrong-and-green. Both are pinned here, on plans
+    with a known remainder.
+    """
+    root, manifest, index = corpus
+    sampler = Sampler(manifest, DRAW, slice_="train")
+    specs = list(sampler.epoch_specs(10, seed=0))
+    ds = SpecDataset.frozen(specs, index, RenderConfig(root=root),
+                            slice_="train", fold=None)
+
+    # draw order: 10 specs at batch_size 4 -> two batches, 2 left over.
+    why = ds.audit(batch_size=4, min_present=0).results[
+        "I9_C2_present_count_floor"][1]
+    assert "2 trailing spec(s) excluded (drop_last)" in why, why
+
+    # a supplied plan that covers 6 of 10 -> 4 never batched, and it must not
+    # call them a drop_last remainder.
+    partial = ds.audit(batches=[[0, 1, 2], [3, 4, 5]], min_present=0).results[
+        "I9_C2_present_count_floor"][1]
+    assert "4 spec(s) the plan never batches" in partial, partial
+    assert "drop_last" not in partial
+
+    # an overlapping plan is reported as such: a spec in two batches is stepped
+    # on twice, and the dropped count is then not a remainder at all.
+    overlap = ds.audit(batches=[[0, 1, 2], [2, 3, 4]], min_present=0).results[
+        "I9_C2_present_count_floor"][1]
+    assert "1 spec(s) batched more than once" in overlap, overlap
+
+    # a full plan drops nothing and says nothing.
+    full = ds.audit(batches=[list(range(5)), list(range(5, 10))],
+                    min_present=0).results["I9_C2_present_count_floor"][1]
+    assert "never batches" not in full and "drop_last" not in full
 
 
 def test_the_audit_batch_size_is_not_a_silent_default(dataset, corpus):

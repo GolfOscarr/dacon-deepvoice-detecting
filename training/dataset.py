@@ -46,6 +46,15 @@ class _Unset:
     default would make "I decided" and "I never thought about it" the same
     argument, which is how the frozen eval set came to report a PASS it had not
     earned.
+
+    ⚠️ **Do not "simplify" this to a required keyword or a plain default.** Both
+    were tried. A required keyword forces every caller to type something, but a
+    caller can still satisfy it with the value that happens to work and get a
+    PASS they never reasoned about; and it cannot express "explicitly None"
+    distinctly from "had to write something". A plain default is the original
+    defect. The sentinel is the only one of the three that lets `audit_specs`
+    *measure* which case it is in -- SKIP when nobody decided, PASS-with-reason
+    when someone did and the clause is genuinely vacuous.
     """
 
     def __repr__(self) -> str:                                # pragma: no cover
@@ -109,7 +118,7 @@ class SpecDataset(Dataset):
     def __init__(self, specs: Sequence[SampleSpec],
                  index: ManifestIndex | pd.DataFrame,
                  cfg: RenderConfig | None = None, *,
-                 slice_: str, fold: int | None,
+                 slice_: str | None, fold: int | None,
                  sampler: Sampler | None = None, n: int | None = None,
                  seed: int = 0, epoch: int = 0):
         self._specs: tuple[SampleSpec, ...] = tuple(specs)
@@ -122,6 +131,7 @@ class SpecDataset(Dataset):
         #: keyword sense -- it is required there -- so anything built this way
         #: has stated one; `frozen` is where it can be omitted.
         self._fold_stated = True
+        self._slice_stated = True
         if not self._specs:
             raise ValueError("SpecDataset needs at least one spec")
 
@@ -141,28 +151,40 @@ class SpecDataset(Dataset):
     def frozen(cls, specs: Sequence[SampleSpec],
                index: ManifestIndex | pd.DataFrame,
                cfg: RenderConfig | None = None, *,
-               slice_: str = "val", fold: int | None | _Unset = UNSET) -> SpecDataset:
+               slice_: str | _Unset = UNSET,
+               fold: int | None | _Unset = UNSET) -> SpecDataset:
         """The evaluation mode: this exact spec list, for as long as it lives.
 
-        🔴 ``fold`` distinguishes **stated** from **omitted**, and that is the
-        whole point. It used to default to ``None``, and a review found the
-        consequence: the frozen evaluation set -- the instrument this project
-        trusts over the leaderboard -- audited with the fold half of I5 inactive
-        and reported PASS, in a module whose own convention is that a skipped
-        check must never read as a pass.
+        🔴 ``fold`` and ``slice_`` both distinguish **stated** from **omitted**,
+        and that is the whole point. Each used to carry a default, and a review
+        found the same consequence twice: the frozen evaluation set -- the
+        instrument this project trusts over the leaderboard -- audited with half
+        of I5 inactive and reported PASS, in a module whose own convention is
+        that a skipped check must never read as a pass.
 
         * ``fold=k`` -- the specs were drawn under fold ``k``; I5 checks both of
           its clauses.
         * ``fold=None`` **explicitly** -- "the frame is already fold-resolved
           (`fold_manifest`), so the clause has nothing to add". I5 passes and
           says the clause was vacuous.
-        * omitted -- nobody decided. `audit` reports I5 as **SKIP**, whatever the
-          manifest looks like. Not passing an argument is not an assertion.
+        * ``fold`` omitted -- nobody decided. `audit` reports I5 as **SKIP**,
+          whatever the manifest looks like. Not passing an argument is not an
+          assertion.
+
+        ⚠️ ``slice_`` names where the specs were **drawn from**, not the role
+        they are being used in, and that is exactly why its old ``"val"`` default
+        was a trap: an eval set drawn from a ``slice_="train"`` sampler inherited
+        the label ``"val"``, and when `training.loop` wired I5 in properly it
+        reported **23 file_ids outside the declared slice**. The specs were fine;
+        the declaration was invented by a default. Pass ``sampler.slice_``.
         """
-        stated = not isinstance(fold, _Unset)
-        ds = cls(specs, index, cfg, slice_=slice_,
-                 fold=None if not stated else fold)
-        ds._fold_stated = stated
+        fold_stated = not isinstance(fold, _Unset)
+        slice_stated = not isinstance(slice_, _Unset)
+        ds = cls(specs, index, cfg,
+                 slice_=None if not slice_stated else slice_,
+                 fold=None if not fold_stated else fold)
+        ds._fold_stated = fold_stated
+        ds._slice_stated = slice_stated
         return ds
 
     # -- the dataset protocol ------------------------------------------------ #
@@ -228,6 +250,16 @@ class SpecDataset(Dataset):
         """
         report = audit_specs(self._specs, manifest=manifest, slice_=self.slice_,
                              fold=self.fold, batches=batches, **kw)
+        if not self._slice_stated:
+            # 🔴 Same rule as the fold below. With no slice named, `audit_specs`
+            # already SKIPs I5 outright -- there is nothing to compare against --
+            # so this only has to make sure that stays a SKIP and never becomes a
+            # quiet pass if the upstream branch is ever loosened.
+            passed, why = report.results["I5_split_safety"]
+            if not why.startswith(AuditReport.SKIP):        # pragma: no cover
+                report.results["I5_split_safety"] = (passed, AuditReport.SKIP + (
+                    f"{why}; but no slice_ was ever passed to SpecDataset.frozen, "
+                    f"so the provenance I5 checks against was never declared"))
         if not self._fold_stated:
             # 🔴 No fold was ever named, so I5's second clause rests on nothing a
             # caller decided. Downgrade rather than report a PASS: the

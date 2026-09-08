@@ -620,17 +620,32 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
     # this reason. Training uses `drop_last=True`, so that batch is never
     # stepped on; auditing it measures a batch the optimiser will not see.
     starved: Counter = Counter()
+    # ⚠️ The two branches drop rows for different reasons, so they must not share
+    # one phrase. In draw order the remainder is what `drop_last` eats; in a
+    # supplied plan it is whatever the plan never indexes -- which is the same
+    # thing for a `bucket_batches` plan and NOT the same thing for a partial or
+    # overlapping one. Reporting both as "excluded (drop_last)" would be a number
+    # that quietly means something else, so each says what it counted.
     if batches is None:
         groups = [specs[start:start + batch_size]
                   for start in range(0, n - batch_size + 1, batch_size)]
-        dropped_tail = n % batch_size
+        dropped = n % batch_size
+        dropped_note = f"{dropped} trailing spec(s) excluded (drop_last)"
         plan = f"draw order, batch_size={batch_size}"
     else:
         bad = [i for b in batches for i in b if not 0 <= i < n]
         if bad:
             raise ValueError(f"batches index outside the spec list: {bad[:3]}")
         groups = [[specs[i] for i in b] for b in batches]
-        dropped_tail = n - len({i for b in batches for i in b})
+        covered = {i for b in batches for i in b}
+        dropped = n - len(covered)
+        repeated = sum(len(b) for b in batches) - len(covered)
+        dropped_note = f"{dropped} spec(s) the plan never batches"
+        if repeated:
+            # A spec in two batches is stepped on twice per epoch. C2 is still
+            # measured correctly per batch, but the reader must not take the
+            # dropped count for a `drop_last` remainder.
+            dropped_note += f"; {repeated} spec(s) batched more than once"
         sizes = sorted({len(b) for b in batches})
         plan = f"supplied plan, {len(batches)} batch(es) of {sizes}"
     for batch in groups:
@@ -645,7 +660,7 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame | None = Non
         f"{sum(starved.values())}/{len(groups)} batch(es) below {min_present} present "
         f"samples for a masked head ({plan})"
         + (f": {dict(starved)}" if starved else "")
-        + (f"; {dropped_tail} trailing spec(s) excluded (drop_last)" if dropped_tail else ""))
+        + (f"; {dropped_note}" if dropped else ""))
     return AuditReport(r)
 
 
