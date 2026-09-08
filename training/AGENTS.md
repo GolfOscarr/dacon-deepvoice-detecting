@@ -24,7 +24,10 @@ Why each choice was made: [`docs/pipelines/`](../docs/pipelines/README.md) and
 | `training.render` | `SampleSpec` → audio. All the I/O, and `render(spec) == render(spec)` |
 | `training.collate` | `list[RenderedSample]` → batch, and duration bucketing. **I15** lives here |
 | `training.dataset` | The torch `Dataset`: specs → render → collate, plus the frozen eval set |
-| `training.loop` | S1→S3, resume, EMA, soup, validation, the **VG gates** and the leak tripwires |
+| `training.stages` | The S1→S3 schedule: what each stage trains, S3's codec menu, `autocast_for` |
+| `training.checkpoint` | The on-disk contract of a run: EMA, `SamplerState`, save/load, the soup |
+| `training.loop` | `train_stage` / `run_schedule`: the passes, the optimizer steps and the resume |
+| `training.validate` | Scoring a fold, the **VG gates** and the leak tripwires |
 
 ---
 
@@ -676,6 +679,25 @@ Called without a manifest, I5 reports `SKIPPED` — never a pass.
 Everything above the dataset: when a sample is shown to the model, what the model
 is allowed to learn from it at that point, and **whether the number that comes
 out is allowed to be quoted**.
+
+Four modules, split along the seam that the second half never needed the first:
+
+| Module | Holds | Depends on |
+|---|---|---|
+| `training.stages` | `STAGES`, `CODEC_VARIANTS`, `stage_plan`, `codec_variant_specs`, `trainable_parameters`, `autocast_for` | a `ModelConfig`, nothing else |
+| `training.checkpoint` | `EMA`, `SamplerState`, `TrainCheckpoint`, `save_train_checkpoint`, `load_train_checkpoint`, `checkpoint_soup` | a model and a path |
+| `training.loop` | `LoopConfig`, `StageResult`, `spec_digest`, `train_stage`, `run_schedule` | the two above |
+| `training.validate` | `predict`, `evaluate`, `ValidationReport`, `run_gates`, `output_sanity`, `leak_tripwires`, `measured_split_kind`, `validate_fold`, `aggregate_folds`, `FoldResult`, `RunReport` | a model and a frozen dataset — **not the loop** |
+
+Validation is the half of the old `training/loop.py` that takes a model and a
+dataset and nothing else, so the gates and the tripwires can be read without the
+trainer. The dependency runs one way only: `stages` and `checkpoint` import
+neither `loop` nor `validate`, and `validate` reaches up only for
+`stages.autocast_for`.
+
+`training.loop` re-exports every public name of the other three, so the
+`from training.loop import ...` lines below — and any written before the split —
+resolve unchanged.
 
 ```python
 import dataclasses, tempfile

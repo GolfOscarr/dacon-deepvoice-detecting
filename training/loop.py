@@ -73,7 +73,7 @@ __all__ = [
 class LoopConfig:
     """Run-level knobs. Everything model- or objective-shaped lives in the configs.
 
-    🔴 **Every field here is read by this module**, and
+    Critical: **every field here is read by this module**, and
     `tests/test_loop.py::test_no_loop_config_field_is_silently_ignored` enforces
     it. A knob that validates and then does nothing is worse than a missing
     knob: it makes an ablation report a difference it never tested
@@ -82,7 +82,7 @@ class LoopConfig:
 
     out_dir: Path = Path("runs/dev")
     n_buckets: int = 4
-    #: 0 disables the EMA entirely. ⚠️ Anything EMA- or checkpoint-related must
+    #: 0 disables the EMA entirely. Anything EMA- or checkpoint-related must
     #: skip Replay speed and start at Medium: Replay systematically favours ideas
     #: that help early in training (docs/validation/03 §2).
     ema_decay: float = 0.999
@@ -91,7 +91,7 @@ class LoopConfig:
     #: 0 = checkpoint at pass boundaries only. Any other value also checkpoints
     #: every N optimizer steps, which is what makes a mid-epoch resume testable.
     checkpoint_every: int = 0
-    #: Replay speed and the tests. ⚠️ A run with `max_steps` set is a truncated
+    #: Replay speed and the tests. A run with `max_steps` set is a truncated
     #: run -- `StageResult.truncated` says so, and it is not quotable.
     max_steps: int | None = None
 
@@ -111,7 +111,7 @@ class StageResult:
     steps: int
     passes_done: int
     loss_history: list[dict[str, float]] = field(default_factory=list)
-    #: `spec_digest` of the corpus each pass drew, in pass order. 🔴 Two equal
+    #: `spec_digest` of the corpus each pass drew, in pass order. Critical: two equal
     #: digests mean two passes trained on the same samples, which under S1 would
     #: make any cross-branch comparison an artefact of the schedule.
     pass_digests: list[str] = field(default_factory=list)
@@ -123,7 +123,7 @@ class StageResult:
     def caveats(self) -> tuple[str, ...]:
         """Everything about this stage a result must not be read without.
 
-        ⚠️ Pass these into `aggregate_folds(..., caveats=...)` so they reach the
+        Caveat: pass these into `aggregate_folds(..., caveats=...)` so they reach the
         ledger row -- a caveat that stops at the `StageResult` is a caveat
         nobody reads.
         """
@@ -139,7 +139,7 @@ class StageResult:
 def _schedule(plan: StagePlan, epochs: int) -> list[tuple[int, int]]:
     """The flat ``(group index, epoch within the group)`` pass list.
 
-    ⚠️ Flat, so `pass_index` alone locates a resume *and* keys the draw. Under S1
+    Flat, so `pass_index` alone locates a resume *and* keys the draw. Under S1
     that means five branch passes of `epochs` epochs each, every one drawing its
     own corpus -- rather than the same epoch-0 corpus five times, which would
     make the branches' training sets identical and their comparison a coincidence.
@@ -148,7 +148,7 @@ def _schedule(plan: StagePlan, epochs: int) -> list[tuple[int, int]]:
 
 
 def spec_digest(specs: Sequence[SampleSpec]) -> str:
-    """A stable fingerprint of a drawn corpus. 🔴 Measured, not asserted.
+    """A stable fingerprint of a drawn corpus. Measured, not asserted.
 
     `SamplerState` claims `pass_index` "doubles as the epoch key for the draw",
     so that every branch pass and every epoch sees its own corpus rather than
@@ -163,7 +163,7 @@ def spec_digest(specs: Sequence[SampleSpec]) -> str:
     covers the full `SampleSpec`, `normalize` included, so S3's codec variants
     change it too.
 
-    ⚠️ Not a substitute for the assertion: `tests/test_loop.py` checks the drawn
+    Caveat: not a substitute for the assertion: `tests/test_loop.py` checks the drawn
     spec *contents* directly and cross-checks the digest against them, because a
     digest that happened to include a counter would differ every pass and let the
     same mutation through again.
@@ -189,7 +189,7 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
     ``dataset`` must be a **training** `SpecDataset` (`from_sampler`): the loop
     calls `set_epoch`, and a frozen eval set refuses that on purpose.
 
-    ⚠️ Rendering happens inline rather than through a `DataLoader` with workers.
+    Caveat: rendering happens inline rather than through a `DataLoader` with workers.
     That is a deliberate limit, not an oversight: worker processes would put the
     draw behind a second, per-worker RNG and the bitwise-resume guarantee above
     would become a claim about `torch.utils.data`'s seeding. There is no corpus
@@ -210,7 +210,7 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
 
     passes = _schedule(plan, train_cfg.epochs)
     ema = EMA(model, loop_cfg.ema_decay) if loop_cfg.ema_decay else None
-    # ⚠️ fp16 only. bf16 has fp32's exponent range, so it needs no scaler, and an
+    # fp16 only. bf16 has fp32's exponent range, so it needs no scaler, and an
     # enabled scaler under bf16 would add a stateful factor to a run that does
     # not need one -- one more thing a resume can silently drop. `precision`
     # defaults to bf16 for exactly this reason; fp16 is the *inference* precision.
@@ -233,7 +233,7 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
             ema.load_state_dict(blob["ema"])
         _set_rng_state(blob["rng"])
         start = blob["sampler"]
-        # 🔴 A resume that redraws under a different key is a different run under
+        # Critical: a resume that redraws under a different key is a different run under
         # the same name. The draw is `(i, epoch, seed)` and `n`, so a mismatch in
         # either is fatal rather than a warning: nothing downstream can see it.
         if (start.epoch_seed, start.n_specs) != (dataset.seed, int(dataset.n_per_epoch)):
@@ -265,7 +265,7 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
                 scaler_state = None
         loss_cfg_model = _stage_loss_config(model.cfg, group)
 
-        # 🔴 `pass_index` is the epoch key, so every pass draws its own corpus --
+        # Critical: `pass_index` is the epoch key, so every pass draws its own corpus --
         # rather than five branch passes replaying epoch 0, which would make any
         # cross-branch comparison an artefact of the schedule. Recorded rather
         # than trusted: `pass_digests` is what a test can assert on.
@@ -290,7 +290,7 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
                 return result
 
             batch = _render_batch(specs, batches[batch_index], dataset.index, dataset.cfg)
-            # ⚠️ float32 in, and it stays float32: the model casts under autocast.
+            # float32 in, and it stays float32: the model casts under autocast.
             wav = prepare_waveform(batch["wav"].to(device), model.cfg.audio)
             lengths = batch["lengths"].to(device)
             targets = {k: v.to(device) for k, v in batch["targets"].items()}
@@ -302,7 +302,7 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(total).backward()
             if loop_cfg.grad_clip:
-                # 🔴 Unscale first. Clipping a *scaled* gradient clips at a
+                # Critical: unscale first. Clipping a *scaled* gradient clips at a
                 # threshold that moves with the scaler's own state, so the clip
                 # norm would mean something different on every step.
                 scaler.unscale_(optimizer)
@@ -356,12 +356,13 @@ def run_schedule(model: DeepVoiceNet, dataset: SpecDataset, *,
                  stages: Sequence[str] = STAGES) -> list[StageResult]:
     """S1 -> S2 -> S3 on one model, in order, carrying the weights forward.
 
-    🔷 ``codec_aware`` last and never skipped when time is short: it is the
-    **best-evidenced stage in the recipe** (★ ArtifactNet hard-negative FPR
-    98.7% -> 8.0%) and it is a schedule rather than an architecture, so it is
-    adopted regardless of how the frontend question resolves
-    (docs/training/04 §3). ⚠️ ``joint`` is kept on different grounds -- its EER
-    delta is 0.5 pts, below our local resolution -- so it is cheap, not measured.
+    Our own inference: ``codec_aware`` last and never skipped when time is
+    short. It is the **best-evidenced stage in the recipe** (ArtifactNet,
+    primary source: hard-negative FPR 98.7% -> 8.0%) and it is a schedule
+    rather than an architecture, so it is adopted regardless of how the
+    frontend question resolves (docs/training/04 §3). Caveat: ``joint`` is kept
+    on different grounds -- its EER delta is 0.5 pts, below our local
+    resolution -- so it is cheap, not measured.
     """
     for s in stages:
         stage_plan(s, model.cfg)              # refuse rank_polish before any work
