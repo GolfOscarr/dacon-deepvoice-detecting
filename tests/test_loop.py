@@ -222,6 +222,62 @@ def test_the_override_caveat_reaches_the_run_report(corpus, model_cfg, tmp_path)
     assert "freeze: false" in report.as_ledger_row()["caveats"]
 
 
+#: What `_mean_parts` adds around the loss terms, plus `multitask_loss`'s own
+#: `total`. Everything else in a row is one branch's head loss.
+_ROW_META = {"stage", "pass", "group", "n_batches", "total"}
+
+
+def _loss_terms(row):
+    assert isinstance(row["total"], float) and row["total"] == row["total"], row
+    return {k: v for k, v in row.items() if k not in _ROW_META}
+
+
+def test_the_loss_history_records_one_row_per_pass_with_that_pass_group(
+        corpus, model_cfg, tmp_path):
+    """Nothing asserted on `loss_history` at all: every row could be `{}`.
+
+    It is the stage's only record of what the objective actually was, and under
+    S1 it is also the observable that separates "each branch alone" as an
+    *objective* from the weight-level statement `tests/test_stages.py` makes.
+    `_stage_loss_config` hands `multitask_loss` the group's branches, and
+    `multitask_loss` puts one key per branch of the config it is given -- so a
+    pass that scored the whole model would show all five branches here.
+    """
+    torch.manual_seed(0)
+    result = train_stage(_model(model_cfg), _dataset(corpus, n=6),
+                         train_cfg=_train_cfg(stage="independent", epochs=1),
+                         loop_cfg=LoopConfig(out_dir=tmp_path, n_buckets=1,
+                                             ema_decay=0.0))
+    branches = list(model_cfg.branches)
+    assert len(result.loss_history) == result.passes_done == len(branches)
+
+    for pass_index, (row, branch) in enumerate(zip(result.loss_history, branches)):
+        assert (row["stage"], row["pass"], row["group"]) == ("independent",
+                                                             pass_index, branch)
+        assert row["n_batches"] == 3, row
+        terms = _loss_terms(row)
+        assert set(terms) == {branch}, (
+            f"pass {pass_index} trained {branch!r} alone but scored {sorted(terms)}")
+        assert all(isinstance(v, float) and v == v for v in terms.values()), row
+
+
+def test_a_joint_pass_scores_every_branch(corpus, model_cfg, tmp_path):
+    """Non-vacuity for the test above: the restriction is S1's, not the loop's.
+
+    If `_stage_loss_config` returned one branch regardless, or if `loss_history`
+    only ever recorded the first key it saw, the S1 test would still pass.
+    """
+    torch.manual_seed(0)
+    result = train_stage(_model(model_cfg), _dataset(corpus, n=6),
+                         train_cfg=_train_cfg(stage="joint", epochs=2),
+                         loop_cfg=LoopConfig(out_dir=tmp_path, n_buckets=1,
+                                             ema_decay=0.0))
+    assert len(result.loss_history) == 2
+    for row in result.loss_history:
+        assert row["group"] == "+".join(model_cfg.branches)
+        assert set(_loss_terms(row)) == set(model_cfg.branches), row
+
+
 def test_a_truncated_stage_says_it_is_not_quotable(corpus, model_cfg, tmp_path):
     """`max_steps` is Replay speed and the tests. Same mechanism, so a
     truncated run cannot reach the ledger looking like a full one."""

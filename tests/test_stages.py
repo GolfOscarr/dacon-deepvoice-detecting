@@ -26,8 +26,8 @@ from training.audit import audit_specs
 from training.loop import LoopConfig, train_stage
 from training.render import render
 from training.sampler import Sampler
-from training.stages import (CODEC_VARIANTS, STAGES, autocast_for,
-                             codec_variant_specs, stage_plan,
+from training.stages import (CODEC_VARIANTS, STAGES, _stage_loss_config,
+                             autocast_for, codec_variant_specs, stage_plan,
                              trainable_parameters)
 
 
@@ -160,6 +160,28 @@ def test_only_s1_overrides_the_field_s2_and_s3_honour_it(model_cfg):
         plan = stage_plan(stage, unfrozen)
         assert plan.train_frontends
         assert plan.freeze_overrides == () and plan.caveats == (), stage
+
+
+def test_stage_loss_config_restricts_the_branches_and_nothing_else(model_cfg):
+    """`_stage_loss_config` is "the one place that decides which heads take a
+    loss", and nothing asserted on it.
+
+    `multitask_loss` walks `cfg.branches`, so a restricted *config* is what makes
+    an S1 pass score one head. Handing it the whole config instead is silent
+    under S1 -- `trainable_parameters` still moves only the active branch, so the
+    weights come out bitwise identical -- but every pass would then report the
+    other four branches' loss terms and pay five times the head compute.
+    """
+    restricted = _stage_loss_config(model_cfg, ("voice",))
+    assert set(restricted.branches) == {"voice"}
+    # The per-head weights and the masks come along untouched: the same object,
+    # not a rebuilt one that could drop a field.
+    assert restricted.branches["voice"] is model_cfg.branches["voice"]
+    # ... and `branches` is the only thing that moved.
+    assert dataclasses.replace(restricted, branches=model_cfg.branches) == model_cfg
+
+    with pytest.raises(KeyError):
+        _stage_loss_config(model_cfg, ("no_such_branch",))
 
 
 def test_trainable_parameters_refuses_an_empty_set(model_cfg):
