@@ -386,9 +386,9 @@ def leak_tripwires(metrics: MetricSet, split_kind: str, detail: str = "") -> Aud
 
     | Row | Head | Suspicious if | Because |
     |---|---|---|---|
-    | L1 | music fake, unseen generator | **< 3% EER** | published cross-generator is 46.4% |
+    | L1 | music fake, unseen generator | **< 3% EER** | cross-generator is 46.4% |
     | L2 | voice fake, unseen generator | **< 1% EER** | ASVspoof 5's best is ~4% |
-    | L3 | every head L1/L2 did not read | perfect separation | no split makes EER 0.0 real |
+    | L3 | every head L1/L2 did not read | perfect separation | EER 0.0 is never real |
 
     Critical: L1 and L2 read `eer_music` and `eer_voice`. **L3 is the only row that
     ever reads `eer_file` -- the 0.45-weight head -- or the two presence AUCs**,
@@ -652,6 +652,7 @@ def run_gates(report: ValidationReport, *,
 #: import the trainer. A run whose caveat *says* it is not quotable and whose
 #: `quotable` column says otherwise is the contradiction this removes.
 NOT_QUOTABLE = "not quotable"
+
 
 @dataclass(frozen=True)
 class FoldResult:

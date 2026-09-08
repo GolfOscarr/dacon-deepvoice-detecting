@@ -942,6 +942,14 @@ reimplementation that "cleans up" any of them disagrees with the leaderboard.
 ⚠️ `evaluate` refuses a redrawable dataset, and `predict` uses `eval_batches` —
 in order, unbucketed, nothing dropped.
 
+🔴 **The predictions-to-specs join is checked, not assumed.** `prediction_frame`
+pairs `preds[i]` with `specs[i]` positionally, so `predict` carries `file_id`
+(`eval_file_id` of the spec the row was rendered from, taken from the same list
+the batch was built out of) and `prediction_frame` refuses a mapping that is not
+in the eval set's own order. A silent permutation moves the score and moves no
+gate: measured on the 40-row fixture, reversing each eval batch moved `score`
+0.5548 → 0.4492 with every gate green.
+
 🔴 **`LoopConfig.eval_precision` defaults to `fp32` and should stay there**, even
 though inference ships fp16. bf16 carries 8 mantissa bits, and squashing a bf16
 logit *ties files together*. Measured, and 🔴 the effect is size-dependent:
@@ -997,11 +1005,17 @@ assert "L1_music_unseen_generator" in blind.skipped   # SKIP, never PASS
 assert not blind.results["L3_perfect_separation"][0]  # the row that *does* apply
 ```
 
-| Head | Suspicious if | Because |
-|---|---|---|
-| music fake, unseen generator | **< 3% EER** | published cross-generator is **46.4%** |
-| voice fake, unseen generator | **< 1% EER** | ASVspoof 5's best is ~4% |
-| any head | perfect separation on a random split | re-split by generator |
+| Row | Head | Suspicious if | Because |
+|---|---|---|---|
+| L1 | music fake, unseen generator | **< 3% EER** | published cross-generator is **46.4%** |
+| L2 | voice fake, unseen generator | **< 1% EER** | ASVspoof 5's best is ~4% |
+| L3 | every head L1/L2 did not read | perfect separation | no split makes EER 0.0 real |
+
+🔴 **L3 runs on every split, and on a generator-disjoint one it is the only row
+that reads `eer_file` — the 0.45-weight head — or either presence AUC.** It used
+to SKIP there saying "L1/L2 cover this one", which was false in three heads of
+five: `leak_tripwires(eer_file=0.0, auc_vp=1.0, auc_mp=1.0, "generator_disjoint")`
+returned `ok=True`.
 
 ⚠️ It takes the `MetricSet` the **official harness already produced**, not a
 prediction frame — re-deriving these EERs would put a second EER implementation
@@ -1050,6 +1064,7 @@ said by name why they could not.
 | **VG3** adversarial validation | ⚠️ **SKIP — not implemented** |
 | **VG4** | `metrics.breakdown.t3_gap` |
 | **VG5** B1–B5 | `training.loop.output_sanity` |
+| **VG5** B4 | the same, and only when `run_gates(..., reference_ids=...)` names one |
 | **VG5** B2a | the same, qualifying B2 below the 1,200-row resolution floor |
 | **VG6** | the `probe_openings.log` line count, refused at 4 |
 
@@ -1093,17 +1108,29 @@ catch the *symptom* of a leak, and VG4's T3 gap is the matched control for the
 corpus-identity risk VG3 was cited for. The residual is drift that never surfaces
 as a too-good EER.
 
-🔴 A SKIP is not a pass and is not a failure. `RunReport.quotable` is `False` only
-for a *red* gate; skips are listed by name in `skipped_gates()` and printed by
-`__str__`, so the shortfall lands in the ledger rather than in a docstring. If a
-SKIP blocked, nothing would ever be quotable and the distinction would stop being
-read.
+🔴 A SKIP is not a pass and is not a failure. `RunReport.quotable` is `False` for
+a *red* gate, a fired tripwire, or a caveat carrying `NOT_QUOTABLE` — never for a
+SKIP. If a SKIP blocked, nothing would ever be quotable (VG3 skips on every run)
+and the distinction would stop being read. Where a SKIP lands instead is
+`gate_status()`, the schema's `vg1..vg6` tri-state, which reports a gate with any
+skipped sub-check as **`na`** rather than `pass`: fail beats na beats pass.
+
+⚠️ `NOT_QUOTABLE` is a *phrase* carried on a caveat, and that is the channel
+`StageResult.caveats` already uses. A **truncated** run — `LoopConfig.max_steps`,
+i.e. Replay speed — is not quotable however green its gates are
+([`docs/validation/03 §2`](../docs/validation/03-decision-protocol.md)), and
+truncation is a fact about the trainer, which `training.validate` does not
+import.
 
 ⚠️ **No experiment is quotable without a VG1–VG6 pass recorded alongside it**
 ([`docs/validation/04`](../docs/validation/04-audit-gates.md)). `run_gates` +
 `aggregate_folds` produce that record; `RunReport.as_ledger_row()` is the subset
 of [`docs/validation/03 §5`](../docs/validation/03-decision-protocol.md#5-experiment-ledger)'s
-schema this module can fill. The rest — `hypothesis`, `git_sha`, `parent_exp_id` —
+schema this module can fill — including `vg1..vg6`, `per_cell_eer`,
+`per_family_eer`, and both Tier-2 promotion inputs: `worst_cell_eer` for **P2**
+and `worst_family_eer` for **P3**. 🔴 Both are a **max over the file head's
+non-thin slices**; an unfiltered max reports the worst *voice*-head slice under a
+file-head name. The rest — `hypothesis`, `git_sha`, `parent_exp_id` —
 is the experiment runner's, and 🔴 `hypothesis` is written **before** the run.
 
 ---
