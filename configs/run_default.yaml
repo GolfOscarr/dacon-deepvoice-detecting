@@ -1,0 +1,108 @@
+# The shipped training run: what the sampler draws, how it is rendered, how the
+# corpus is split, and how the loop steps. Loaded by
+# `training.config.load_run_config`.
+#
+# Every field is written out even where it equals the default. There is
+# deliberately no inheritance between run configs: docs/validation/03's ledger
+# only distinguishes two runs if a row names every determinant, and a file that
+# says `f8: 1.0` and nothing else leaves the other twenty-odd knobs to whatever
+# the code happened to default to that week.
+#
+# The model and the objective are NOT here -- they are `models.config`'s
+# (configs/a_*.yaml, configs/b_*.yaml, configs/train_joint.yaml).
+
+sampler:
+  # The reference cell mix, verified against C1 and C3 (docs/pipelines/02 §4).
+  # `SamplerConfig.__post_init__` re-checks both, so an edit here that breaks a
+  # per-head positive rate or makes mixedness predict the label fails at load.
+  cell_mix:
+    p: {1: 0.060, 2: 0.130, 3: 0.060, 4: 0.135, 5: 0.155,
+        6: 0.125, 7: 0.125, 8: 0.095, 9: 0.115}
+  # T1's primary arm. 0.0 = label-conditional (natural and AI songs usable),
+  # 1.0 = strict (every mixed file composed) -- see configs/run_t1_strict.yaml.
+  # The whole point of the one-knob design is that the fallback is this value,
+  # not a second code path.
+  f8: 0.0
+  # 0.0 emits no composed voice-only or music-only samples at all. Raising it is
+  # what makes the gain draw a genuine ratio question again; see
+  # tests/test_sampler.py::test_restricting_gain_to_the_ratio_does_not_move_the_shipped_stream.
+  single_composed_rate: 0.0
+  # Caveat: read only when `balance_marginal_composedness` is false. With the
+  # balance on, cell 9's composed fraction is SOLVED and this value is
+  # overwritten -- see tests/test_sampler.py's knob table.
+  noise_composed_rate: 0.0
+  # Closes the marginal composedness gap that the stratified constraint leaves:
+  # 0.121 measured without it (P(composed|REAL) 0.2875 vs P(composed|FAKE)
+  # 0.4090). Costs nothing -- a composed cell-9 sample is a pool-E noise draw.
+  balance_marginal_composedness: true
+  # DOSS per-domain cap, as a sampling weight so nothing is discarded.
+  # 0.2k h domain-balanced -> 2.77% EER vs 6.4k h naive -> 3.29% (docs/papers/05).
+  domain_cap: 500
+  # The competition's own duration range (competition/01); AudioConfig agrees.
+  duration_range: [4.0, 60.0]
+  # The voice/music LEVEL RATIO, skewed quiet: G2Net models generalise
+  # low-SNR -> high-SNR and not the reverse (A-A3).
+  gain_db_range: [-15.0, 15.0]
+  gain_db_mean: -3.6
+  gain_db_sigma: 4.0
+  sequential_prob: 0.25
+  crossfade_ms_range: [10.0, 200.0]
+  # A-A8 / A-A11 as draws rather than augments. Caveat: switching them on
+  # changes the drawn stream and needs an I1b re-run. At 0.0 no RNG draw
+  # happens, so the shipped stream is byte-identical.
+  silence_lead_s: 0.0
+  silence_tail_s: 0.0
+  scheme_version: synthetic-v1
+  # Critical: leave false. True accepts a cell mix that violates C1 or C3, and
+  # a run drawn from one is not quotable -- the loss is unsound
+  # (docs/training/02 §8). It exists for the audit's own mutation tests.
+  allow_unsound_mix: false
+
+render:
+  # Manifest paths are relative to this.
+  root: .
+  audio:
+    sample_rate: 16000
+    min_seconds: 4.0
+    max_seconds: 60.0
+    channels: downmix
+    band_hz: null
+  # A callable, so YAML carries its NAME and `training.config.RESAMPLERS`
+  # resolves it. A name that is not in that table raises rather than falling
+  # back to the default -- if G1's forensics name the organizers' kernel,
+  # matching it is worth more than kernel quality (A-S1).
+  resampler: training.render.resample_poly_to
+  # sigmoid beats a hard cut, which becomes a splice shortcut (A-A4).
+  crossfade_shape: sigmoid
+  # I12, the length-regime guard. Off only for tests that build a deliberate
+  # violation: `tanh` attention was correct at T~=250 and a mean pool at
+  # T~=3000, ~12x worse (docs/pipelines/04 §1).
+  check_duration: true
+
+folds:
+  n_folds: 5
+  # ~10% of families sealed into PROBE. The TRAIN and VAL shares are not knobs
+  # under rotation -- they follow from n_folds (docs/validation/01 §3).
+  probe_share: 0.10
+  # null stamps the manifest's own version onto the table.
+  scheme_version: null
+  caveat_families_per_val_fold: 2
+  require_component_coverage: true
+  # Critical: leave false. PROBE is what catches "we tuned against VAL until VAL
+  # became a training set", and building without it must be asked for.
+  allow_no_probe: false
+  # null stamps the build time; set it to freeze a table for a reproducible test.
+  assigned_at: null
+
+loop:
+  out_dir: runs/dev
+  n_buckets: 4
+  # 0 disables the EMA entirely.
+  ema_decay: 0.999
+  grad_clip: 5.0
+  device: cpu
+  # 0 = checkpoint at pass boundaries only.
+  checkpoint_every: 0
+  # Critical: a run with max_steps set is a TRUNCATED run. StageResult.truncated
+  # says so, and its numbers are not quotable.
+  max_steps: null
