@@ -22,6 +22,7 @@ from models.config import (
     load_train_config,
     validate_model_config,
 )
+from training.config import load_run_config
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CONFIGS = ROOT / "configs"
@@ -52,10 +53,20 @@ def _built(raw):
 # the shipped configs
 
 def test_every_shipped_config_loads():
+    """Critical: dispatched by filename prefix, and every prefix is handled.
+
+    `run_*` is `training.config`'s: the sampler, renderer, fold builder and loop
+    settings, which `load_model_config` would reject as unknown keys. The
+    `else` branch used to catch them, so adding a run config turned this red --
+    which is the right failure, but the fix is to name the third loader rather
+    than to skip the file.
+    """
     assert SHIPPED, "no configs found"
     for path in SHIPPED:
         if path.name.startswith("train"):
             load_train_config(path)
+        elif path.name.startswith("run"):
+            load_run_config(path)
         else:
             load_model_config(path)
 
