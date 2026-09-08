@@ -57,7 +57,7 @@ row has no cell, and they are already implemented in
 A1-A7 and A10 are not here either, and neither is the emitted schema: they judge
 a table rather than build one, so they live in `training.foldcheck` and are
 re-exported from here (`check_split_integrity`, `validate_folds`, `load_folds`,
-`FOLD_COLUMNS`, `SLICES`).
+`FOLD_COLUMNS`, `FOLD_SLICES`).
 """
 
 from __future__ import annotations
@@ -70,11 +70,11 @@ from typing import Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-from training.foldcheck import (FOLD_COLUMNS, SLICES, check_split_integrity,
+from training.foldcheck import (FOLD_COLUMNS, FOLD_SLICES, check_split_integrity,
                                load_folds, validate_folds)
 from training.manifest import POOL_IS_FAKE, validate_manifest
 
-__all__ = ["FOLD_COLUMNS", "GROUPING_KEYS", "HEADS", "SLICES",
+__all__ = ["FOLD_COLUMNS", "FOLD_SLICES", "GROUPING_KEYS", "HEADS",
            "FoldConfig", "FoldInfeasible", "FoldPlan",
            "apply_folds", "build_folds", "check_split_integrity",
            "grouping_atoms", "load_folds", "validate_folds"]
@@ -87,7 +87,6 @@ GROUPING_KEYS: tuple[str, ...] = (
     "artifact_family", "source_name", "speaker_ref_id", "pair_id", "dup_group")
 
 #: What the emitted `slice` column holds. `train_val` rotates; `probe` is sealed.
-SLICES: tuple[str, ...] = ("train_val", "shadow", "probe")
 
 HEADS: tuple[str, ...] = ("voice", "music")
 
@@ -232,7 +231,7 @@ class FoldPlan:
         per_fold = self.frame[self.frame["slice"] == "train_val"].groupby(
             "fold").size().to_dict()
         head = (f"folds: {self.n_folds} rotating over "
-                + ", ".join(f"{s}={counts.get(s, 0)}" for s in SLICES)
+                + ", ".join(f"{s}={counts.get(s, 0)}" for s in FOLD_SLICES)
                 + f"; VAL rows per fold {per_fold}")
         return "\n".join([head] + [f"  CAVEAT: {c}" for c in self.caveats])
 

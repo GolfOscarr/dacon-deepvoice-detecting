@@ -14,7 +14,7 @@ oracle for a table this module built.
 import pandas as pd
 import pytest
 
-from training.folds import (FOLD_COLUMNS, SLICES, FoldConfig, FoldInfeasible,
+from training.folds import (FOLD_COLUMNS, FOLD_SLICES, FoldConfig, FoldInfeasible,
                             apply_folds, build_folds, check_split_integrity,
                             grouping_atoms, load_folds)
 from training.sampler import Sampler
@@ -74,7 +74,7 @@ def test_every_manifest_row_is_assigned_exactly_once(manifest, folds):
     assert len(folds) == len(manifest)
     assert set(folds.file_id) == set(manifest.file_id.astype(str))
     assert not folds.file_id.duplicated().any()
-    assert set(folds["slice"]) <= set(SLICES)
+    assert set(folds["slice"]) <= set(FOLD_SLICES)
 
 
 # --------------------------------------------------------------------------- #

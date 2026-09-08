@@ -19,7 +19,7 @@ import pandas as pd
 
 from training.audit import AuditReport
 
-__all__ = ["FOLD_COLUMNS", "SLICES",
+__all__ = ["FOLD_COLUMNS", "FOLD_SLICES",
            "check_split_integrity", "load_folds", "validate_folds"]
 
 #: docs/validation/01 §3, in the order the spec lists them.
@@ -30,7 +30,7 @@ FOLD_COLUMNS: tuple[str, ...] = (
 )
 
 #: What the emitted `slice` column holds. `train_val` rotates; `probe` is sealed.
-SLICES: tuple[str, ...] = ("train_val", "shadow", "probe")
+FOLD_SLICES: tuple[str, ...] = ("train_val", "shadow", "probe")
 
 
 def validate_folds(df: pd.DataFrame) -> pd.DataFrame:
@@ -43,9 +43,9 @@ def validate_folds(df: pd.DataFrame) -> pd.DataFrame:
     if df.file_id.duplicated().any():
         dup = df.file_id[df.file_id.duplicated()].unique()[:5].tolist()
         raise ValueError(f"duplicate file_id(s): {dup}")
-    bad = set(df["slice"].unique()) - set(SLICES)
+    bad = set(df["slice"].unique()) - set(FOLD_SLICES)
     if bad:
-        raise ValueError(f"unknown slice(s) {sorted(bad)}; expected {SLICES}")
+        raise ValueError(f"unknown slice(s) {sorted(bad)}; expected {FOLD_SLICES}")
     bad = set(df.shadow_kind.dropna().unique()) - {"a", "b"}
     if bad:
         raise ValueError(f"shadow_kind must be a|b|null, got {sorted(bad)}")

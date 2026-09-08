@@ -16,11 +16,11 @@ import pandas as pd
 
 from training.spec import CELL_TABLE, is_fake_cell
 
-__all__ = ["POOLS", "POOL_LABELS", "REQUIRED_COLUMNS", "ROW_KINDS", "SLICES",
+__all__ = ["POOLS", "POOL_LABELS", "REQUIRED_COLUMNS", "ROW_KINDS", "MANIFEST_SLICES",
            "load_manifest", "validate_manifest"]
 
 ROW_KINDS = ("component", "whole_file")
-SLICES = ("train", "val", "shadow", "probe")
+MANIFEST_SLICES = ("train", "val", "shadow", "probe")
 POOLS = ("A", "B", "C", "D", "E")          # real/fake voice, real/fake instr., noise
 
 #: docs/pipelines/01 §2. Ordered so a written manifest is diffable.
@@ -99,9 +99,9 @@ def validate_manifest(df: pd.DataFrame) -> pd.DataFrame:
     bad = set(df.row_kind.unique()) - set(ROW_KINDS)
     if bad:
         raise ValueError(f"unknown row_kind(s) {sorted(bad)}; expected {ROW_KINDS}")
-    bad = set(df.slice.unique()) - set(SLICES)
+    bad = set(df.slice.unique()) - set(MANIFEST_SLICES)
     if bad:
-        raise ValueError(f"unknown slice(s) {sorted(bad)}; expected {SLICES}")
+        raise ValueError(f"unknown slice(s) {sorted(bad)}; expected {MANIFEST_SLICES}")
 
     comp, whole = df.row_kind == "component", df.row_kind == "whole_file"
 

@@ -311,3 +311,26 @@ def test_validate_folds_rejects_a_cell_on_a_component_row(folds):
     broken.loc[broken.index[broken.row_kind == "component"][0], "cell"] = 5
     with pytest.raises(ValueError, match="cell must be non-null exactly"):
         validate_folds(broken)
+
+
+def test_the_manifest_and_fold_slice_vocabularies_are_not_the_same_thing():
+    """Critical: two constants, two vocabularies, and they must not converge.
+
+    `MANIFEST_SLICES` is the materialised view a sampler draws from -- `val` is
+    a real value there. `FOLD_SLICES` is the stored column in `folds.parquet`,
+    where the same rows are `train_val` and `val` does not exist until
+    `apply_folds` resolves it against a fold number.
+
+    Both were named `SLICES` and both were exported. `training/folds.py`
+    imported one and then redeclared the other four lines later, shadowing the
+    import, so its own docstring's claim to re-export the constant was false and
+    the two could drift apart without a single caller changing. Renaming is the
+    fix; this asserts the distinction the names now carry, because a later
+    "tidy-up" that unified them would silently make `val` a legal fold slice.
+    """
+    from training.foldcheck import FOLD_SLICES
+    from training.manifest import MANIFEST_SLICES
+
+    assert "val" in MANIFEST_SLICES and "val" not in FOLD_SLICES
+    assert "train_val" in FOLD_SLICES and "train_val" not in MANIFEST_SLICES
+    assert set(MANIFEST_SLICES) != set(FOLD_SLICES)
