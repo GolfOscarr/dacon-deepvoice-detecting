@@ -1,15 +1,15 @@
 """What a training sample *is*, as data, before any audio is touched.
 
-🔴 The whole pipeline rests on one split: deciding what a sample is
+Critical: the whole pipeline rests on one split -- deciding what a sample is
 (`SampleSpec`) is separate from rendering it. A spec is a small serialisable
 value, so the expensive guarantees become cheap -- the shortcut audit is a
 frequency table over specs rather than a corpus decode, the evaluation set is
 frozen as *specs* rather than a seed, and byte-reproducibility is
 ``render(spec) == render(spec)`` (docs/pipelines/01 §1).
 
-🔴 The labels are a pure function of ``cell`` and nothing else. `transforms` and
-`normalize` cannot reach them. That is ``P(T | L) = P(T)`` made structural
-rather than conventional.
+Critical: the labels are a pure function of ``cell`` and nothing else.
+`transforms` and `normalize` cannot reach them. That is ``P(T | L) = P(T)``
+made structural rather than conventional.
 """
 
 from __future__ import annotations
@@ -42,9 +42,9 @@ CELL_TABLE: dict[int, tuple[int, int, int | None, int | None]] = {
     9: (0, 0, None, None),   # neither
 }
 
-#: Presence stratum per cell. 🔴 The composedness balance is enforced *within*
-#: each stratum, not marginally: a marginal balance can hold while "composed"
-#: predicts the label inside a stratum (docs/pipelines/02 §3).
+#: Presence stratum per cell. Critical: the composedness balance is enforced
+#: *within* each stratum, not marginally: a marginal balance can hold while
+#: "composed" predicts the label inside a stratum (docs/pipelines/02 §3).
 STRATA: dict[int, str] = {
     c: ("mixed" if v and m else "voice-only" if v else "music-only" if m else "neither")
     for c, (v, m, _, _) in CELL_TABLE.items()
@@ -58,9 +58,10 @@ def cell_labels(cell: int) -> dict[str, int | None]:
     written down, because the competition defines it as OR over *present*
     components and there is exactly one implementation of that in this repo.
 
-    ⚠️ Absent components are passed as ``0``, not ``None``. ``file_fake_label``
-    survives ``None`` only because ``np.asarray(None).astype(bool)`` is ``True``
-    and the presence mask happens to zero it -- incidental, not a contract.
+    Caveat: absent components are passed as ``0``, not ``None``.
+    ``file_fake_label`` survives ``None`` only because
+    ``np.asarray(None).astype(bool)`` is ``True`` and the presence mask happens
+    to zero it -- incidental, not a contract.
     """
     if cell not in CELL_TABLE:
         raise ValueError(f"cell must be 1-9, got {cell!r}")
@@ -91,8 +92,8 @@ def cells_in_stratum(stratum: str) -> tuple[int, ...]:
 def spec_rng(sample_id: int, epoch: int, seed: int) -> np.random.Generator:
     """The one RNG a sample is allowed to use.
 
-    🔴 Keyed on ``(sample_id, epoch, seed)`` and hashed with blake2b, **not**
-    Python's ``hash()``: string hashing is salted per process, so a
+    Critical: keyed on ``(sample_id, epoch, seed)`` and hashed with blake2b,
+    **not** Python's ``hash()``: string hashing is salted per process, so a
     ``hash()``-keyed stream would be reproducible within a run and different
     across runs -- the exact opposite of what A-S2 asks for.
     """
@@ -127,11 +128,11 @@ class ComponentDraw:
 class SampleSpec:
     """The complete, serialisable decision to build one training sample.
 
-    Every field is drawn before any file is opened. ⚠️ ``duration_s`` is drawn
-    **first** and components are placed on that timeline -- an earlier design
-    cropped last, which renders audio only to discard it (expensive given the
-    codec round-trips) and makes frame targets a post-hoc re-slice instead of
-    exact by construction.
+    Every field is drawn before any file is opened. Caveat: ``duration_s`` is
+    drawn **first** and components are placed on that timeline -- an earlier
+    design cropped last, which renders audio only to discard it (expensive
+    given the codec round-trips) and makes frame targets a post-hoc re-slice
+    instead of exact by construction.
     """
 
     sample_id: int

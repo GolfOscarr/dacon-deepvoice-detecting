@@ -1,7 +1,7 @@
 """The manifest: one row per source file, and the only thing the pipeline reads
 about the corpus.
 
-🔴 Two kinds of row, and everything branches on ``row_kind``
+Critical: two kinds of row, and everything branches on ``row_kind``
 (docs/pipelines/01 §2). A **component** row is drawn and composed; a
 **whole_file** row is used as-is. ``cell`` is a property of a *composition*, so
 it is null on component rows -- a component file drawn from pool A has no cell
@@ -63,8 +63,8 @@ def validate_manifest(df: pd.DataFrame) -> pd.DataFrame:
 
     comp, whole = df.row_kind == "component", df.row_kind == "whole_file"
 
-    # 🔴 Exactly one of pool/cell is meaningful per row kind. This is the
-    # invariant the fold-table redesign turned on (docs/validation/01 §3).
+    # Critical: exactly one of pool/cell is meaningful per row kind. This is
+    # the invariant the fold-table redesign turned on (docs/validation/01 §3).
     if df.loc[comp, "pool"].isna().any():
         raise ValueError("component rows must carry a pool (A-E)")
     if df.loc[comp, "cell"].notna().any():
@@ -77,10 +77,11 @@ def validate_manifest(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(
             "whole_file rows must have pool = null -- a whole file is used as-is, "
             "not drawn from a component pool")
-    # 🔴 Cells 6 and 7 hold one real and one fake component, so they cannot be
-    # scraped. Without this, a manifest carrying such a row validates, the fold
-    # table is built from it, and the failure only surfaces inside
-    # SampleSpec.__post_init__ at draw time -- long after the split is frozen.
+    # Critical: cells 6 and 7 hold one real and one fake component, so they
+    # cannot be scraped. Without this, a manifest carrying such a row
+    # validates, the fold table is built from it, and the failure only surfaces
+    # inside SampleSpec.__post_init__ at draw time -- long after the split is
+    # frozen.
     bad_cells = sorted({int(c) for c in df.loc[whole, "cell"].dropna()} & {6, 7})
     if bad_cells:
         raise ValueError(
@@ -94,8 +95,8 @@ def validate_manifest(df: pd.DataFrame) -> pd.DataFrame:
     if cells:
         raise ValueError(f"unknown cell(s) {sorted(cells)}; expected 1-9")
 
-    # ⚠️ A whole_file row's stored labels must agree with its cell, or the two
-    # label sources disagree and the sampler silently picks one.
+    # Caveat: a whole_file row's stored labels must agree with its cell, or the
+    # two label sources disagree and the sampler silently picks one.
     for _, row in df.loc[whole].iterrows():
         vp, mp, vf, mf = CELL_TABLE[int(row.cell)]
         got = (row.label_voice_present, row.label_music_present)

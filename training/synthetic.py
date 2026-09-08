@@ -1,12 +1,12 @@
 """A synthetic manifest, and the synthetic corpus it names.
 
-🔴 Not test scaffolding -- a first-class deliverable. The corpus does not exist
-and will not for days (docs/data/08), while the sampler, the audit and the fold
-builder are all buildable now. This module is what lets M1-M4 be written and
-fully tested before a single real file is downloaded.
+Critical: not test scaffolding -- a first-class deliverable. The corpus does
+not exist and will not for days (docs/data/08), while the sampler, the audit
+and the fold builder are all buildable now. This module is what lets M1-M4 be
+written and fully tested before a single real file is downloaded.
 
-⚠️ It deliberately generates a corpus with **realistic pathologies**: unequal
-family sizes, over-represented generator domains, duplicate groups and
+Caveat: it deliberately generates a corpus with **realistic pathologies**:
+unequal family sizes, over-represented generator domains, duplicate groups and
 resynthesis twins. A generator that produced a perfectly balanced corpus would
 make the audit vacuous.
 """
@@ -32,8 +32,8 @@ _FAKE_FAMILIES = {"B": ("hifigan", "bigvgan", "encodec", "vocos", "dac",
                   "D": ("suno_v3", "udio_v1", "musicgen", "stable_audio",
                         "riffusion", "boomy", "audioldm", "unknown_music")}
 
-#: 🔴 Which (fake family, real source) combinations were resynthesized into
-#: T1/T2/T3 twins -- `(fake pool, real pool, family index, source index)`.
+#: Critical: which (fake family, real source) combinations were resynthesized
+#: into T1/T2/T3 twins -- `(fake pool, real pool, family index, source index)`.
 #:
 #: Twins are **not** a property of every fake row. A twin is a file *we* generate
 #: (docs/data/05 S-S1), so the set of (corpus, vocoder) combinations that carry
@@ -50,11 +50,11 @@ _TWIN_COMBINATIONS = (("B", "A", 0, 0), ("B", "A", 1, 1), ("D", "C", 0, 0))
 def _widen(names: tuple[str, ...], n: int | None, what: str) -> tuple[str, ...]:
     """`names`, cycled with a numeric suffix out to `n` entries. `None` = as-is.
 
-    ⚠️ Exists so a test can build a corpus that *can* support the fold count it
-    asks for -- never so the builder can assume one does. Under the rotating
-    scheme (docs/validation/01 §3) the fold count is bounded by the number of
-    real source corpora per role as well as by the family count: each of the k
-    VAL sides needs its own, and PROBE needs one more.
+    Caveat: exists so a test can build a corpus that *can* support the fold
+    count it asks for -- never so the builder can assume one does. Under the
+    rotating scheme (docs/validation/01 §3) the fold count is bounded by the
+    number of real source corpora per role as well as by the family count: each
+    of the k VAL sides needs its own, and PROBE needs one more.
     """
     if n is None:
         return names
@@ -91,10 +91,10 @@ def _assign_twins(rows: list[dict], fam_names: dict[str, tuple[str, ...]],
 def _family_names(pool: str, n_families: int | None) -> tuple[str, ...]:
     """The generator families of one fake pool, optionally widened.
 
-    ⚠️ The default eight per pool is below what a 5-fold needs once ~25% of
-    families are held out for VAL (docs/validation/01 §3). `n_families` exists so
-    a test can build a corpus that *can* support the requested fold count --
-    never so the builder can assume one does.
+    Caveat: the default eight per pool is below what a 5-fold needs once ~25%
+    of families are held out for VAL (docs/validation/01 §3). `n_families`
+    exists so a test can build a corpus that *can* support the requested fold
+    count -- never so the builder can assume one does.
     """
     return _widen(_FAKE_FAMILIES[pool], n_families, "n_families")
 
@@ -111,9 +111,9 @@ def synthetic_manifest(
     """A manifest with the shape and the pathologies of the real thing.
 
     ``n_per_pool`` component rows in each of A-E, plus ``n_whole_file`` rows
-    spread over the cells that can be scraped whole (1-5, 8, 9). ⚠️ Cells 6 and
-    7 are deliberately absent from the whole-file rows: they cannot be scraped,
-    which is the entire reason two fake heads exist.
+    spread over the cells that can be scraped whole (1-5, 8, 9). Caveat: cells
+    6 and 7 are deliberately absent from the whole-file rows: they cannot be
+    scraped, which is the entire reason two fake heads exist.
 
     ``n_families`` widens each fake pool beyond its default eight generators, and
     ``n_sources`` each real pool beyond its default three corpora.
@@ -130,9 +130,9 @@ def synthetic_manifest(
         container = str(rng.choice(_CONTAINERS))
         rows.append({
             "file_id": file_id,
-            # ⚠️ The extension agrees with `container` here, but nothing in the
-            # pipeline may rely on that: P-S1 says "never assume the extension",
-            # and the eval server hands us mixed containers.
+            # Caveat: the extension agrees with `container` here, but nothing
+            # in the pipeline may rely on that: P-S1 says "never assume the
+            # extension", and the eval server hands us mixed containers.
             "path": f"pools/{pool or 'whole'}/{file_id}.{container}",
             "sha256": f"{abs(hash(file_id)) & 0xFFFFFFFFFFFF:012x}",
             "row_kind": row_kind,
@@ -161,8 +161,8 @@ def synthetic_manifest(
         fake = POOL_IS_FAKE[pool]
         if fake:
             fams = fam_names[pool]
-            # ⚠️ Zipf-ish family sizes: a handful of generators dominate, which is
-            # exactly the imbalance DOSS capping exists to flatten.
+            # Caveat: Zipf-ish family sizes: a handful of generators dominate,
+            # which is exactly the imbalance DOSS capping exists to flatten.
             weights = np.array([1.0 / (i + 1) for i in range(len(fams))])
             weights /= weights.sum()
             picks = rng.choice(len(fams), size=n_per_pool, p=weights)
@@ -182,9 +182,10 @@ def synthetic_manifest(
                 fam, src, dom = None, srcs[picks[i]], None
                 labels = ((1, 0, 0, None) if pool == "A" else
                           (0, 1, None, 0) if pool == "C" else (0, 0, None, None))
-                # ⚠️ `dup_group` is namespaced by source. A near-duplicate hash
-                # group spanning LibriTTS and MUSDB18 is not a thing, and an
-                # unnamespaced `dup{k}` fused every real corpus into one group.
+                # Caveat: `dup_group` is namespaced by source. A near-duplicate
+                # hash group spanning LibriTTS and MUSDB18 is not a thing, and
+                # an unnamespaced `dup{k}` fused every real corpus into one
+                # group.
                 extra = {"speaker": f"{src}_spk{rng.integers(0, 60)}",
                          "dup": (f"{src}_dup{rng.integers(0, 40)}"
                                  if rng.random() < 0.08 else None)}
@@ -220,10 +221,11 @@ def synthetic_manifest(
 # --------------------------------------------------------------------------- #
 # A synthetic *corpus* -- the audio the manifest promises exists
 #
-# 🔴 Same reason as the manifest: `render`, the collator and the rule-2.4 suite
-# are all buildable now, and the corpus will not exist for days (docs/data/08).
-# Without this, every render test would be a mock, and a mock cannot catch a
-# decode, resample or codec defect -- which is where the failures actually are.
+# Critical: same reason as the manifest -- `render`, the collator and the
+# rule-2.4 suite are all buildable now, and the corpus will not exist for days
+# (docs/data/08). Without this, every render test would be a mock, and a mock
+# cannot catch a decode, resample or codec defect -- which is where the
+# failures actually are.
 
 
 def _tone_bank(rng: np.random.Generator, n: int, sr: int, kind: str) -> np.ndarray:
@@ -255,8 +257,9 @@ def write_synthetic_corpus(manifest: pd.DataFrame, root: Path | str,
 
     Deterministic per ``file_id``, so two runs produce byte-identical corpora and
     a reproducibility test is testing the pipeline rather than the fixture.
-    ⚠️ Sizes follow ``duration_s``: pass ``synthetic_manifest(duration_range=...)``
-    something small before calling this.
+    Caveat: sizes follow ``duration_s`` -- pass
+    ``synthetic_manifest(duration_range=...)`` something small before calling
+    this.
     """
     import soundfile as sf
 
