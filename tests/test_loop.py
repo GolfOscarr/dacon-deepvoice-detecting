@@ -98,12 +98,13 @@ def test_a_truncated_stage_says_it_is_not_quotable(corpus, model_cfg, tmp_path):
 #: -- the mid-epoch half of the resume would have gone untested while every
 #: assertion below still passed.
 def _run(model_cfg, corpus, out, *, max_steps=None, resume_from=None, n=6,
-         epochs=2, ckpt_every=0, torch_seed=1234):
+         epochs=2, ckpt_every=0, torch_seed=1234, precision=None):
     model = _model(model_cfg)
     torch.manual_seed(torch_seed)
     ds = _dataset(corpus, n=n)
+    extra = {} if precision is None else {"precision": precision}
     result = train_stage(
-        model, ds, train_cfg=_train_cfg(stage="joint", epochs=epochs),
+        model, ds, train_cfg=_train_cfg(stage="joint", epochs=epochs, **extra),
         loop_cfg=LoopConfig(out_dir=out, n_buckets=1, ema_decay=0.99,
                             max_steps=max_steps, checkpoint_every=ckpt_every),
         resume_from=resume_from)
@@ -215,6 +216,98 @@ def test_dropping_the_optimizer_state_makes_the_resume_diverge(corpus, model_cfg
                     optimizer=None)
     resumed, _ = _run(model_cfg, corpus, tmp_path / "resume", resume_from=bare)
     assert not _same(_flat(full), _flat(resumed))
+
+
+def _scaler_state(path):
+    return torch.load(path, map_location="cpu", weights_only=False)["scaler"]
+
+
+def _tagged(result, suffix):
+    """The checkpoint this run wrote under `<stage>-<suffix>`."""
+    return next(c.path for c in result.checkpoints if c.path.name.endswith(suffix))
+
+
+def test_the_mid_epoch_checkpoint_carries_the_fp16_loss_scale(corpus, model_cfg,
+                                                              tmp_path):
+    """The `checkpoint_every` call site used to drop `scaler=`, and only it.
+
+    Critical: this needs **both** `checkpoint_every > 0` and `precision="fp16"`,
+    and the two holes are independent, which is why nothing caught it:
+
+    * at bf16 the mid-epoch file's `scaler: None` is the *correct* value
+      (`save_train_checkpoint` stores nothing unless `scaler.is_enabled()`), and
+      `configs/train_joint.yaml` -- the config every test in this suite loads --
+      says bf16;
+    * at the default `checkpoint_every = 0` the branch never runs at all, so the
+      only two call sites exercised are the truncated one and the pass-boundary
+      one, and both always passed the scaler.
+
+    Asserted on the **resumed scaler state** rather than on the weights: over a
+    6-step run the scale never leaves its initial 65536, so the two runs' weights
+    coincide and the growth tracker is the only thing that moves. The test below
+    is the one where the divergence reaches the weights.
+    """
+    full, res_full = _run(model_cfg, corpus, tmp_path / "full", ckpt_every=1,
+                          precision="fp16")
+    mid = _tagged(res_full, "step2.pt")
+    assert _scaler_state(mid) is not None, (
+        "the mid-epoch checkpoint wrote `scaler: None` under fp16: a resume from "
+        "it rebuilds the loss scaler at its default and replays the warm-up")
+
+    ending = _scaler_state(_tagged(res_full, "pass1.pt"))
+    # Non-vacuity: a scaler that never advanced would make the comparison below
+    # true for the wrong reason. It advances once per successful step.
+    assert ending["_growth_tracker"] == res_full.steps == 6, ending
+
+    resumed, res_resume = _run(model_cfg, corpus, tmp_path / "resume",
+                               ckpt_every=1, precision="fp16", resume_from=mid)
+    assert _scaler_state(_tagged(res_resume, "pass1.pt")) == ending, (
+        "the resumed run's loss scaler is not where the uninterrupted run's is")
+    assert _same(_flat(full), _flat(resumed))
+
+
+def test_a_resume_keeps_a_backed_off_loss_scale_rather_than_restarting_at_65536(
+        corpus, model_cfg, tmp_path, monkeypatch):
+    """The same hole where it reaches the weights, not only the tracker.
+
+    An inf gradient on step 2 makes `GradScaler` skip that step and halve the
+    scale to 32768. A checkpoint written after it that forgot the scaler sends
+    the resumed run back to 65536, so from there on the two runs scale their
+    gradients by different amounts and round differently in fp16 -- 5.5e-07 of
+    max weight divergence when this was broken, against bitwise equality now.
+
+    The inf is injected into the loss rather than faked in the scaler: what is
+    under test is that the loop's own scaler state survives the round trip.
+    """
+    import training.loop as loop_mod
+
+    real_loss = loop_mod.multitask_loss
+    calls = {"n": 0}
+
+    def inf_on_step_two(*args, **kwargs):
+        total, parts = real_loss(*args, **kwargs)
+        calls["n"] += 1
+        return (total * float("inf"), parts) if calls["n"] == 2 else (total, parts)
+
+    monkeypatch.setattr(loop_mod, "multitask_loss", inf_on_step_two)
+
+    full, res_full = _run(model_cfg, corpus, tmp_path / "full", ckpt_every=1,
+                          precision="fp16")
+    mid = _tagged(res_full, "step2.pt")
+    backed_off = _scaler_state(mid)
+    assert backed_off is not None and backed_off["scale"] == 32768.0, (
+        f"the mid-epoch checkpoint should hold the backed-off scale: {backed_off}")
+
+    # The resumed run picks up after the backed-off step, so the injection must
+    # not fire again: the counter is already past it.
+    calls["n"] = 2
+    resumed, _ = _run(model_cfg, corpus, tmp_path / "resume", ckpt_every=1,
+                      precision="fp16", resume_from=mid)
+
+    assert _scaler_state(_tagged(res_full, "pass1.pt"))["scale"] == 32768.0
+    assert _same(_flat(full), _flat(resumed)), (
+        "the resumed run restarted the loss scaler at its default and diverged "
+        f"by {_max_abs_diff(_flat(full), _flat(resumed)):.3e}")
 
 
 def test_resuming_a_dataset_that_draws_differently_is_refused(corpus, model_cfg,

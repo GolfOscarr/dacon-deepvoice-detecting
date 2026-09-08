@@ -320,7 +320,8 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
                 _checkpoint(result, model, optimizer, ema, stage,
                             SamplerState(pass_index, start.epoch_seed,
                                          start.n_specs, batch_seed, batch_index + 1),
-                            train_cfg, loop_cfg, tag=f"step{result.steps}")
+                            train_cfg, loop_cfg, scaler=scaler,
+                            tag=f"step{result.steps}")
 
         result.passes_done += 1
         result.loss_history.append(_mean_parts(parts_acc, stage, pass_index, group))
@@ -343,7 +344,16 @@ def _mean_parts(parts: Sequence[Mapping[str, float]], stage: str, pass_index: in
 
 
 def _checkpoint(result: StageResult, model, optimizer, ema, stage, state,
-                train_cfg, loop_cfg, *, scaler=None, tag: str) -> None:
+                train_cfg, loop_cfg, *, scaler, tag: str) -> None:
+    """Write one checkpoint. Critical: ``scaler`` is required, not defaulted.
+
+    It used to default to `None`, and the mid-epoch call site was the one that
+    forgot it -- so every `checkpoint_every` file written under fp16 carried
+    `scaler: None` and a resume from it replayed the loss scaler's warm-up. A
+    default that means "no scaler" is indistinguishable from a caller that
+    dropped the argument, so there is no default: an omission is a `TypeError`
+    at the call site rather than a wrong number in a file nobody opens.
+    """
     ck = save_train_checkpoint(
         Path(loop_cfg.out_dir) / f"{stage}-{tag}.pt", model=model,
         optimizer=optimizer, ema=ema, stage=stage, global_step=result.steps,
