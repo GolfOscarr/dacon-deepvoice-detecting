@@ -398,6 +398,42 @@ def test_the_tripwires_skip_rather_than_pass_on_a_split_they_cannot_speak_about(
     assert not report.results["L3_perfect_separation"][0]
 
 
+@pytest.mark.parametrize("kw,key", [({"eer_file": 0.0}, "eer_file"),
+                                    ({"auc_vp": 1.0}, "auc_vp"),
+                                    ({"auc_mp": 1.0}, "auc_mp")])
+def test_the_file_and_presence_heads_are_guarded_on_a_disjoint_split(kw, key):
+    """L1 reads `eer_music` and L2 reads `eer_voice`. Nothing read `eer_file` --
+    the 0.45-weight head -- or either presence AUC, because L3 SKIPped on a
+    generator-disjoint split saying "L1/L2 cover this one", which was false in
+    three heads of five. Measured before the fix:
+    `leak_tripwires(eer_file=0.0, auc_vp=1.0, auc_mp=1.0, "generator_disjoint")`
+    returned `ok=True`.
+    """
+    healthy = {"eer_voice": 0.09, "eer_music": 0.31, "auc_vp": 0.9, "auc_mp": 0.9}
+    report = leak_tripwires(_metric_set(**{**healthy, "eer_file": 0.2, **kw}),
+                            "generator_disjoint", "8 VAL families")
+    passed, why = report.results["L3_perfect_separation"]
+    assert not passed, why
+    assert key in why
+    assert not report.ok
+    # It RAN: a SKIP that happened to carry `False` would not be this row.
+    assert "L3_perfect_separation" in report.ran
+
+
+def test_l3_runs_rather_than_skipping_on_a_generator_disjoint_split():
+    """The SKIP-vs-PASS distinction on the split a real run has. Removing the
+    `AuditReport.SKIP` prefix from the old disjoint branch changed nothing that
+    any test looked at -- so the branch is gone, and this pins that it is."""
+    report = leak_tripwires(_metric_set(0.20, eer_voice=0.09, eer_music=0.31),
+                            "generator_disjoint", "8 VAL families")
+    assert "L3_perfect_separation" in report.ran
+    assert "L3_perfect_separation" not in report.skipped
+    assert report.results["L3_perfect_separation"][0]
+    # And it says which heads it read, rather than claiming L1/L2 read them all.
+    why = report.results["L3_perfect_separation"][1]
+    assert "eer_file" in why and "eer_music" not in why.split("(L1/L2")[0]
+
+
 def test_perfect_separation_on_an_overlapping_split_fires_on_every_head():
     for kw in ({"eer_file": 0.0}, {"eer_file": 0.2, "eer_voice": 0.0},
                {"eer_file": 0.2, "eer_music": 0.0},

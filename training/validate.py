@@ -343,11 +343,16 @@ def measured_split_kind(train_specs: Sequence[SampleSpec],
 def leak_tripwires(metrics: MetricSet, split_kind: str, detail: str = "") -> AuditReport:
     """Numbers so good they are evidence of a leak. Fails the run, loudly.
 
-    | Head | Suspicious if | Because |
-    |---|---|---|
-    | music fake, unseen generator | **< 3% EER** | published cross-generator is 46.4% |
-    | voice fake, unseen generator | **< 1% EER** | ASVspoof 5's best is ~4% |
-    | any head | perfect separation on a random split | re-split by generator |
+    | Row | Head | Suspicious if | Because |
+    |---|---|---|---|
+    | L1 | music fake, unseen generator | **< 3% EER** | published cross-generator is 46.4% |
+    | L2 | voice fake, unseen generator | **< 1% EER** | ASVspoof 5's best is ~4% |
+    | L3 | every head L1/L2 did not read | perfect separation | no split makes EER 0.0 real |
+
+    Critical: L1 and L2 read `eer_music` and `eer_voice`. **L3 is the only row that
+    ever reads `eer_file` -- the 0.45-weight head -- or the two presence AUCs**,
+    so it runs on every split rather than SKIPping on the disjoint one, which is
+    the split a real run has.
 
     Caveat: takes the **`MetricSet` the official harness already produced**, not a
     prediction frame: re-deriving these EERs here would be a second EER
@@ -376,24 +381,32 @@ def leak_tripwires(metrics: MetricSet, split_kind: str, detail: str = "") -> Aud
     # EER 0 *and* AUC 1: the presence heads are AUCs, and a presence head that
     # separates perfectly is the same finding (docs/validation/03 §7 stops
     # investing there, which is a different decision from trusting the number).
+    #
+    # Critical: L3 **runs on every split**, and on a generator-disjoint one it is the
+    # only row that reads `eer_file` -- the 0.45-weight head -- or either
+    # presence AUC. It used to SKIP there saying "L1/L2 cover this one", which
+    # was false in three of the five heads: L1 reads `eer_music`, L2 reads
+    # `eer_voice`, and nothing read the other three. Measured:
+    # `leak_tripwires(eer_file=0.0, auc_vp=1.0, auc_mp=1.0, "generator_disjoint")`
+    # returned `ok=True`.
     separations = {"eer_file": metrics.eer_file <= 0.0,
                    "eer_voice": metrics.eer_voice <= 0.0,
                    "eer_music": metrics.eer_music <= 0.0,
                    "auc_vp": metrics.auc_vp >= 1.0,
                    "auc_mp": metrics.auc_mp >= 1.0}
-    perfect = sorted(k for k, v in separations.items() if v)
-    if disjoint:
-        r["L3_perfect_separation"] = (
-            True, AuditReport.SKIP + "only meaningful on a split that is not "
-                                     "generator-disjoint; L1/L2 cover this one")
-    else:
-        r["L3_perfect_separation"] = (
-            not perfect,
-            (f"head(s) perfectly separated on a {split_kind} split: {perfect} "
-             f"-- re-split by generator ({detail})") if perfect else
-            (f"no head separates perfectly on a {split_kind} split "
-             f"(worst-case margin: file EER {metrics.eer_file:.4f}, "
-             f"AUC_vp {metrics.auc_vp:.4f})"))
+    covered = ("eer_music", "eer_voice") if disjoint else ()
+    examined = [k for k in separations if k not in covered]
+    perfect = sorted(k for k in examined if separations[k])
+    scope = (f"over {examined} (L1/L2 already read {list(covered)} on this split)"
+             if covered else f"over {examined}")
+    r["L3_perfect_separation"] = (
+        not perfect,
+        (f"head(s) perfectly separated on a {split_kind} split: {perfect} {scope} "
+         f"-- suspect a leak, and on a random split re-split by generator "
+         f"({detail})") if perfect else
+        (f"no head separates perfectly on a {split_kind} split {scope} "
+         f"(worst-case margin: file EER {metrics.eer_file:.4f}, "
+         f"AUC_vp {metrics.auc_vp:.4f}, AUC_mp {metrics.auc_mp:.4f})"))
     return AuditReport(r)
 
 
