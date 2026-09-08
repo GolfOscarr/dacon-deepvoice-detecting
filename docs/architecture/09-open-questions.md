@@ -126,7 +126,7 @@ experiment — it is a decision to make by argument and leave alone.**
 | **B10** | Cross-window / whole-file aggregator, and its **duration bias** | ablation + new slice | ✅ as a *bias* measurement, not an EER delta | Needs a binned `duration` stratum in [`metrics/breakdown.py`](../../metrics/breakdown.py), which does not exist yet |
 | **B6** | Pooling function per head (G5) | free — GeM learns it | n/a — no experiment | 🔷 The learned `p` values are a reportable finding, not a decision we make |
 | **B5b** | Window length and mel/STFT params, *if* we tile | small grid | ⚠️ **probably not** — sub-floor effects | ★ *"Keep this grid small."* Pick defaults by argument; do not sweep |
-| **B11** | Component **loss weights** — equal vs metric-proportional (0.45/0.27/0.18) | cheap | ⚠️ **probably not** individually | Free knob aimed at the objective ([08 §2](08-training-recipe.md)). Set by argument, verify it does not *hurt* |
+| **B11** | ✅ **CLOSED** — component loss weights | cheap | ⚠️ **no**, as predicted | **Resolved by argument, metric-proportional.** A targeted search found *no* study testing loss-weights against evaluation-metric weights, and every adaptive alternative (GradNorm/PCGrad/DWA/uncertainty) has strong negative results against tuned constants ([training/02 §4](../training/02-the-loss.md#4-per-head-weights--metric-proportional-by-argument)) |
 
 ⚠️ Two entries moved **out** of this section because they gate a decision rather than improve one —
 they are now **A6** and **A7** below.

@@ -104,6 +104,18 @@ padding-safe because attention excludes masked frames, but `frame_max` is not �
 same file, depending only on what shared its batch. Do not recompute `frame_max` yourself
 without passing a mask.
 
+⚠️ `lengths` also decides where the *waveform* stops: `Frontend.forward` zeroes everything past
+each row's `lengths` before encoding. `frames_for` rounds up, so a row whose length is not a
+multiple of the frontend hop has a last valid frame that is **part padding** and is masked *in* —
+without the zeroing, the pad content reached the score through it (measured: 1.35e-3 on a
+submitted probability). It is a no-op on the shipped path, where padding is zeros on both sides;
+what it buys is that the guarantee no longer depends on everyone remembering to pad with zeros.
+
+🔴 Test fixtures must use lengths that are **not** whole multiples of the hop — `tests/test_model.py::ragged`.
+Every padding guard here once used `lengths = SR * 4` (200 whole 320-sample frames), so the tests
+defending this repo's most-repeated defect class had never exercised a partial boundary frame,
+which is the normal case for `U(4, 60)` s audio.
+
 ## Produce submission numbers
 
 ```python
@@ -143,14 +155,31 @@ voice-fake loss is never taken on a music-only file — mirroring the official m
 computes Voice EER only over voice-present files. `parts` is a per-head breakdown for the
 experiment ledger.
 
-⚠️ `LossConfig().weights` are all `1.0`, inherited from PC-Mix whose metric weighted components
-equally. Ours weights File .45 / Music .27 / Voice .18. This is a flagged open knob
-([09 B11](../docs/architecture/09-open-questions.md)), and the default is currently *wrong*
-rather than neutral.
+✅ `LossConfig().weights` is **metric-proportional** — File `.45` / Music `.27` / Voice `.18` /
+presence `.05` each. An earlier default weighted all five equally, inherited from PC-Mix whose
+metric weighted its components equally and ours does not. Set by argument, not sweep
+([training/02 §4](../docs/training/02-the-loss.md#4-per-head-weights--metric-proportional-by-argument));
+[09 B11](../docs/architecture/09-open-questions.md) is closed.
+
+🔴 **All five keys are required.** `LossConfig.__post_init__` rejects a partial `weights` dict,
+however the config was built. `weights: {file: 0.45}` used to load clean — every key it carried
+*was* known — and `multitask_loss` filled the four absent heads in at a `.get(..., 1.0)` fallback,
+training both presence heads at 20× the 0.05 the metric gives them. The fallback is gone; the loss
+indexes.
+
+⚠️ The weight *in effect* is `w_c / p_c`, not `w_c` — `_masked_mean` divides by the present-count,
+so a masked head is amplified by how rare its component is. **Both are logged**: `parts` carries
+`<branch>/p_c` and `<branch>/w_eff` beside each head's loss, and `training.loop` averages them into
+the pass row. Keys with a `/` are diagnostics, not loss terms. `docs/training/02 §4` says outright
+not to tune `w_c` without reading `w_eff`, and T2 cannot be read as specified without it.
 
 🔴 **The clip-vs-`frame_max` blend is not a loss knob.** It is `SEDHeadConfig.clip_weight`, in
 the *model* config, and the loss reads that same field — so training and inference cannot
-disagree about the objective. A separate loss-side `frame_weight` used to exist and was
+disagree about the objective. ⚠️ It now defaults to **1.0 (clip only)**: supervising the utterance
+and frame levels through one shared head measured 0.71–3.63 EER points worse than utterance-only
+([training/02 §3](../docs/training/02-the-loss.md#3--clipweight--10--the-one-change-worth-engineer-days)).
+At 1.0 `frame_max` does not reach the submitted score, which makes the rule-2.4 `frame_max` guards
+vacuous — the tests force the blend on rather than inheriting the default. A separate loss-side `frame_weight` used to exist and was
 documented as the frame-*supervision* weight of `04 §4`, a different quantity; anyone tuning it
 per that section was tuning the blend.
 

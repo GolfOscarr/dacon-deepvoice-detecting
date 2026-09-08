@@ -1,0 +1,649 @@
+"""The sampler: split safety, DOSS capping, determinism, epoch semantics."""
+
+import dataclasses
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from training.sampler import (C1_BOUNDS, C3_DESIGN_TOL, REFERENCE_MIX, CellMix,
+                              Sampler, SamplerConfig, check_mix,
+                              composed_fractions, head_positive_rates,
+                              mixedness_balance)
+from training.spec import CELL_TABLE
+from training.synthetic import synthetic_manifest
+
+
+@pytest.fixture(scope="module")
+def manifest():
+    return synthetic_manifest(n_per_pool=200, n_whole_file=200, seed=0)
+
+
+@pytest.fixture(scope="module")
+def sampler(manifest):
+    return Sampler(manifest)
+
+
+# --------------------------------------------------------------------------- #
+# the reference mix
+
+def test_reference_mix_sums_to_one():
+    assert sum(REFERENCE_MIX.values()) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_reference_mix_satisfies_c1():
+    rates = head_positive_rates(CellMix())
+    assert rates == pytest.approx(
+        {"file": 0.610, "voice": 0.507, "music": 0.511,
+         "v_pres": 0.690, "m_pres": 0.695}, abs=1e-3)
+    assert all(0.2 <= v <= 0.8 for v in rates.values())
+
+
+@pytest.mark.parametrize("bad", [
+    {c: 1.0 for c in range(1, 10)},                       # does not sum to 1
+    {c: 1 / 8 for c in range(1, 9)},                      # missing cell 9
+])
+def test_malformed_cell_mixes_are_rejected(bad):
+    with pytest.raises(ValueError):
+        CellMix(bad)
+
+
+def test_negative_cell_probability_is_rejected():
+    p = dict(REFERENCE_MIX)
+    p[9], p[5] = -0.05, p[5] + 0.05
+    with pytest.raises(ValueError, match=">= 0"):
+        CellMix(p)
+
+
+# --------------------------------------------------------------------------- #
+# determinism
+
+def test_same_key_gives_an_identical_spec(sampler):
+    assert sampler.sample_spec(42, epoch=3, seed=7) == sampler.sample_spec(42, epoch=3, seed=7)
+
+
+@pytest.mark.parametrize("kw", [{"sample_id": 43}, {"epoch": 4}, {"seed": 8}])
+def test_changing_any_key_component_changes_the_stream(sampler, kw):
+    base = dict(sample_id=42, epoch=3, seed=7)
+    assert sampler.sample_spec(**base) != sampler.sample_spec(**{**base, **kw})
+
+
+def test_an_epoch_is_a_fixed_count_of_specs(sampler):
+    """Otherwise sample_id is undefined and reproducibility is nominal."""
+    e0 = list(sampler.epoch_specs(50, epoch=0))
+    e1 = list(sampler.epoch_specs(50, epoch=1))
+    assert len(e0) == len(e1) == 50
+    assert [s.sample_id for s in e0] == list(range(50))
+    assert [s.sample_id for s in e1] == list(range(50)), "sample_id is epoch-LOCAL"
+    assert e0 != e1, "epoch is in the RNG key, so the streams still differ"
+
+
+def test_changing_steps_per_epoch_does_not_reroll_the_corpus(sampler):
+    """🔴 `sample_id` was `epoch * n + i`, so it moved with steps_per_epoch.
+
+    Changing the batch size would silently re-roll every sample in every later
+    epoch, which makes a run irreproducible for a reason nobody would look for.
+    `epoch` is already in the RNG key, so the index within the epoch suffices.
+    """
+    short = list(sampler.epoch_specs(50, epoch=1))
+    long_ = list(sampler.epoch_specs(200, epoch=1))
+    assert short == long_[:50]
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 split safety
+
+def test_only_draws_from_the_active_slice(manifest):
+    """artifact_family disjointness is why this must hold at draw time."""
+    m = manifest.copy()
+    # Partition at random, not by row order: the manifest is grouped by pool, so
+    # an index slice would hand one side no fake components at all.
+    rng = np.random.default_rng(0)
+    m["slice"] = np.where(rng.random(len(m)) < 0.5, "val", "train")
+    for slice_ in ("train", "val"):
+        allowed = set(m.loc[m["slice"] == slice_, "file_id"])
+        specs = list(Sampler(m, slice_=slice_).epoch_specs(500))
+        drawn = {c.file_id for s in specs for c in s.components}
+        assert drawn <= allowed, f"{slice_}: leaked {sorted(drawn - allowed)[:3]}"
+
+
+def test_an_empty_slice_fails_loudly(manifest):
+    with pytest.raises(ValueError, match="no manifest rows"):
+        Sampler(manifest, slice_="probe")
+
+
+def test_a_fold_filter_is_applied(manifest):
+    m = manifest.copy()
+    rng = np.random.default_rng(1)
+    m["fold"] = rng.integers(0, 2, len(m))
+    specs = list(Sampler(m, fold=1).epoch_specs(200))
+    allowed = set(m.loc[m.fold == 1, "file_id"])
+    assert {c.file_id for s in specs for c in s.components} <= allowed
+
+
+def test_a_slice_missing_a_component_kind_fails_loudly(manifest):
+    """A degenerate slice must raise, not quietly emit a lopsided stream.
+
+    Found by a test that partitioned the manifest by row order: the rows are
+    grouped by pool, so one side had no fake voice components and the sampler
+    would otherwise have drawn an all-real corpus without complaint.
+    """
+    m = manifest.copy()
+    m.loc[m.pool == "B", "slice"] = "val"          # remove every fake voice row
+    with pytest.raises(ValueError, match="no fake voice components"):
+        list(Sampler(m).epoch_specs(500))
+
+
+# --------------------------------------------------------------------------- #
+# DOSS capping
+
+@pytest.fixture(scope="module")
+def big_manifest():
+    """A corpus large enough that the SHIPPED `domain_cap` actually binds.
+
+    🔴 At `n_per_pool=200` the largest domain holds ~75 files, far under the
+    shipped `N_c = 500`, so every weight is 1.0 and the default is a no-op --
+    the earlier DOSS test had to pass `cap=20` to make anything happen, and
+    therefore never exercised the value we ship.
+    """
+    return synthetic_manifest(n_per_pool=2000, n_whole_file=200, seed=0)
+
+
+def test_the_shipped_domain_cap_binds_on_a_production_sized_corpus(big_manifest):
+    """The premise of every assertion below. Stated, so it cannot rot silently."""
+    fake = big_manifest[(big_manifest.row_kind == "component")
+                        & big_manifest.pool.isin(["B", "D"])]
+    counts = fake.domain_key.value_counts()
+    cap = SamplerConfig().domain_cap
+    over = counts[counts > cap]
+    assert len(over) >= 2, (
+        f"nothing exceeds the shipped cap {cap}; largest domain is {counts.max()}")
+
+
+def test_doss_flattens_over_represented_domains(big_manifest):
+    """★ 0.2k h domain-balanced -> 2.77% EER vs 6.4k h naive -> 3.29%.
+
+    A weight, not a corpus edit: nothing is discarded, and N_c is sweepable.
+
+    🔴 Two things the earlier version did not do. It runs at the SHIPPED
+    `domain_cap`, on a corpus where that value binds (see the fixture), and it
+    asserts an EFFECT SIZE. `capped < uncapped` is met by a rounding error, and
+    the shipped default was measured at N_eff 7.46 capped against 7.46 uncapped
+    -- identical, because the cap bound on nothing.
+
+    The weights are read straight off the sampler, so this is exact rather than
+    a Monte-Carlo estimate: `_doss_weights` is the production implementation.
+    """
+    cap = SamplerConfig().domain_cap
+    dominant = big_manifest.loc[big_manifest.pool == "D",
+                                "domain_key"].value_counts().idxmax()
+
+    def domain_weights(domain_cap):
+        s = Sampler(big_manifest, SamplerConfig(domain_cap=domain_cap))
+        rows, w = s._by_role_fake[("music", True)], s._weights[("music", True)]
+        return pd.Series(w, index=rows.domain_key.to_numpy()).groupby(level=0).sum()
+
+    def n_eff(w):
+        return float(np.exp(-(w * np.log(w)).sum()))
+
+    uncapped, capped = domain_weights(10**9), domain_weights(cap)
+    assert uncapped[dominant] >= 0.25, (
+        f"no head to flatten: the dominant domain holds {uncapped[dominant]:.3f}")
+    assert capped[dominant] <= 0.85 * uncapped[dominant], (
+        f"the shipped cap must take at least 15% off the dominant domain: "
+        f"{capped[dominant]:.4f} vs {uncapped[dominant]:.4f}")
+    assert n_eff(capped) >= n_eff(uncapped) + 0.3, (
+        f"effective domains must rise materially: "
+        f"{n_eff(capped):.3f} vs {n_eff(uncapped):.3f}")
+    # Nothing is discarded: capping is a reweighting, so every domain survives.
+    assert set(capped.index) == set(uncapped.index)
+    assert capped.sum() == pytest.approx(1.0)
+
+
+def test_doss_capping_reaches_the_drawn_stream(big_manifest):
+    """The weights are only a claim until the drawn stream moves with them.
+
+    ⚠️ Measured over pool-D draws only. Pooled over every component, real files
+    (weight-free, no `domain_key`) and the whole-file rows dilute the effect to
+    within the noise of a 6k-spec draw -- an adjacent quantity.
+    """
+    cap = SamplerConfig().domain_cap
+    dom = big_manifest.set_index("file_id").domain_key
+    pool_d = set(big_manifest.loc[(big_manifest.row_kind == "component")
+                                  & (big_manifest.pool == "D"), "file_id"])
+    dominant = big_manifest.loc[big_manifest.pool == "D",
+                                "domain_key"].value_counts().idxmax()
+
+    def share(domain_cap):
+        # a = b = 1 composes the single-component cells too, so cell 4 also draws
+        # fake music: ~5,200 pool-D draws, enough that a 0.06 gap is ~9 sigma.
+        cfg = SamplerConfig(domain_cap=domain_cap, single_composed_rate=1.0)
+        specs = Sampler(big_manifest, cfg).epoch_specs(20_000)
+        ids = [c.file_id for s in specs for c in s.components if c.file_id in pool_d]
+        assert len(ids) > 3_000, len(ids)
+        return float((dom.reindex(ids) == dominant).mean())
+
+    uncapped, capped = share(10**9), share(cap)
+    assert uncapped >= 0.25, f"no head to flatten: dominant domain at {uncapped:.3f}"
+    assert capped <= uncapped - 0.04, (
+        f"the shipped cap must visibly flatten the drawn stream: "
+        f"{capped:.4f} vs {uncapped:.4f}")
+
+
+def test_domain_weights_are_a_probability_vector(sampler):
+    for key, w in sampler._weights.items():
+        if len(w):
+            assert w.sum() == pytest.approx(1.0), key
+            assert (w >= 0).all(), key
+
+
+def test_domain_cap_must_be_positive():
+    with pytest.raises(ValueError, match="domain_cap"):
+        SamplerConfig(domain_cap=0)
+
+
+# --------------------------------------------------------------------------- #
+# structure
+
+def test_every_spec_respects_its_cell(sampler):
+    """Both render modes. The `if composed` guard used to exempt ~59% of the
+    stream, so the whole-file role assignment was checked by nothing."""
+    seen = {"composed": 0, "whole_file": 0}
+    for s in sampler.epoch_specs(3000):
+        vp, mp, _, _ = CELL_TABLE[s.cell]
+        roles = {c.role for c in s.components}
+        seen[s.render_mode] += 1
+        if s.render_mode == "composed":
+            assert ("voice" in roles) == bool(vp), s.cell
+            assert ("music" in roles) == bool(mp), s.cell
+        else:
+            # A whole file is one row used as-is; its role must still name the
+            # component the cell says is present ("noise" for cell 9).
+            assert len(s.components) == 1, s.cell
+            expected = "voice" if vp else "music" if mp else "noise"
+            assert roles == {expected}, (s.cell, roles)
+    assert min(seen.values()) > 100, f"both render modes must be exercised: {seen}"
+
+
+def test_durations_stay_inside_the_test_range(sampler):
+    """🔴 Both bounds. An earlier version asserted `0 < d <= 60.0`.
+
+    The lower bound was 0, not 4 -- the adjacent quantity -- so it passed while
+    a corpus of short sources produced 2,580 of 4,000 specs below
+    `AudioConfig.min_seconds`, because `take = min(duration, row.duration_s)`
+    silently shortens the timeline.
+    """
+    lo, hi = SamplerConfig().duration_range
+    for s in sampler.epoch_specs(2000):
+        assert lo <= s.duration_s <= hi, s.duration_s
+        for c in s.components:
+            assert c.target_start_s + c.duration_s <= s.duration_s + 1e-6
+
+
+def test_sources_shorter_than_the_minimum_are_dropped(manifest):
+    """A source shorter than the floor cannot back a legal sample."""
+    m = manifest.copy()
+    m.loc[m.row_kind == "whole_file", "duration_s"] = 1.5
+    sampler = Sampler(m)
+    assert sampler.n_dropped_short > 0
+    lo = SamplerConfig().duration_range[0]
+    assert all(s.duration_s >= lo for s in sampler.epoch_specs(2000))
+
+
+def test_a_corpus_of_only_short_sources_fails_loudly(manifest):
+    m = manifest.copy()
+    m["duration_s"] = 1.0
+    with pytest.raises(ValueError, match="shorter than"):
+        Sampler(m)
+
+
+def test_sequential_samples_carry_a_crossfade(sampler):
+    seq = [s for s in sampler.epoch_specs(3000) if s.structure == "sequential"]
+    assert seq, "the sequential path must be exercised"
+    assert all(s.crossfade_ms > 0 for s in seq)
+    assert all(len(s.components) > 1 for s in seq)
+
+
+def test_gain_is_skewed_toward_the_quiet_end(sampler):
+    """★ G2Net: models generalise low-SNR -> high-SNR, not the reverse.
+
+    🔴 `mean < 0` was the adjacent quantity: `gain_db_mean = -3.6` is the only
+    source of gain in the sampler, so that assertion could only fail if gain were
+    unwired entirely. It would have greened at `gain_db_mean = -0.01`, which is
+    not a skew. Assert the drawn distribution instead: its location, its spread,
+    and the mass below unity gain that *is* the skew.
+    """
+    cfg = SamplerConfig()
+    gains = np.array([c.gain_db for s in sampler.epoch_specs(6000)
+                      if s.render_mode == "composed"
+                      for c in s.components if c.role == "voice"])
+    assert len(gains) > 1_500, len(gains)
+
+    # sd of the mean is ~0.08 here, so 0.35 is >4 sigma of slack and still
+    # catches a mean moved to 0 (or to the -1.0 a "mild" tweak would pick).
+    assert abs(gains.mean() - cfg.gain_db_mean) < 0.35, gains.mean()
+    assert abs(gains.std() - cfg.gain_db_sigma) < 0.5, gains.std()
+    # P(N(-3.6, 4) < 0) = 0.816. At gain_db_mean = 0 this is 0.5 and fails.
+    assert (gains < 0).mean() > 0.75, (gains < 0).mean()
+    lo, hi = cfg.gain_db_range
+    assert lo <= gains.min() and gains.max() <= hi
+
+
+def test_gain_is_the_voice_music_ratio_not_a_level_shift(manifest):
+    """⚠️ Filtering to the mixed stratum hid what the sampler used to do.
+
+    `gain_db` is the voice/music level ratio (docs/data/02, A-A3). It was applied
+    to every component whose role is "voice", so a composed voice-only sample
+    (cells 1/2, reachable whenever `single_composed_rate > 0`) was gained with no
+    music to be relative to -- an absolute level shift, which is A-A7 jitter and
+    belongs in the augment registry. Nothing renormalises it either
+    (`render._normalize` models the test chain; there is no loudness stage), so
+    it reached the waveform as a composedness cue inside the voice-only stratum.
+
+    Two exceptions, both deliberate: a whole-file row is used as-is at gain 0,
+    and a cell-9 noise draw has no voice component to gain.
+    """
+    cfg = SamplerConfig(single_composed_rate=1.0)
+    by_stratum: dict[str, list[float]] = {}
+    whole_file_gains: list[float] = []
+    for s in Sampler(manifest, cfg).epoch_specs(6000):
+        for c in s.components:
+            if c.role != "voice":
+                continue
+            if s.render_mode == "composed":
+                by_stratum.setdefault(s.stratum, []).append(c.gain_db)
+            else:
+                whole_file_gains.append(c.gain_db)
+
+    assert set(by_stratum) == {"voice-only", "mixed"}, sorted(by_stratum)
+
+    solo = np.array(by_stratum["voice-only"])
+    assert len(solo) > 400, len(solo)
+    assert not solo.any(), (
+        f"a solo voice component has nothing to be relative to, so it carries no "
+        f"ratio; {int((solo != 0).sum())} of {len(solo)} were gained")
+
+    mixed = np.array(by_stratum["mixed"])
+    assert len(mixed) > 400, len(mixed)
+    assert abs(mixed.mean() - cfg.gain_db_mean) < 0.6, mixed.mean()
+    assert (mixed < 0).mean() > 0.72, (mixed < 0).mean()
+
+    assert whole_file_gains and not any(whole_file_gains), "whole files are ungained"
+
+
+def test_restricting_gain_to_the_ratio_does_not_move_the_shipped_stream(manifest):
+    """🔴 The change is a no-op at `single_composed_rate = 0.0`.
+
+    That is why it was cheap to make: the shipped config emits no composed
+    voice-only samples, so every gain the shipped stream draws is a genuine
+    voice/music ratio and the drawn specs are byte-identical either way. Pin the
+    premise, so a future change to `single_composed_rate`'s default has to
+    confront it.
+    """
+    specs = list(Sampler(manifest, SamplerConfig()).epoch_specs(4000))
+    solo_composed = [s for s in specs
+                     if s.render_mode == "composed" and s.stratum == "voice-only"]
+    assert not solo_composed, (
+        f"{len(solo_composed)} composed voice-only specs at the shipped default; "
+        f"the ratio restriction is no longer a no-op")
+
+
+@pytest.mark.parametrize("bad", [{"duration_range": (60.0, 4.0)},
+                                 {"sequential_prob": 1.5}])
+def test_malformed_sampler_configs_are_rejected(bad):
+    with pytest.raises(ValueError):
+        SamplerConfig(**bad)
+
+
+# --------------------------------------------------------------------------- #
+# C1 and C3 are enforced on the mix, not only measured on the drawn stream
+
+#: The two documented unsound mixes, with the numbers docs/pipelines/02 §4
+#: quotes for them. Both are legal `CellMix` values -- nine cells, non-negative,
+#: summing to 1 -- which is exactly the point: `CellMix.__post_init__` proves a
+#: mix is a distribution and says nothing about whether the loss over it is
+#: sound.
+_NAIVE_6_7_HEAVY = {1: .08, 2: .08, 3: .08, 4: .08, 5: .10,
+                    6: .22, 7: .22, 8: .12, 9: .02}
+_MIXEDNESS_TRAP = {1: .10, 2: .10, 3: .10, 4: .10, 5: .12,
+                   6: .15, 7: .15, 8: .10, 9: .08}
+
+
+def test_the_reference_mix_passes_the_construction_check():
+    """The shipped default, through the same gate as everything else."""
+    check_mix(CellMix())
+    assert SamplerConfig().cell_mix == CellMix()
+    pm_f, pm_r = mixedness_balance(CellMix())
+    assert abs(pm_f - pm_r) < C3_DESIGN_TOL / 4, (pm_f, pm_r)
+
+
+def test_a_c1_violating_mix_is_rejected_at_construction():
+    """Mutation: the 6/7-heavy mix reaches `SamplerConfig` and must not pass.
+
+    `head_positive_rates` and `mixedness_balance` existed, were correct, and
+    were called by nothing on the construction path -- so this mix built a
+    `SamplerConfig`, built a `Sampler` and trained, and C1 was only ever
+    consulted by `training.audit` over a stream drawn afterwards.
+    """
+    naive = CellMix(_NAIVE_6_7_HEAVY)
+    rates = head_positive_rates(naive)
+    assert rates["v_pres"] == pytest.approx(0.820, abs=1e-3)
+    assert rates["m_pres"] == pytest.approx(0.820, abs=1e-3)
+
+    with pytest.raises(ValueError, match="violates C1"):
+        check_mix(naive)
+    with pytest.raises(ValueError, match="violates C1"):
+        SamplerConfig(cell_mix=naive)
+
+
+def test_a_c3_violating_mix_that_passes_c1_is_rejected_at_construction():
+    """The half C1 cannot see: mixedness predicting the label.
+
+    Every one of the five rates is inside [0.2, 0.8] -- that is the point of
+    this mix -- and `P(mixed|FAKE)` is still 0.667 against 0.375.
+    """
+    trapped = CellMix(_MIXEDNESS_TRAP)
+    lo, hi = C1_BOUNDS
+    assert all(lo <= v <= hi for v in head_positive_rates(trapped).values()), \
+        "this mix passes C1 -- that is what makes it the C3 mutation"
+    pm_f, pm_r = mixedness_balance(trapped)
+    assert (pm_f, pm_r) == pytest.approx((0.667, 0.375), abs=1e-3)
+    assert abs(pm_f - pm_r) == pytest.approx(0.2917, abs=1e-3)
+
+    with pytest.raises(ValueError, match="violates C3"):
+        check_mix(trapped)
+    with pytest.raises(ValueError, match="violates C3"):
+        SamplerConfig(cell_mix=trapped)
+
+
+@pytest.mark.parametrize("bad", [_NAIVE_6_7_HEAVY, _MIXEDNESS_TRAP])
+def test_the_unsound_mix_escape_hatch_must_be_asked_for(bad):
+    """`allow_unsound_mix` exists for the audit's own mutation tests.
+
+    Those tests must be able to draw a stream from an unsound mix, or I8 and
+    I2b are checks nobody has seen fail. The hatch is opt-in, like
+    `FoldConfig.allow_no_probe`, so it cannot be reached by accident.
+    """
+    cfg = SamplerConfig(cell_mix=CellMix(bad), allow_unsound_mix=True)
+    assert cfg.cell_mix.p == bad
+
+
+# --------------------------------------------------------------------------- #
+# every SamplerConfig field is a knob, and every knob moves the drawn stream
+#
+# The template is `tests/test_loop.py`'s `_KNOB_PROBES`: a table naming every
+# field, two values each and the observable that must move, with the table
+# itself asserted exhaustive so adding a field without a probe goes red.
+#
+# Caveat, and it is the same one that table carries: this proves a knob *does
+# something*, not that it does the *right* thing. What it rules out is the
+# failure that actually happens -- a field that validates, round-trips through
+# a config file, and is read nowhere, so an ablation reports a difference it
+# never tested.
+
+#: `field -> (value a, value b, observable, extra config)`. The extra config is
+#: not decoration: `noise_composed_rate` is only readable with the marginal
+#: balance off, and `crossfade_ms_range` only with `sequential_prob` at 1.
+_SAMPLER_KNOBS: dict[str, tuple] = {
+    "cell_mix": (CellMix(), CellMix({**REFERENCE_MIX, 6: 0.095, 8: 0.125}),
+                 "cells", {}),
+    "f8": (0.0, 1.0, "cell8_composed", {}),
+    "single_composed_rate": (0.0, 1.0, "voice_only_composed", {}),
+    # Critical: with `balance_marginal_composedness` on -- the shipped default
+    # -- `composed_fractions` SOLVES f9 and overwrites whatever this field says,
+    # so the knob is dead on the shipped stream. It is a knob only in the
+    # unbalanced arm, which is what the extra config here records.
+    "noise_composed_rate": (0.0, 1.0, "cell9_composed",
+                            {"balance_marginal_composedness": False}),
+    "balance_marginal_composedness": (True, False, "cell9_composed", {}),
+    "domain_cap": (500, 1, "component_files", {}),
+    "duration_range": ((4.0, 60.0), (4.0, 8.0), "durations", {}),
+    "gain_db_range": ((-15.0, 15.0), (-1.0, 1.0), "gains", {}),
+    "gain_db_mean": (-3.6, 6.0, "gains", {}),
+    "gain_db_sigma": (4.0, 0.001, "gains", {}),
+    "sequential_prob": (0.0, 1.0, "structures", {}),
+    "crossfade_ms_range": ((10.0, 200.0), (300.0, 400.0), "crossfades",
+                           {"sequential_prob": 1.0}),
+    "silence_lead_s": (0.0, 1.0, "starts", {}),
+    "silence_tail_s": (0.0, 1.0, "ends", {}),
+    "scheme_version": ("synthetic-v1", "synthetic-v2", "scheme", {}),
+}
+
+#: Fields no probe here can move, each with the reason. Caveat: an entry is a
+#: hole, not an exemption -- keep it short and keep the reason true.
+_NOT_A_STREAM_KNOB = {
+    "allow_unsound_mix": "a validation hatch, not a draw parameter -- it changes "
+                         "which configs are constructible, and that is asserted "
+                         "in test_the_unsound_mix_escape_hatch_must_be_asked_for",
+}
+
+
+def _observables(manifest, n=400, **overrides):
+    """One drawn stream, reduced to everything a `SamplerConfig` knob can move."""
+    from collections import Counter
+
+    specs = list(Sampler(manifest, SamplerConfig(**overrides)).epoch_specs(n))
+    composed = [s for s in specs if s.render_mode == "composed"]
+    return {
+        "cells": Counter(s.cell for s in specs),
+        "cell8_composed": sum(s.cell == 8 and s.render_mode == "composed"
+                              for s in specs),
+        "cell9_composed": sum(s.cell == 9 and s.render_mode == "composed"
+                              for s in specs),
+        "voice_only_composed": sum(s.stratum == "voice-only"
+                                   and s.render_mode == "composed" for s in specs),
+        "component_files": Counter(c.file_id for s in specs for c in s.components),
+        "durations": tuple(round(s.duration_s, 6) for s in specs),
+        "gains": tuple(round(c.gain_db, 9) for s in specs for c in s.components),
+        "structures": Counter(s.structure for s in composed),
+        "crossfades": tuple(round(s.crossfade_ms, 9) for s in composed),
+        "starts": tuple(round(c.target_start_s, 9)
+                        for s in composed for c in s.components),
+        "ends": tuple(round(c.target_start_s + c.duration_s, 9)
+                      for s in composed for c in s.components),
+        "scheme": {s.scheme_version for s in specs},
+    }
+
+
+def test_the_knob_table_names_every_sampler_config_field():
+    """A new knob arrives with a probe or an admitted hole; there is no third
+    option, and adding the field alone turns this red."""
+    named = set(_SAMPLER_KNOBS) | set(_NOT_A_STREAM_KNOB)
+    assert named == {f.name for f in dataclasses.fields(SamplerConfig)}
+
+
+@pytest.mark.parametrize("field", sorted(_SAMPLER_KNOBS))
+def test_every_sampler_config_knob_changes_the_drawn_stream(field, manifest):
+    a_value, b_value, key, extra = _SAMPLER_KNOBS[field]
+    a = _observables(manifest, **{**extra, field: a_value})
+    b = _observables(manifest, **{**extra, field: b_value})
+    assert a[key] != b[key], (
+        f"SamplerConfig.{field} = {a_value!r} and {b_value!r} produced the same "
+        f"{key}: the knob validates and then does nothing")
+
+
+def test_noise_composed_rate_is_overwritten_by_the_marginal_balance(manifest):
+    """Critical: the shipped config reads `noise_composed_rate` nowhere.
+
+    `composed_fractions` sets `f[9]` from `noise_composed_rate` and then, when
+    `balance_marginal_composedness` is on, *solves* f9 and overwrites it. The
+    default is on, so on the shipped stream this field is inert -- exactly the
+    "validates and does nothing" failure the knob table exists to find. It is
+    left as a knob rather than removed because the unbalanced arm is a real
+    configuration (`test_I2c_catches_the_marginal_composedness_residual` draws
+    it), but the dead-at-default status has to be said out loud.
+    """
+    solved = composed_fractions(CellMix(), 0.0, f9=0.0, balance_marginal=True)[9]
+    for value in (0.0, 0.5, 1.0):
+        assert composed_fractions(CellMix(), 0.0, f9=value,
+                                  balance_marginal=True)[9] == solved
+        assert composed_fractions(CellMix(), 0.0, f9=value,
+                                  balance_marginal=False)[9] == value
+    assert solved == pytest.approx(0.4132, abs=1e-4), solved
+    assert SamplerConfig().balance_marginal_composedness is True
+
+
+#: Every `SamplerConfig` field, with the value the pipeline ships. Critical: the
+#: three load-bearing ones carry a measured number in the comment, because the
+#: cost of flipping them is the only argument against flipping them.
+_SHIPPED_SAMPLER_DEFAULTS = {
+    "cell_mix": CellMix(),
+    "f8": 0.0,
+    "single_composed_rate": 0.0,
+    "noise_composed_rate": 0.0,
+    # Critical: False reopens a measured marginal composedness gap of 0.121
+    # (P(composed|REAL) 0.2875 vs P(composed|FAKE) 0.4090).
+    "balance_marginal_composedness": True,
+    "domain_cap": 500,
+    "duration_range": (4.0, 60.0),
+    "gain_db_range": (-15.0, 15.0),
+    "gain_db_mean": -3.6,
+    "gain_db_sigma": 4.0,
+    "sequential_prob": 0.25,
+    "crossfade_ms_range": (10.0, 200.0),
+    # Critical: both 0.0, and not as taste. At 0.0 no RNG draw happens at all,
+    # so the shipped stream is byte-identical to the pre-A-A8/A-A11 one.
+    # Anything else changes the drawn stream and needs an I1b re-run.
+    "silence_lead_s": 0.0,
+    "silence_tail_s": 0.0,
+    "scheme_version": "synthetic-v1",
+    "allow_unsound_mix": False,
+}
+
+
+def test_the_shipped_sampler_defaults_are_pinned():
+    """A default nothing asserts is a default anyone can flip in a diff review.
+
+    Three of these are load-bearing beyond taste and none of them was pinned:
+    the two silence knobs, whose non-zero values change the drawn stream and
+    invalidate the I1b audit, and the marginal balance, whose `False` reopens a
+    measured 0.121 composedness gap.
+    """
+    cfg = SamplerConfig()
+    assert set(_SHIPPED_SAMPLER_DEFAULTS) == \
+        {f.name for f in dataclasses.fields(SamplerConfig)}, \
+        "a new SamplerConfig field arrived without a pinned default"
+    for name, want in _SHIPPED_SAMPLER_DEFAULTS.items():
+        assert getattr(cfg, name) == want, name
+
+
+def test_the_silence_defaults_leave_the_drawn_stream_untouched(manifest):
+    """The premise the 0.0 defaults rest on: at zero, no RNG draw happens.
+
+    So the specs are byte-identical to a build with the placement code removed,
+    which is what makes A-A8/A-A11 additions rather than a stream change. A
+    version that drew `uniform(0, 0)` would re-roll every later draw while
+    looking like a no-op.
+    """
+    shipped = list(Sampler(manifest, SamplerConfig()).epoch_specs(300))
+    for spec in shipped:
+        if spec.render_mode == "composed":
+            assert min(c.target_start_s for c in spec.components) == 0.0, (
+                "at lead 0.0 every overlap component starts at the origin")
+    for knob in ("silence_lead_s", "silence_tail_s"):
+        moved = list(Sampler(manifest, SamplerConfig(**{knob: 1e-9}))
+                     .epoch_specs(300))
+        assert moved != shipped, (
+            f"{knob} = 1e-9 consumes an RNG draw, so the whole later stream "
+            f"shifts; if this passes, the 0.0 default is not the no-draw case "
+            f"it claims")

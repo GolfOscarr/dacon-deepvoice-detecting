@@ -20,15 +20,70 @@ the shortcut audit ([07 E-S2](07-eda-plan.md)).
 ## Pipeline order (per training sample)
 
 ```
-1. sample cell (1–9)                → which pools to draw from
-2. draw components (split-safe)     → labels are fixed here, and nowhere else
-3. structural composition           → overlap (gain ratio) or sequence (crossfade)
-4. label-independent signal aug     → the menu below
-5. TEST-CHAIN NORMALIZATION         → always last
-6. crop / pad to U(4, 60) s
+0. draw target duration in [4, 60] s → the timeline everything is placed on
+1. sample cell (1–9)                 → which pools to draw from
+2. draw components (split-safe)      → labels are fixed here, and nowhere else
+     …including any MixUp partner    → see below
+3. structural composition            → overlap (gain ratio) or sequence (crossfade)
+4. label-independent signal aug      → the menu below, minus MixUp
+5. TEST-CHAIN NORMALIZATION          → always last
 ```
 
 Steps 3–5 are shared by every cell. **Labels come from steps 1–2 only.**
+
+⚠️ **Duration is drawn first, not cropped last.** An earlier version cropped to `U(4,60)` s as a
+final step, which renders audio only to discard it — expensive given the codec round-trips in
+`A-S3` — and makes frame-level targets ([architecture/04 §4](../architecture/04-heads-and-pooling.md))
+a post-hoc re-slice instead of exact by construction. Drawing the timeline first makes component
+placement and frame targets the same arithmetic.
+
+### ✅ The resampler is `scipy.signal.resample_poly`
+
+⚠️ This stage runs in the **shipped** preprocess path, so train/test symmetry depends on it
+([pipelines/03](../pipelines/03-transforms.md)). `soxr` was named here originally, but the
+requirement is *"one fixed resampler applied identically in train and test"*, not a specific
+library — and `scipy` is already a dependency while `soxr` is not. Adding a shipped dependency
+costs against the submission's offline-install budget
+([architecture/01](../architecture/01-design-envelope.md)) and buys quality we cannot measure.
+
+⚠️ **`A-B2` (varied resampler kernels) is unbuildable as written** — it lists `soxr` HQ/VHQ,
+`librosa` and `torchaudio` kernels, none of which are installed. If that augmentation is wanted,
+respecify it against `resample_poly` window/filter variants.
+
+🔴 **Revisit once `G1` lands.** If the dummy-file forensics reveal which resampler the organizers
+used, *matching them* is worth more than kernel quality, and the stage is written with the
+resampler injectable for exactly that reason.
+
+### 🔴 A-A8 and A-A11 belong in the draw, not step 4
+
+Same shape as MixUp above, different invariant. Both **move audio along the timeline** — and
+`frame_intervals` are intervals *on that timeline*, in absolute seconds, computed from the
+placement before any file is opened ([pipelines/01 §4](../pipelines/01-sample-contract.md#4-renderedsample)).
+A step-4 augment returns only a waveform, so it has no way to say the timeline moved, and the frame
+labels would go on describing audio that is no longer there. Silently, with a green suite: the
+`align_time` failure again.
+
+Drawn instead, they are just a **placement**. The spec records it, and the frame targets follow it
+for free because they are computed from it. Nothing is lost — a leading silence *is*
+`target_start_s > 0`, and a temporal misalignment *is* a jittered `target_start_s`.
+
+🔴 This generalises past these two entries, and [pipelines/03 §4](../pipelines/03-transforms.md)
+states the contract and enforces it: **steps 4–5 are time-invariant; every time-warping decision
+lives in the draw.** ⚠️ It also catches one nobody lists — **A-A10 RIR convolution shifts audio by
+its direct-path offset**, and would have desynchronized the frame targets the day it was added.
+
+### 🔴 MixUp belongs in step 2, not step 4
+
+`A-A1` and `A-A2` were listed below as step-4 augmentation while simultaneously specifying
+*"update labels for whatever the mixed-in audio contributes"* and *"labels `np.maximum`"*. Those
+cannot both hold: step 4 is by definition label-independent, and **labels come from steps 1–2
+only.** Mixing another file in changes which components are present and whether they are
+generated, so it is a **component draw**, not a signal transform.
+
+Treating MixUp as an extra draw in step 2 keeps the invariant true, keeps the `P(T | L) = P(T)`
+audit valid over transforms, and makes the union-label rule a consequence of the cell arithmetic
+rather than a special case bolted onto an augmentation. The `p`, `Beta`/`alpha` and `max`-label
+parameters in `A-A1`/`A-A2` are unchanged — only the stage they run in.
 
 ---
 
@@ -36,10 +91,45 @@ Steps 3–5 are shared by every cell. **Labels come from steps 1–2 only.**
 
 | # | Method | What it does / why | Parameters & output |
 |---|---|---|---|
-| **A-S1** | 🔴 **Test-chain normalization** — resample to 16 kHz with one fixed resampler (`soxr`), round-trip through MP3/WAV/FLAC, emit mono **and** stereo, all randomized **independently of label** | Whatever the organizers did to standardize, our data must experience it. Otherwise we learn cues that don't exist at test time. This is the single highest-leverage step in the whole pipeline ([survey/02](../survey/02-sota-music.md)) | Parameters come from **E-S1** `signal_chain.yaml`. ⚠️ Never let source sr, original bitrate, or channel count correlate with label |
+| **A-S1** | 🔴 **Test-chain normalization** — resample to 16 kHz with one fixed resampler (**`scipy.signal.resample_poly`** — decided; see below), round-trip through MP3/WAV/FLAC, emit mono **and** stereo, all randomized **independently of label** | Whatever the organizers did to standardize, our data must experience it. Otherwise we learn cues that don't exist at test time. This is the single highest-leverage step in the whole pipeline ([survey/02](../survey/02-sota-music.md)) | Parameters come from **E-S1** `signal_chain.yaml`. ⚠️ Never let source sr, original bitrate, or channel count correlate with label |
 | **A-S2** | **Label-independent RNG discipline** — one transform-RNG stream keyed on `hash(sample_id, epoch, global_seed)`, never on label | Mechanism enforcing the governing rule; also gives byte-reproducibility for the 2nd-stage submission | CI test: same seed → byte-identical rendered sample ([09 R9](09-risks-and-checks.md)) |
 | **A-S3** | **Codec round-trip** | MP3 at **64 kbps** cost MusicDET **+37 EER points** ([survey/02](../survey/02-sota-music.md)); the test set is MP3/WAV/FLAC. Confirmed as the top robustness intervention by RADAR 2026 and SAFE ([kaggle/01](../kaggle/01-ai-content-detection.md)) | MP3 {64, 96, 128, 192}, AAC, OPUS, OGG, FLAC round-trip. p ≈ 0.5 |
 | **A-S4** | **Telephone chain** — 16k → **8k** → 16k, plus G.711 μ/A-law, AMR-NB, OPUS-NB, GSM, G.722; optional packet loss | The test set explicitly contains 전화채널 audio. The UR channel-robust ASVspoof 2021 system generalized by simulating landline/cellular/VoIP at 8 kHz with OPUS ([survey/01](../survey/01-sota-speech.md)) | p ≈ 0.2. Log which chain was applied for per-condition error analysis |
+
+### 🔴 A-S3's encoder delay — and why the obvious implementation is the broken one
+
+A lossy encoder does not return the samples you gave it. LAME prepends its
+algorithmic delay, **measured here at 1,105 samples — 69 ms at 16 kHz**, constant
+across 64/96/128/192 kbps and mono/stereo. The delay is meant to be cancelled by
+the encoder's **gapless (Xing/LAME) header**, which records it — and ffmpeg can
+only write that header when it can *seek back over its own output*, i.e. when it
+writes to a **file**. Encode to a pipe and the header is silently missing:
+
+```
+ffmpeg -i in.wav -c:a libmp3lame -b:a 96k -f mp3 pipe:1   # 33,408 samples, lag 1,105
+ffmpeg -i in.wav -c:a libmp3lame -b:a 96k    out.mp3      # 32,000 samples, lag 0
+```
+
+⚠️ Both commands "work". Both produce audio that sounds right, has the right
+bitrate and passes any check on RMS, bandwidth or codec artifacts. The piped one
+just moves every sample 69 ms later — while `frame_intervals` (the frame-level
+labels, in absolute seconds) stay where composition put them. That is a
+**label/audio desynchronisation with no failing test**: the same shape as the
+`align_time` violation, at 3.5 frames of drift on a 50 fps frontend.
+
+**The guard** (`training.render._codec_roundtrip`, see
+[`training/AGENTS.md`](../../training/AGENTS.md)): encode to a temporary file,
+then assert the decoded frame count equals the input's and raise if it does not.
+The length *is* the delay's signature, so a future ffmpeg that stops writing the
+header fails loudly instead of shifting the corpus. 🔴 Do not "fix" such a
+failure by trimming the head to taste — the delay is per-encoder, and guessing
+it is how the drift comes back.
+
+⚠️ Only **WAV / FLAC / MP3** are wired today. AAC, OPUS, OGG and A-S4's
+narrowband codecs each need their own delay verified the same way before they
+join the draw; the local ffmpeg does not carry every encoder. A-S4's 8 kHz leg
+and G.711 μ/A-law companding are implemented (`resample_poly` is linear phase
+and self-compensating, so that leg introduces no shift).
 
 ---
 
@@ -47,17 +137,17 @@ Steps 3–5 are shared by every cell. **Labels come from steps 1–2 only.**
 
 | # | Method | What it does / why | Parameters & output |
 |---|---|---|---|
-| **A-A1** | 🔴 **Cross-domain MixUp** — mix self-generated clean audio with **real degraded** audio (ASVspoof21 LA telephony, MUSAN, real Jamendo tracks) | ★ `[BC2026 Distilled-SED]` runs "Focal–Soundscape MixUp" explicitly to *"bridge the domain gap between clean focal audio and noisy real-world soundscapes."* **This is legal domain bridging where pseudo-labeling is not** — it never touches DACON's test set | `p=0.5`, `Beta(0.4, 0.4)`. ⚠️ Update labels for whatever the mixed-in audio contributes |
-| **A-A2** | **Same-type MixUp, hard/union labels** | ★ `[BC2026]` `MIXUP_HARD=True` → `lb = max(lb1, lb2)`; ★ `[BirdCLEF 2024, 3rd]` "mixed labels are the max of the labels of the two audios". Three independent sources agree on `max` — and it matches our OR-over-components semantics | `MIXUP_PROB=0.5`, `MIXUP_ALPHA=0.4`, labels `np.maximum` |
+| **A-A1** | 🔴 **Cross-domain MixUp** — mix self-generated clean audio with **real degraded** audio (ASVspoof21 LA telephony, MUSAN, real Jamendo tracks) | ★ `[BC2026 Distilled-SED]` runs "Focal–Soundscape MixUp" explicitly to *"bridge the domain gap between clean focal audio and noisy real-world soundscapes."* **This is legal domain bridging where pseudo-labeling is not** — it never touches DACON's test set | `p=0.5`, `Beta(0.4, 0.4)`. 🔴 **Runs in step 2, not step 4** (see above) — the mixed-in audio is a component draw, and labels update from it |
+| **A-A2** | **Same-type MixUp, hard/union labels** | ★ `[BC2026]` `MIXUP_HARD=True` → `lb = max(lb1, lb2)`; ★ `[BirdCLEF 2024, 3rd]` "mixed labels are the max of the labels of the two audios". Three independent sources agree on `max` — and it matches our OR-over-components semantics | `MIXUP_PROB=0.5`, `MIXUP_ALPHA=0.4`, labels `np.maximum`. 🔴 **Step 2, not step 4** (see above) |
 | **A-A3** | 🔴 **Low-SNR-skewed component mixing** | ★ `[G2Net 2021, 3rd]`: models generalize **low-SNR → high-SNR but not the reverse**; they sampled `SNR ~ max(N(3.6,1),1)` for 2–8 bps. The hybrid-stems paper confirms detection tracks stem energy (vocals 65–80% TPR vs accompaniment 97–98%) | **Changed from uniform**: skew voice/music gain ratio toward the quiet end rather than `U(−15,+15)`. Log the ratio per sample for the accuracy-vs-SNR curve (**E-B6**) |
 | **A-A4** | **Sequential composition with sigmoid crossfade** | The rules say voice and music may appear **순차적으로**. ★ `[Freesound 2019, 1st]` `SigmoidConcatMixer` gives a *"smooth (sigmoid-based) transition from one audio-clip to another over time"* — better than hard cuts, which become a splice shortcut | 2–4 segments, order permuted, sigmoid crossfade (plus some hard cuts and silent gaps). ⚠️ **Must be applied to REAL-REAL pairs at the same rate** |
 | **A-A5** | **RawBoost** | ☆ Most effective single augmentation family in a systematic comparison against AWGN / vocoded / RIR ([survey/08](../survey/08-augmentation.md)). Models encoding, transmission, microphone and nonlinear distortion on the raw waveform | Linear, nonlinear and stationary variants. p ≈ 0.5 |
 | **A-A6** | **Additive noise (MUSAN noise + speech partitions)** | ★ `[BC2026]` uses SNR **10–30 dB** at p=0.5. ⚠️ **Never MUSAN's *music* partition** — it flips `MUSIC_PRESENT` to 1 | `AUG_NOISE_SNR_DB_RANGE = (10, 30)`, p=0.5 |
 | **A-A7** | **Gain jitter** | ★ `[BC2026]` ±6 dB, "simulates varying recording distances". Note how **modest** this is — MixUp does the heavy lifting, not signal mangling | `AUG_GAIN_DB_RANGE = (-6, +6)`, p=0.5 |
-| **A-A8** | **Time shift** | ★ `[BC2026]` ±0.5 s, "simulates temporal misalignment" | p=0.5 |
+| **A-A8** | **Time shift** | ★ `[BC2026]` ±0.5 s, "simulates temporal misalignment" | 🔴 **Runs in the draw, not step 4** (see below) — `SamplerConfig.silence_lead_s` → `ComponentDraw.target_start_s`. p=0.5 |
 | **A-A9** | **SpecAugment** | ★ `[BirdCLEF'25 B0]`: 1–3 masks, each 5–20 frames/bins, p=0.5 each for time and frequency. ★ `[Freesound 2019, 1st]`: 2 masks, 15% freq / 20% time, p=0.5 | Either parameterization; ablate |
 | **A-A10** | **RIR convolution** | Standard channel simulation; ☆ birdcall community used p=0.2 with a **dry/wet mix control** | RIRS_NOISES, p ≈ 0.3 |
-| **A-A11** | **Silence / padding edits** | Inoculates the classic ASVspoof silence-statistics shortcut ([survey/01](../survey/01-sota-speech.md)); ★ `[BC2026]` uses "silence insertion" as a segment-level aug | Trim or pad leading/trailing, p ≈ 0.2 |
+| **A-A11** | **Silence / padding edits** | Inoculates the classic ASVspoof silence-statistics shortcut ([survey/01](../survey/01-sota-speech.md)); ★ `[BC2026]` uses "silence insertion" as a segment-level aug | 🔴 **Runs in the draw, not step 4** (see below) — `silence_lead_s` / `silence_tail_s`; components occupy `duration_s − lead − tail`. p ≈ 0.2 |
 
 ---
 

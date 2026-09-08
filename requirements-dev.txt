@@ -13,3 +13,13 @@ pytest
 # PROGRESS.md already tracks from widening further.
 torch==2.7.1
 pyyaml
+
+# Training pipeline only -- NEVER vendored into submit.zip, so it costs nothing
+# against the submission's offline-install budget. Needed for the manifest,
+# folds.parquet and val_specs.parquet schemas (docs/pipelines/01, validation/01);
+# pandas raises ImportError on to_parquet without an engine.
+pyarrow
+
+# Audio I/O for the render stage. soundfile handles WAV/FLAC/OGG; the codec
+# round-trips (A-S3) and the telephone chain (A-S4) shell out to ffmpeg.
+soundfile

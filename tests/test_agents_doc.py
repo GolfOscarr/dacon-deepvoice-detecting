@@ -1,4 +1,4 @@
-"""Execute every Python snippet in metrics/AGENTS.md and models/AGENTS.md.
+"""Execute every Python snippet in metrics/, models/ and training/ AGENTS.md.
 
 A usage guide that has drifted from the code is worse than no guide, and these
 snippets are the first thing anyone copies. Running them is cheap; leaving them
@@ -106,3 +106,38 @@ def test_models_agents_md_snippet_runs(index, tmp_path):
     code = (_model_blocks()[index]
             .replace('"model/model.pt"', f'r"{tmp_path / "model" / "model.pt"}"'))
     exec(compile(code, f"models/AGENTS.md[block {index + 1}]", "exec"), env)
+
+
+# --------------------------------------------------------------------------- #
+# training/AGENTS.md
+
+TRAINING_DOC = pathlib.Path(__file__).resolve().parents[1] / "training" / "AGENTS.md"
+
+
+def _training_blocks():
+    return re.findall(r"```python\n(.*?)```", TRAINING_DOC.read_text(encoding="utf-8"), re.S)
+
+
+def test_training_doc_has_snippets():
+    assert len(_training_blocks()) >= 3
+
+
+@pytest.mark.parametrize("index", range(len(_training_blocks())))
+def test_training_agents_md_snippet_runs(index):
+    """A usage guide that has drifted from the code is worse than no guide.
+
+    The audit snippets are the ones that matter most: if the guide shows an
+    audit that cannot run, nobody runs one.
+    """
+    from training.sampler import Sampler, SamplerConfig
+    from training.synthetic import synthetic_manifest
+
+    manifest = synthetic_manifest(n_per_pool=60, n_whole_file=60, seed=0)
+    sampler = Sampler(manifest, SamplerConfig(), slice_="train")
+    spec = sampler.sample_spec(sample_id=0, epoch=0, seed=0)
+
+    env = {"manifest": manifest, "sampler": sampler, "spec": spec,
+           "sample_id": 0, "epoch": 0, "seed": 0}
+    # The guide shows a 20k-spec audit; keep the executed version small.
+    code = _training_blocks()[index].replace("n=20_000", "n=1500").replace("n=4000", "n=1500")
+    exec(compile(code, f"training/AGENTS.md[block {index + 1}]", "exec"), env)

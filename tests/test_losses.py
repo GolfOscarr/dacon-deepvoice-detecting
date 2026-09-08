@@ -73,11 +73,16 @@ def test_masked_mean_normalises_by_mask_not_batch_size():
     one = _targets([1, 0], [0, 1], voice_fake=[1, 0])
     _, half = multitask_loss(out, one, cfg, LossConfig())
 
-    per_sample = torch.nn.functional.binary_cross_entropy_with_logits(
-        out["voice"]["clip_logits"], torch.tensor([1.0, 0.0]), reduction="none")
+    # Derive the blend from the config rather than hardcoding it: clip_weight is
+    # a tunable default (1.0 = clip-only, docs/training/02 §3) and this test is
+    # about the *normaliser*, not the blend.
+    cw = cfg.branches["voice"].head.clip_weight
+    y = torch.tensor([1.0, 0.0])
+    clip_bce = torch.nn.functional.binary_cross_entropy_with_logits(
+        out["voice"]["clip_logits"], y, reduction="none")
     fmax = out["voice"]["frame_logits"].amax(-1)
-    per_sample = 0.5 * per_sample + 0.5 * torch.nn.functional.binary_cross_entropy_with_logits(
-        fmax, torch.tensor([1.0, 0.0]), reduction="none")
+    frame_bce = torch.nn.functional.binary_cross_entropy_with_logits(fmax, y, reduction="none")
+    per_sample = cw * clip_bce + (1.0 - cw) * frame_bce
     assert half["voice"] == pytest.approx(float(per_sample[0]), abs=1e-5)
     assert full["voice"] == pytest.approx(float(per_sample.mean()), abs=1e-5)
 
@@ -95,16 +100,177 @@ def test_batch_with_no_present_component_is_not_nan():
 # weights and blend
 
 def test_per_head_weights_are_applied():
-    """The metric weights File .45 / Music .27 / Voice .18 while the default
-    config weights them equally -- so this knob must actually work (09 B11)."""
+    """The knob must work, and the default must be the metric weights.
+
+    The metric weights File .45 / Music .27 / Voice .18 / presence .05 each. An
+    earlier default weighted all five equally, inherited from PC-Mix whose metric
+    weighted its components equally and ours does not (docs/training/02 §4).
+    """
     model, cfg = _model()
     out = model(torch.randn(3, SR * 4))
     targets = _targets([1, 1, 1], [1, 1, 1], voice_fake=[1, 0, 1], music_fake=[0, 1, 1])
 
-    equal, _ = multitask_loss(out, targets, cfg, LossConfig())
-    metric_shaped, _ = multitask_loss(out, targets, cfg, LossConfig(
-        weights={"voice": 0.18, "music": 0.27, "file": 0.45, "v_pres": 0.05, "m_pres": 0.05}))
+    assert LossConfig().weights == {
+        "voice": 0.18, "music": 0.27, "file": 0.45, "v_pres": 0.05, "m_pres": 0.05}
+
+    metric_shaped, _ = multitask_loss(out, targets, cfg, LossConfig())
+    equal, _ = multitask_loss(out, targets, cfg, LossConfig(
+        weights={"voice": 1.0, "music": 1.0, "file": 1.0, "v_pres": 1.0, "m_pres": 1.0}))
     assert float(equal) != pytest.approx(float(metric_shaped))
+
+
+#: What the competition metric weights each submission column at
+#: (metrics.dacon.SCORE_WEIGHTS, docs/validation/02 §1).
+#:
+#: 🔴 Written out here, column-keyed and by hand, on purpose. The two tests below
+#: must not reach for `losses.WEIGHT_KEY_FOR_COLUMN` or `losses.TARGET_FOR_COLUMN`
+#: to say what they expect: those mappings are the thing under test, and a test
+#: that looks a weight up through the same mapping the loss uses survives every
+#: permutation of it. `test_per_head_weights_are_applied` above checks the weights
+#: *dict*; these check the weights *in effect*.
+METRIC_WEIGHT_FOR_COLUMN = {
+    "FILE_FAKE_PROB": 0.45,
+    "MUSIC_FAKE_PROB": 0.27,
+    "VOICE_FAKE_PROB": 0.18,
+    "VOICE_PRESENT_PROB": 0.05,
+    "MUSIC_PRESENT_PROB": 0.05,
+}
+
+#: The ground-truth key each column is scored against, likewise by hand.
+METRIC_TARGET_FOR_COLUMN = {
+    "FILE_FAKE_PROB": "file_fake",
+    "MUSIC_FAKE_PROB": "music_fake",
+    "VOICE_FAKE_PROB": "voice_fake",
+    "VOICE_PRESENT_PROB": "voice_present",
+    "MUSIC_PRESENT_PROB": "music_present",
+}
+
+
+def test_each_head_is_weighted_at_its_own_metric_weight():
+    """🔴 The weight *in effect* per head, recovered without the mapping.
+
+    `multitask_loss` walks `cfg.branches`, so restricting the config to one
+    branch -- exactly what `training.stages._stage_loss_config` does for real --
+    makes the returned total that branch's weighted contribution alone, while
+    `parts[branch]` is the same head loss unweighted. Their ratio is the weight
+    the objective actually applied to that head, and it is compared against the
+    metric weight for the branch's own column.
+
+    ⚠️ Every part of the head-to-weight path is then covered: permuting
+    `WEIGHT_KEY_FOR_COLUMN` moves the ratio and not the expectation. Mutating it
+    so both presence heads read `"file"` trains two 0.05 heads at 0.45; the whole
+    suite passed that mutation before this test existed.
+    """
+    from metrics.dacon import SCORE_WEIGHTS
+    assert sorted(METRIC_WEIGHT_FOR_COLUMN.values()) == sorted(SCORE_WEIGHTS.values()), \
+        "the metric's head weights moved; this table is stale"
+
+    model, cfg = _model()
+    torch.manual_seed(3)
+    out = model(torch.randn(4, SR * 4))
+    targets = _targets([1, 1, 1, 0], [1, 0, 1, 1],
+                       voice_fake=[1, 0, 1, 0], music_fake=[0, 1, 1, 0])
+
+    assert set(br.column for br in cfg.branches.values()) == set(METRIC_WEIGHT_FOR_COLUMN)
+    for name, br in cfg.branches.items():
+        one_branch = dataclasses.replace(cfg, branches={name: br})
+        total, parts = multitask_loss(out, targets, one_branch, LossConfig())
+        # Non-vacuity: a zero head loss would make every weight look right.
+        assert parts[name] > 1e-3, f"{name}: head loss too small to divide by"
+        in_effect = float(total) / parts[name]
+        assert in_effect == pytest.approx(METRIC_WEIGHT_FOR_COLUMN[br.column], rel=1e-4), \
+            f"{name} ({br.column}) is trained at {in_effect}"
+
+
+def test_each_head_is_trained_against_its_own_column_label():
+    """🔴 The target *in effect* per head, recovered without the mapping.
+
+    Companion to the weight test: permuting `TARGET_FOR_COLUMN` would train each
+    head on a label the metric scores a different column against, and no shape,
+    mask or weight assertion notices.
+
+    The two presence keys are also the masks, so they are perturbed separately
+    and only the two presence heads are checked against them -- flipping
+    `voice_present` legitimately moves the voice head through its mask.
+    """
+    model, cfg = _model()
+    torch.manual_seed(4)
+    out = model(torch.randn(4, SR * 4))
+    base = {"voice_present": torch.ones(4), "music_present": torch.ones(4),
+            "voice_fake": torch.tensor([1.0, 0.0, 1.0, 0.0]),
+            "music_fake": torch.tensor([0.0, 1.0, 1.0, 0.0]),
+            "file_fake": torch.tensor([1.0, 1.0, 1.0, 0.0])}
+    _, ref = multitask_loss(out, base, cfg, LossConfig())
+
+    def moved(perturbed):
+        _, got = multitask_loss(out, perturbed, cfg, LossConfig())
+        return {n for n in cfg.branches
+                if got[n] != pytest.approx(ref[n], abs=1e-6)}
+
+    column_of = {n: br.column for n, br in cfg.branches.items()}
+
+    # All masks stay all-ones here, so a fake label can only reach a head that is
+    # trained against it.
+    for key in ("voice_fake", "music_fake", "file_fake"):
+        flipped = dict(base, **{key: 1.0 - base[key]})
+        expected = {n for n, col in column_of.items()
+                    if METRIC_TARGET_FOR_COLUMN[col] == key}
+        assert moved(flipped) == expected, f"{key} reached the wrong head(s)"
+
+    # Presence keys: check only the presence heads, whose masks are all null.
+    presence_heads = {n for n, col in column_of.items()
+                      if METRIC_TARGET_FOR_COLUMN[col] in ("voice_present", "music_present")}
+    assert len(presence_heads) == 2
+    for key in ("voice_present", "music_present"):
+        one_absent = dict(base, **{key: torch.tensor([1.0, 1.0, 1.0, 0.0])})
+        expected = {n for n, col in column_of.items()
+                    if METRIC_TARGET_FOR_COLUMN[col] == key}
+        assert moved(one_absent) & presence_heads == expected, \
+            f"{key} reached the wrong presence head(s)"
+
+
+def test_the_effective_weight_per_head_is_logged():
+    """🔴 `w_c / p_c` is the weight in effect, and it was recorded nowhere.
+
+    docs/training/02 §4 commits to logging it per head as a standing diagnostic
+    and says outright not to tune `w_c` without looking at it -- `_masked_mean`
+    divides by the present-count, so a masked head's per-sample influence on the
+    shared trunk is amplified by how rare its component is. Without it T2 cannot
+    be read as specified.
+    """
+    model, cfg = _model()
+    out = model(torch.randn(4, SR * 4))
+    # voice present in 1 of 4, music in 2 of 4: three distinct p_c in one batch.
+    targets = _targets([1, 0, 0, 0], [1, 1, 0, 0],
+                       voice_fake=[1, 0, 0, 0], music_fake=[0, 1, 0, 0])
+    _, parts = multitask_loss(out, targets, cfg, LossConfig())
+
+    weights = LossConfig().weights
+    expected_p_c = {"voice": 0.25, "music": 0.5,
+                    "file": 1.0, "v_pres": 1.0, "m_pres": 1.0}
+    for name, br in cfg.branches.items():
+        p_c = parts[f"{name}/p_c"]
+        assert p_c == pytest.approx(expected_p_c[name]), name
+        assert parts[f"{name}/w_eff"] == pytest.approx(
+            weights[name] / expected_p_c[name]), name
+    # Non-vacuity: the masked heads must actually be amplified here, or the
+    # assertions above would hold for a `w_eff` that just echoed `w_c`.
+    assert parts["voice/w_eff"] == pytest.approx(4 * weights["voice"])
+    assert parts["music/w_eff"] == pytest.approx(2 * weights["music"])
+
+    # A component absent from the whole batch contributes nothing, so its
+    # effective weight is 0 rather than a division by zero.
+    absent = _targets([0, 0, 0, 0], [1, 1, 1, 1])
+    _, parts = multitask_loss(out, absent, cfg, LossConfig())
+    assert parts["voice/p_c"] == 0.0
+    assert parts["voice/w_eff"] == 0.0
+    assert parts["voice"] == 0.0
+
+    # The diagnostics are not loss terms: `total` is the weighted sum of the
+    # per-branch losses and nothing else.
+    total, parts = multitask_loss(out, targets, cfg, LossConfig())
+    assert float(total) == pytest.approx(
+        sum(weights[n] * parts[n] for n in cfg.branches), rel=1e-5)
 
 
 def test_loss_blend_comes_from_the_head_config_not_a_separate_knob():
@@ -146,11 +312,13 @@ def test_ranking_loss_ranks_what_inference_ranks():
     _, ranked = multitask_loss(out, targets, cfg, LossConfig(ranking_weight=1.0))
     assert ranked["voice"] > plain["voice"], "the ranking term must contribute"
 
-    # The term is computed on the blended logit, which is what branch_logit returns.
-    br = cfg.branches["voice"]
-    blended = branch_logit(out["voice"], br.head)
+    # The term is computed on the blended logit, which is what branch_logit
+    # returns. Force the blend on: clip_weight defaults to 1.0 (clip-only), where
+    # "blend" and "clip" coincide and the assertion would be vacuous.
+    br_head = dataclasses.replace(cfg.branches["voice"].head, clip_weight=0.5)
+    blended = branch_logit(out["voice"], br_head)
     assert not torch.allclose(blended, out["voice"]["clip_logits"]), \
-        "with clip_weight 0.5 the blend must differ from clip alone"
+        "at clip_weight 0.5 the blend must differ from clip alone"
 
 
 def test_loss_is_differentiable():
@@ -207,8 +375,12 @@ def test_distillation_contributes_when_enabled():
 def test_loss_frame_max_ignores_padding_by_default():
     """The training signal must not come from padded-frame logits either."""
     model, cfg = _model()
-    x = torch.randn(1, SR * 4)
-    lengths = torch.tensor([SR * 4])
+    # ⚠️ `+ 1`, so the last valid frame is part padding. At `SR * 4` this guard
+    # ran on 200 whole frames and never saw the boundary frame the pipeline's
+    # U(4, 60)s durations produce on almost every sample.
+    n = SR * 4 + 1
+    x = torch.randn(1, n)
+    lengths = torch.tensor([n])
     targets = _targets([1], [1], voice_fake=[1.0], music_fake=[0.0])
 
     quiet = model(torch.nn.functional.pad(x, (0, SR * 4)), lengths)

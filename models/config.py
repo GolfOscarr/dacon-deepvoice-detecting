@@ -52,9 +52,42 @@ KNOWN_FRONTENDS = (
 #: voice-present files (docs/competition/03-evaluation.md).
 MASK_KEYS = ("voice_present", "music_present")
 
+#: The mask each submission column's loss **must** take. 🔴 Not a convention: the
+#: metric fixes it. Voice EER is scored over voice-present files only, Music EER
+#: over music-present files only, and File EER and both presence AUCs over every
+#: file (docs/validation/02 §1). Validating only that `masked_by` is *a* mask key
+#: accepted `voice: masked_by: music_present` -- a branch trained on a pool the
+#: metric never scores it on, and shaped exactly like the defect the masks exist
+#: to prevent.
+MASK_FOR_COLUMN = {
+    "VOICE_FAKE_PROB": "voice_present",
+    "MUSIC_FAKE_PROB": "music_present",
+    "FILE_FAKE_PROB": None,
+    "VOICE_PRESENT_PROB": None,
+    "MUSIC_PRESENT_PROB": None,
+}
+
+#: The per-head keys `LossConfig.weights` must carry -- one per submission
+#: column, matching `models.losses.WEIGHT_KEY_FOR_COLUMN`. 🔴 All five are
+#: **required**, not optional: a YAML `weights: {file: 0.45}` used to load clean
+#: and train the two presence heads at the loss's 1.0 fallback instead of 0.05,
+#: a 20x over-weighting with nothing to see in the config or the logs.
+LOSS_WEIGHT_KEYS = ("voice", "music", "file", "v_pres", "m_pres")
+
 
 class ConfigError(ValueError):
     """A config that would build a model we do not mean to build."""
+
+
+#: Every channel policy `models.audio.prepare_waveform` implements, and the one
+#: place they are listed. 🔴 Exported so downstream guards can *enumerate* them
+#: rather than restate them: `training.collate.promote_channels` is rule-2.4 safe
+#: only because every policy here is invariant to repeating a row's channels **a
+#: whole number of times**, and the test that proves it reads this tuple -- so
+#: adding a policy without checking it fails the suite instead of shipping.
+#: ⚠️ The qualifier is not decoration. An uneven repeat (2 -> 3) breaks `downmix`
+#: by 1.12 at the model boundary, which is why `promote_channels` refuses one.
+CHANNEL_POLICIES = ("downmix", "left", "mid_side")
 
 
 @dataclass(frozen=True)
@@ -140,7 +173,16 @@ class SEDHeadConfig:
     hidden: int = 512
     dropout_in: float = 0.25
     dropout_out: float = 0.5
-    clip_weight: float = 0.5        # blend of clip vs frame_max, applied in LOGIT space
+    #: 🔴 1.0 = clip only. Committed in docs/training/02 §3: supervising the
+    #: utterance and frame levels through ONE shared head measured 0.71-3.63 EER
+    #: points WORSE than utterance-only (Zhang et al., ASVspoof 2021 Workshop,
+    #: Table 5), and our head is exactly that configuration -- `clip_logits` is a
+    #: pooled function of the `frame_logits` the frame loss also touches.
+    #: ⚠️ Pending ablation T1; the transfer caveats are in docs/training/02 §3.
+    #: ⚠️ At 1.0 the submitted score ignores `frame_max` entirely, which makes the
+    #: rule-2.4 frame_max guards vacuous -- the tests force the blend on rather
+    #: than inheriting this default. Do not "simplify" them back.
+    clip_weight: float = 1.0        # blend of clip vs frame_max, applied in LOGIT space
     attention: str = "linear"       # linear | scaled_tanh | tanh
 
 
@@ -253,15 +295,45 @@ class ModelConfig:
 class LossConfig:
     """Per-head weights and the loss blend (docs/architecture/08 §2).
 
-    ⚠️ `weights` defaults to PC-Mix's equal weighting, which is inherited rather
-    than chosen -- our metric weights File .45 / Music .27 / Voice .18. This is a
-    flagged open knob (09 B11), not a settled default.
+    ✅ `weights` is metric-proportional. 09 B11 is closed: it was rated "probably
+    not resolvable individually -- set by argument", a targeted search found no
+    study testing loss-weights against metric-weights, and the argument is in
+    docs/training/02 §4.
     """
+    #: 🔴 Metric-proportional, per docs/training/02 §4. The effective weights are
+    #: File .45 / Music .27 / Voice .18 / presence .05 each; an earlier default of
+    #: all-1.0 was inherited from PC-Mix, whose metric weighted its components
+    #: equally and ours does not. No study tests loss-weights ∝ metric-weights, so
+    #: this is set by argument (09 B11 predicted it would be); every adaptive
+    #: alternative (GradNorm/PCGrad/DWA/uncertainty) has strong negative results
+    #: against well-tuned constants.
+    #: ⚠️ The weight in effect is `w_c / p_c`, not `w_c` -- `_masked_mean` divides
+    #: by the present-count. Log both before tuning.
     weights: dict[str, float] = field(default_factory=lambda: {
-        "voice": 1.0, "music": 1.0, "file": 1.0, "v_pres": 1.0, "m_pres": 1.0})
+        "voice": 0.18, "music": 0.27, "file": 0.45, "v_pres": 0.05, "m_pres": 0.05})
     ranking_weight: float = 0.0
     distill_weight: float = 1.0
     label_smoothing: float = 0.0
+
+    def __post_init__(self):
+        # 🔴 Checked here rather than in `load_train_config` so that the rule
+        # holds for every LossConfig, however it was built -- a YAML load, a
+        # `dataclasses.replace`, a checkpoint round-trip or a test. A partial
+        # dict is a config error, not a set of defaults: the loss reads
+        # `weights[key]` with no fallback, so an absent head has no meaning.
+        got = set(self.weights)
+        unknown = sorted(got - set(LOSS_WEIGHT_KEYS))
+        if unknown:
+            raise ConfigError(
+                f"loss.weights: unknown head(s) {unknown}; the five heads are "
+                f"{list(LOSS_WEIGHT_KEYS)}")
+        missing = [k for k in LOSS_WEIGHT_KEYS if k not in got]
+        if missing:
+            raise ConfigError(
+                f"loss.weights: missing head(s) {missing}. All five must be set "
+                "explicitly -- a partial dict used to leave the absent heads at "
+                "1.0, which is 20x the 0.05 the metric gives a presence head "
+                "(docs/training/02 §4)")
 
     # ⚠️ There is deliberately no `frame_weight` here. The clip-vs-frame_max blend
     # is `SEDHeadConfig.clip_weight`, and the loss reads that same field, so
@@ -431,6 +503,16 @@ def validate_model_config(cfg: ModelConfig) -> None:
         if br.masked_by is not None and br.masked_by not in MASK_KEYS:
             raise ConfigError(
                 f"branches.{name}.masked_by must be one of {list(MASK_KEYS)} or null")
+        # The column decides the mask, because the metric decides the pool. A
+        # column this branch has no business producing is caught below, by the
+        # exactly-the-five-columns check; say nothing about its mask here.
+        if br.column in MASK_FOR_COLUMN and br.masked_by != MASK_FOR_COLUMN[br.column]:
+            required = MASK_FOR_COLUMN[br.column]
+            pool = "every file" if required is None else f"{required} files only"
+            raise ConfigError(
+                f"branches.{name}.masked_by is {br.masked_by!r}, but {br.column} "
+                f"is scored over {pool}, so its loss must be masked by "
+                f"{required!r} (docs/validation/02 §1)")
         if not 0.0 <= br.head.clip_weight <= 1.0:
             raise ConfigError(f"branches.{name}.head.clip_weight must be in [0, 1]")
         if br.head.attention not in ("linear", "scaled_tanh", "tanh"):
@@ -478,7 +560,7 @@ def validate_model_config(cfg: ModelConfig) -> None:
     if cfg.output.logit_scale <= 0:
         raise ConfigError("output.logit_scale must be > 0")
 
-    if cfg.audio.channels not in ("downmix", "left", "mid_side"):
+    if cfg.audio.channels not in CHANNEL_POLICIES:
         raise ConfigError(f"audio.channels invalid: {cfg.audio.channels!r}")
     if cfg.audio.sample_rate != 16_000:
         raise ConfigError(
@@ -509,10 +591,10 @@ def load_train_config(path: str | Path) -> TrainConfig:
     d = dict(yaml.safe_load(Path(path).read_text()) or {})
     teachers = {k: _build(FrontendConfig, v, f"train.teachers.{k}")
                 for k, v in (d.pop("teachers", None) or {}).items()}
+    # The per-head weight keys are checked in `LossConfig.__post_init__`, which
+    # `_build` has already run -- and which also rejects a *partial* dict, the
+    # case this loop never covered.
     cfg = dataclasses.replace(_build(TrainConfig, d, "train"), teachers=teachers)
-    for key in cfg.loss.weights:
-        if key not in {"voice", "music", "file", "v_pres", "m_pres"}:
-            raise ConfigError(f"train.loss.weights: unknown head {key!r}")
     for name, fe in cfg.teachers.items():
         if fe.name not in KNOWN_FRONTENDS:
             raise ConfigError(f"train.teachers.{name}: unknown frontend {fe.name!r}")

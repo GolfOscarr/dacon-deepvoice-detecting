@@ -117,9 +117,14 @@ cost of saturation is **EER 0.0950 → 0.3017**. ⚠️ fp16 inference ([06 §4]
 it worse. Blend in logit space and squash once, in float64:
 
 ```python
-z = 0.5 * clip_logits + 0.5 * frame_max_logits          # float64
+z = w * clip_logits + (1 - w) * frame_max_logits        # w = clip_weight, default 1.0
 p = expit(z)                                            # monotone in z; order preserved
 ```
+
+⚠️ `w` defaulted to 0.5 by symmetry and is now **1.0 (clip only)** — see
+[training/02 §3](../training/02-the-loss.md#3--clipweight--10--the-one-change-worth-engineer-days).
+🔴 At `w = 1.0` `frame_max` does not reach the submitted score, so every rule-2.4 guard written
+against it passes vacuously; the tests force the blend on deliberately.
 
 The blend weights are unchanged, the ranking is unchanged where the sigmoid has not saturated, and
 the ties disappear where it had. ⚠️ The **training** loss still uses two separate BCE terms —
@@ -142,7 +147,7 @@ presence heads, questionable for the fake heads — test per head, do not apply 
 
 ---
 
-## 4. Multi-resolution supervision — and the advantage we get for free
+## 4. Multi-resolution supervision — an advantage we can produce, but should not lean on
 
 ★ PC-Mix supervises frames at **40 / 80 / 160 / 320 / 640 ms** alongside the utterance label;
 PartialSpoof does the same at 20–640 ms. Both report that this is what makes short fake components
@@ -158,8 +163,15 @@ labels — so multi-resolution supervision is available on *exactly the subset w
 shortcut lives* (§ below). A heavily weighted frame loss therefore trains hardest on the files
 whose structure most reliably predicts the label, which is the opposite of what we want.
 
-🔷 The consequence, which an earlier draft left undrawn: **the frame-loss weight is a
-shortcut-exposure knob, not just an accuracy knob.** Start it low, raise it only if the `E-S2`
+★ **Now measured, not inferred.** PartialSpoof §VI-D / Fig. 5 breaks EER down by number of
+concatenation boundaries: it is **worst — above 14% — at zero boundaries**, the authors attributing
+it to overlap-add artifacts. ⚠️ And its measured *benefit* is **+0.15 utterance EER in-domain,
+−0.13 out-of-domain** — below our resolution threshold and the wrong sign on the axis we care about
+([training/03 §4](../training/03-ruled-out.md#4-multi-resolution-frame-supervision---downgraded-from-headline-to-optional)).
+⚠️ The group that invented multi-resolution supervision explicitly declined to run it under
+*partial* frame labels (their footnote 11) — which is exactly our corpus.
+
+🔴 The consequence: **the frame-loss weight is a shortcut-exposure knob, not just an accuracy knob.** Start it low, raise it only if the `E-S2`
 shortcut audit stays clean, and never let composed and natural files differ in whether they carry
 frame supervision without checking what the model learns from that difference.
 

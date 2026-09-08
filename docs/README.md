@@ -10,6 +10,8 @@ Working documentation for **DACON 236749 — 딥보이스 범죄 대응을 위�
 | **[data/](data/)** | Our data strategy: rules check, label taxonomy, sources, synthesis, augmentation spec, build plan | [README](data/README.md) |
 | **[validation/](validation/)** | How we measure: split scheme, metric harness, decision protocol, gates, LB decomposition | [README](validation/README.md) |
 | **[architecture/](architecture/)** | How we build the model: the design envelope, pretrained candidates, ensembling, runtime budget | [README](architecture/README.md) |
+| **[pipelines/](pipelines/)** | How data reaches the model: the sample contract, sampler, transform registries, collation, invariants | [README](pipelines/README.md) |
+| **[training/](training/)** | What we optimize: the objective derived from the metric, what the evidence rules out, the schedule | [README](training/README.md) |
 
 ## Reading order for someone new
 
@@ -20,6 +22,8 @@ Working documentation for **DACON 236749 — 딥보이스 범죄 대응을 위�
 5. `data/README.md` — what we're actually building
 6. `validation/README.md` — how we decide whether any of it worked
 7. `architecture/README.md` — what we build, and why that and not something else
+8. `pipelines/README.md` — the code contract between the corpus and the model
+9. `training/README.md` — what the loss does with the batch, and why it is so short
 
 ## Confidence marks used throughout
 
@@ -37,6 +41,8 @@ Working documentation for **DACON 236749 — 딥보이스 범죄 대응을 위�
 | Data strategy | ✅ planned; **not yet executed** — see [data/08](data/08-build-plan.md) |
 | Validation design | ✅ drafted (2026-09-07); gates not yet implemented |
 | Architecture design | ✅ candidates ranked (2026-09-07); **nothing trained yet** |
+| Data pipeline | ✅ designed (2026-09-08); ⬜ **no code** — see [pipelines/README](pipelines/README.md) |
+| Training objective | ✅ designed (2026-09-08), deep-read 4 axes; ⬜ **corrections not applied** — see [training/05](training/05-corrections.md) |
 | Modeling | ⬜ not started |
 
 **Next action**: Phase 0 of [data/08-build-plan.md](data/08-build-plan.md) — license audit and

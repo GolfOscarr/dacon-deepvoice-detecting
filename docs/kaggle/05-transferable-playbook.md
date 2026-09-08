@@ -130,7 +130,7 @@ Everything above, reorganized by your four themes. Each item tagged with its sou
 | Generate **adversarial** (deliberately hard) fakes, not only typical ones | [data/05](../data/05-synthesis-plan.md) |
 | Consider **real-class average-PSD whitening** as a front-end | new experiment |
 | 🔴 **SED attention head + GeM freq pooling** for all five heads; learnable `p` settles the max-vs-mean pooling question | [06 §1](06-notebook-code.md) |
-| 🔴 **Loss and inference blend `0.5·clip + 0.5·frame_max`** — matches our OR-over-segments label semantics | [06 §2](06-notebook-code.md) |
+| ⚠️ ~~**Loss and inference blend `0.5·clip + 0.5·frame_max`**~~ — matches our OR-over-segments label semantics, **but not adopted**: supervising both levels through one shared head measured 0.71–3.63 EER points worse than clip-only ([training/02 §3](../training/02-the-loss.md#3--clipweight--10--the-one-change-worth-engineer-days)). `clip_weight` defaults to 1.0 | [06 §2](06-notebook-code.md) |
 | 🔴 **Distill frozen XLS-R / BEATs into a small student with stop-gradient** — the runtime fix | [06 §3](06-notebook-code.md) |
 | 🔴 **Cross-domain MixUp**: mix self-generated clean audio with real degraded audio (ASVspoof21 LA, MUSAN, Jamendo). Legal domain bridging where pseudo-labeling is not | [06 §6](06-notebook-code.md) |
 | **Silero VAD** to verify Pool C is vocal-free, and as a presence-head prior | [06 §9](06-notebook-code.md) |

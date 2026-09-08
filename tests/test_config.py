@@ -13,13 +13,16 @@ import yaml
 
 from metrics.dacon import PREDICTION_COLUMNS
 from models.config import (
+    LOSS_WEIGHT_KEYS,
     ConfigError,
+    LossConfig,
     ModelConfig,
     dump_config,
     load_model_config,
     load_train_config,
     validate_model_config,
 )
+from training.config import load_run_config
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CONFIGS = ROOT / "configs"
@@ -49,13 +52,104 @@ def _built(raw):
 # --------------------------------------------------------------------------- #
 # the shipped configs
 
+#: The loaders a shipped config may belong to. A config must be accepted by
+#: exactly one; the filename is not consulted.
+LOADERS = {
+    "model": load_model_config,
+    "train": load_train_config,
+    "run": load_run_config,
+}
+
+
+def _classify(path):
+    """Which loaders accept `path`. Content decides, not the filename.
+
+    Critical: this dispatched on the filename prefix with a `load_model_config`
+    fallback in the `else` branch, so a config whose name matched no prefix was
+    silently validated as a *model* config -- the sweep reported it as loaded
+    while nothing had read its schema. That is the failure mode this test
+    exists to catch, reintroduced inside the test itself. It only surfaced
+    because `load_model_config` happens to reject unknown top-level keys; a
+    laxer loader would have kept it green. Every loader here rejects unknown
+    top-level keys, so acceptance is a real classification rather than a guess.
+    """
+    accepted = []
+    for kind, load in LOADERS.items():
+        try:
+            load(path)
+        except Exception:
+            continue
+        accepted.append(kind)
+    return accepted
+
+
 def test_every_shipped_config_loads():
+    """Critical: every shipped config is accepted by exactly one loader.
+
+    Not "each loader loads its own files" -- that phrasing passes while a
+    config nobody classified sits unloaded. Exactly-one is what makes adding a
+    fourth config kind turn this red instead of routing it to whichever loader
+    happens not to complain.
+
+    ⚠️ Both halves are reachable and both are covered below. An earlier version
+    of this docstring said the ambiguity half "cannot currently fail" and stood
+    down a mutation that returns the first acceptance; that was wrong. A config
+    of nothing but defaults is accepted by `load_train_config` *and* by
+    `load_run_config` today -- neither needs a single key to build a complete
+    config -- so two loaders reading one file is a live failure mode, not a
+    contract kept for a hypothetical future loader.
+    """
     assert SHIPPED, "no configs found"
     for path in SHIPPED:
-        if path.name.startswith("train"):
-            load_train_config(path)
-        else:
-            load_model_config(path)
+        accepted = _classify(path)
+        assert accepted, (
+            f"{path.name} is accepted by no loader: it ships in configs/ and "
+            f"nothing can read it. Add its loader to LOADERS.")
+        assert len(accepted) == 1, (
+            f"{path.name} is accepted by {accepted} -- ambiguous. Two loaders "
+            f"reading one file means neither owns its schema.")
+
+
+def test_an_unclassifiable_config_is_not_silently_accepted(tmp_path):
+    """The non-vacuity guard: prove the sweep above can fail.
+
+    Caveat: without this, `test_every_shipped_config_loads` passes for exactly
+    as long as every shipped file happens to be classifiable -- which is until
+    someone adds a new kind, the moment it would have earned its keep.
+    """
+    orphan = tmp_path / "orphan.yaml"
+    orphan.write_text("wholly_unknown_section:\n  a: 1\n")
+    assert _classify(orphan) == [], (
+        "a config belonging to no loader was accepted by one; the sweep would "
+        "have reported it as loaded")
+
+
+def test_a_config_two_loaders_accept_is_ambiguous_rather_than_the_first_one(tmp_path):
+    """🔴 The other half of the guard, and it fails today -- not hypothetically.
+
+    A config of nothing but defaults is accepted by `load_train_config` and by
+    `load_run_config` both: neither schema requires a single key, so each builds
+    a complete config out of an empty mapping and nothing in the file prefers
+    either. `load_model_config` rejects it ("at least one branch is required"),
+    which is the only reason this is a two-way tie rather than a three-way one.
+
+    Critical: `_classify` must report the tie rather than resolve it. Returning
+    the first acceptance is the same defect as the filename `else` branch it
+    replaced -- a router picking a loader on something incidental, here dict
+    ordering in LOADERS, and reporting the file as loaded. The sweep's
+    `len(accepted) == 1` is what turns that into a red, so the tie has to reach
+    it intact.
+    """
+    defaults = tmp_path / "nothing_but_defaults.yaml"
+    defaults.write_text("{}\n")
+    accepted = _classify(defaults)
+    assert accepted == ["train", "run"], (
+        "an all-defaults config is genuinely ambiguous between the train and "
+        "run loaders; _classify resolved it instead of reporting the tie")
+    # `test_every_shipped_config_loads` asserts `len(accepted) == 1` on exactly
+    # this value, so a tie that survives _classify is a red sweep. Asserting the
+    # tie here rather than re-running the sweep keeps the message in one place.
+    assert len(accepted) > 1
 
 
 def test_a_and_b_produce_exactly_the_submission_columns():
@@ -172,7 +266,32 @@ def test_unknown_frontend_is_rejected():
 def test_bad_mask_key_is_rejected():
     raw = _raw("a_shared_trunk.yaml")
     raw["branches"]["voice"]["masked_by"] = "voice_fake"     # a label, not a mask
-    with pytest.raises(ConfigError, match="masked_by"):
+    with pytest.raises(ConfigError, match="must be one of"):
+        _built(raw)
+
+
+@pytest.mark.parametrize("branch,mask", [
+    ("voice", "music_present"),      # the wrong pool, both keys valid
+    ("voice", None),                 # unmasked: trains on music-only files
+    ("music", "voice_present"),
+    ("music", None),
+    ("file", "voice_present"),       # File EER is over every file
+    ("v_pres", "voice_present"),     # circular: masked by its own target
+    ("m_pres", "music_present"),
+])
+def test_a_mask_that_is_not_the_metrics_pool_is_rejected(branch, mask):
+    """🔴 The column decides the mask, because the metric decides the pool.
+
+    Validation used to check only that `masked_by` was in MASK_KEYS or null, so
+    `voice: masked_by: music_present` alongside `music: masked_by: null` loaded
+    clean -- a voice head trained on the files the metric never scores it on,
+    which is the exact defect the masks exist to prevent. Both shipped configs
+    are correct and pinned by `test_masks_mirror_the_metric`; this protects the
+    next one.
+    """
+    raw = _raw("a_shared_trunk.yaml")
+    raw["branches"][branch]["masked_by"] = mask
+    with pytest.raises(ConfigError, match="is scored over"):
         _built(raw)
 
 
@@ -203,6 +322,42 @@ def test_train_config_rejects_unknown_head():
         yaml.safe_dump(raw, fh)
         with pytest.raises(ConfigError, match="unknown head"):
             load_train_config(fh.name)
+
+
+def test_train_config_requires_every_head_weight():
+    """🔴 A partial `weights` dict used to load clean and default the rest.
+
+    `weights: {file: 0.45}` passed the unknown-key check -- every key it carried
+    *was* known -- and `multitask_loss` filled the four absent heads in at its
+    own 1.0 fallback. That trains both presence heads at 20x the 0.05 the metric
+    gives them, with nothing wrong-looking in the YAML to see (docs/training/02
+    §4). Now the five keys are required, and the loss indexes rather than
+    `.get`s them.
+    """
+    import tempfile
+    raw = yaml.safe_load((CONFIGS / "train_joint.yaml").read_text())
+    raw["loss"]["weights"] = {"file": 0.45}
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
+        yaml.safe_dump(raw, fh)
+        with pytest.raises(ConfigError, match="missing head"):
+            load_train_config(fh.name)
+
+
+def test_loss_config_rejects_a_partial_weights_dict_however_it_is_built():
+    """The rule is on LossConfig, not on the YAML loader.
+
+    A `dataclasses.replace` or a checkpoint round-trip reaches the same object
+    without passing through `load_train_config`, so the check lives where every
+    path meets.
+    """
+    with pytest.raises(ConfigError, match="missing head"):
+        LossConfig(weights={"file": 0.45})
+    with pytest.raises(ConfigError, match="unknown head"):
+        LossConfig(weights=dict(LossConfig().weights, drums=1.0))
+    # The default is complete, and replacing one weight keeps it so.
+    assert set(LossConfig().weights) == set(LOSS_WEIGHT_KEYS)
+    assert dataclasses.replace(
+        LossConfig(), weights=dict(LossConfig().weights, file=0.9)).weights["file"] == 0.9
 
 
 def test_configs_are_frozen():

@@ -14,22 +14,31 @@ folds exist and VG1 passes ([validation/](../validation/README.md)).
 
 ## 1. The staged schedule
 
-★ Both component-level papers stage the same way, and both report the joint stage as the
-**largest single gain**:
+★ Both component-level papers stage the same way. ⚠️ **Their headline "largest single gain" is a
+thresholded-metric result** — see the re-grading below and
+[training/04 §2](../training/04-schedule.md#2--s2s-evidence-is-a-thresholded-metric-result--keep-the-stage-drop-the-claim).
 
 | Stage | What trains | Source |
 |---|---|---|
 | **S1 — independent** | Each branch alone, frozen frontends + adapters | PC-Mix: "independent, then joint"; CompSpoof: independent for 4 epochs |
-| **S2 — joint** | All branches together, component losses masked to present components | ★ PC-Mix ACC **69.40 → 85.12** · CompSpoof F1 **0.668 → 0.908** |
-| **S3 — codec-aware** | Same, over 4-way codec variants of every file | ★ ArtifactNet P2→P3: hard-negative FPR **98.7% → 8.0%**, cross-codec drift **−83%** |
-| **S4 — ranking polish** | Low LR, pairwise ranking loss, ~2 epochs | ☆ ~1 bps in the source competition; aligns the model with a ranking metric |
+| **S2 — joint** | All branches together, component losses masked to present components | ⚠️ **Re-graded.** ACC **69.40 → 85.12** and F1 **0.668 → 0.908** are *thresholded*; the EER deltas from the **same** PC-Mix ablation are **3.59 → 3.12** and **8.72 → 7.86** — below our ≈1 pt local resolution threshold |
+| **S3 — codec-aware** | Same, over 4-way codec variants of every file | ★ ArtifactNet P2→P3: hard-negative FPR **98.7% → 8.0%**, cross-codec drift **−83%**. 🔴 **The best-evidenced stage in this recipe** |
+| ~~**S4 — ranking polish**~~ | ~~Low LR, pairwise ranking loss, ~2 epochs~~ | 🔴 **DROPPED.** ★ TFPARN's own ablation moves EER **12.91 → 12.92**; all its gains are minDCF/Cllr/actDCF. The ☆ "~1 bps" second source is itself below our floor ([training/03 §1](../training/03-ruled-out.md#1-pairwise-ranking-loss---weight-stays-0)) |
+
+⚠️ **Keep S2, but on different grounds**: it is our architecture anyway (candidate A is already
+jointly trained), the EER deltas are positive, and the stage is nearly free — *not* because the gain
+is measurable. And ⚠️ CompSpoof's 0.668 → 0.908 is measured **inside a separation-based system** we
+deliberately do not use; their no-separation baseline is **0.827**.
 
 ★ S3's evidence is strong and it is a **training schedule**, not an architecture — so it is adopted
 regardless of how the `E-A1` probe resolves ([03 E](03-candidates.md)). Our audio is MP3/WAV/FLAC
 at 16 kHz with a telephone slice; codec variance is a certainty, not a hypothesis.
 
-⚠️ S4 is worth ~1 basis point in its source competition. Do it last, and do not let it displace
-data work.
+🔴 **S4 is gone.** Its two justifications both failed: TFPARN's pairwise term moves EER by 0.01,
+and the ☆ "~1 bps" second source is below our resolution threshold. Dropping it **frees**
+engineer-days; the replacement is sampler constraint **C1**
+([pipelines/02 §4](../pipelines/02-sampler.md#4--constraints-the-objective-imposes--c1-and-c2)),
+which removes BCE's imbalance pathology rather than patching it.
 
 ---
 
@@ -38,9 +47,14 @@ data work.
 Per head, from [04](04-heads-and-pooling.md):
 
 ```
-L_head = 0.5·BCE(clip_logits, y) + 0.5·BCE(frame_max_logits, y)
-       + λ_rank · pairwise_ranking(scores, y)          # S4
+L_head = w·BCE(clip_logits, y) + (1−w)·BCE(frame_max_logits, y)     # w = clip_weight, default 1.0
 ```
+
+⚠️ **Revised.** `w` defaulted to 0.5 by symmetry; it is now **1.0 (clip only)**, because supervising
+the utterance and frame levels through one shared head measured **0.71–3.63 EER points worse** than
+utterance-only and our head is that configuration
+([training/02 §3](../training/02-the-loss.md#3--clipweight--10--the-one-change-worth-engineer-days)).
+Pending ablation **T1**. The `λ_rank · pairwise_ranking` term is **removed** with S4.
 
 Total:
 
@@ -54,17 +68,22 @@ voice-present files; a voice-fake loss on a music-only file trains the model on 
 never be scored ([01 §3.3](01-design-envelope.md#33-masked-eers-mean-masked-losses)). PC-Mix does
 exactly this with `λ_s = λ_e = λ_m = 1` on constructed mixtures.
 
-⚠️ **The component weights are an unexamined default.** PC-Mix uses `λ_s = λ_e = λ_m = 1` because
-its metric weighted its components equally. Ours does not — the score weights are **0.45 / 0.27 /
-0.18**, and [01 §3.1](01-design-envelope.md#31-effective-weights) says to allocate capacity in that
-order while this recipe then weights the losses equally. 🔷 That is a free knob pointing straight at
-the objective and it should be swept, not inherited. ⚠️ Metric-proportional is the obvious first
-guess but not obviously optimal — the heads differ in pool size and difficulty, and the music head
-is both the highest-weighted component *and* the hardest, which can argue for either direction.
+✅ **Settled: the component weights are metric-proportional** (.45 / .27 / .18 / .05 / .05), no
+longer PC-Mix's `λ_s = λ_e = λ_m = 1`, which was inherited from a metric that weighted its components
+equally. ⚠️ Set **by argument, not by sweep** — 09 B11 rated it unresolvable against our noise floor
+and a targeted search found no study testing loss-weights against metric-weights
+([training/02 §4](../training/02-the-loss.md#4-per-head-weights--metric-proportional-by-argument)).
+🔷 The music head is both highest-weighted *and* hardest, which could argue for more weight; our
+reading is that its hardness is **data-limited, not optimization-limited** — a loss weight cannot
+manufacture generator diversity — so it gets 0.27 and no difficulty bonus.
 
-**Frame-level targets are free for us.** We compose the corpus, so we know which frames hold which
-component and which are generated ([04 §4](04-heads-and-pooling.md)). Supervise at multiple
-resolutions (40–640 ms, per PC-Mix and PartialSpoof).
+⚠️ **Frame-level targets are free for us to *produce*, but supervising on them is now optional and
+default-off.** We compose the corpus, so we know which frames hold which component
+([04 §4](04-heads-and-pooling.md)) — but multi-resolution supervision measured **+0.15 utterance EER
+in-domain and −0.13 out-of-domain** (PartialSpoof Table VIII), and supervising both levels through
+one shared head measured **worse than utterance-only**
+([training/03 §4](../training/03-ruled-out.md#4-multi-resolution-frame-supervision---downgraded-from-headline-to-optional)).
+Produce the targets; gate the loss term on ablation **T1**.
 
 ☆ Two label-noise refinements worth carrying, both from Kaggle winners: **different loss per
 label-confidence tier** (BCE on trusted data, Lsoft β=0.7 on noisy) and **two-stage clean→noisy**
