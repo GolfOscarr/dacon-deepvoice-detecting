@@ -1,16 +1,16 @@
 """`folds.parquet`: which fold every source file rotates through, and what is sealed.
 
-Built **once** from the manifest and reused everywhere (★ docs/validation/01 §3
-E4). Regenerating it requires bumping `scheme_version`; results across versions
-are never compared.
+Built **once** from the manifest and reused everywhere -- strongly evidenced,
+docs/validation/01 §3 E4. Regenerating it requires bumping `scheme_version`;
+results across versions are never compared.
 
-🔴 The constraint is **artifact-family disjointness, not generator-name
-disjointness** (docs/validation/01 §1). Many open TTS systems share a vocoder or
-a neural codec, so holding out "XTTS-v2" while training on three other HiFi-GAN
-systems is not a generator-disjoint split. `artifact_family` is resolved from the
-artifact-producing stage and frozen before the first fold is built; this module
-only reads it. It binds on **fake** rows only -- a real component has no family,
-which is why the other four keys exist.
+Critical: the constraint is **artifact-family disjointness, not generator-name
+disjointness** (docs/validation/01 §1). Many open TTS systems share a vocoder
+or a neural codec, so holding out "XTTS-v2" while training on three other
+HiFi-GAN systems is not a generator-disjoint split. `artifact_family` is
+resolved from the artifact-producing stage and frozen before the first fold is
+built; this module only reads it. It binds on **fake** rows only -- a real
+component has no family, which is why the other four keys exist.
 
 ## Sealed PROBE, rotating TRAIN/VAL
 
@@ -29,14 +29,15 @@ docs/validation/01 §3's music option 1 read literally ("5 TRAIN / 2 VAL rotatin
 `apply_folds(manifest, folds, fold=k)` materializes that view as the
 `slice(train|val|shadow|probe)` column `training.sampler.Sampler` reads.
 
-⚠️ **The alternative reading, and why it was rejected.** An earlier version of
-this module read `slice` as static -- a family assigned to TRAIN or VAL once and
-for good -- which is the literal reading of VG1 A1 as it was originally written
-("appears in exactly one of {train, val, probe}"). It is coherent, but it makes
-VAL a fixed ~25% of families, so a 5-fold with two families per validation fold
-needs **~40 voice and ~16 music families** rather than the ≥20 / ≥8 that
-docs/data/08 is budgeted for. The project owner chose rotation; A1 was reworded
-to match (docs/validation/04). Recorded here so it is not rediscovered.
+Caveat: **The alternative reading, and why it was rejected.** An earlier
+version of this module read `slice` as static -- a family assigned to TRAIN or
+VAL once and for good -- which is the literal reading of VG1 A1 as it was
+originally written ("appears in exactly one of {train, val, probe}"). It is
+coherent, but it makes VAL a fixed ~25% of families, so a 5-fold with two
+families per validation fold needs **~40 voice and ~16 music families** rather
+than the ≥20 / ≥8 that docs/data/08 is budgeted for. The project owner chose
+rotation; A1 was reworded to match (docs/validation/04). Recorded here so it is
+not rediscovered.
 
 ## Two things this module still decides
 
@@ -52,6 +53,11 @@ VG1 A8/A9 are **not** here. They are statements about compositions, a component
 row has no cell, and they are already implemented in
 `training.audit.audit_specs(..., eval_floors=True)` against `val_specs.parquet`
 (docs/validation/04 §VG1).
+
+A1-A7 and A10 are not here either, and neither is the emitted schema: they judge
+a table rather than build one, so they live in `training.foldcheck` and are
+re-exported from here (`check_split_integrity`, `validate_folds`, `load_folds`,
+`FOLD_COLUMNS`, `SLICES`).
 """
 
 from __future__ import annotations
@@ -64,20 +70,14 @@ from typing import Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-from training.audit import AuditReport
+from training.foldcheck import (FOLD_COLUMNS, SLICES, check_split_integrity,
+                               load_folds, validate_folds)
 from training.manifest import POOL_IS_FAKE, validate_manifest
 
 __all__ = ["FOLD_COLUMNS", "GROUPING_KEYS", "HEADS", "SLICES",
            "FoldConfig", "FoldInfeasible", "FoldPlan",
            "apply_folds", "build_folds", "check_split_integrity",
            "grouping_atoms", "load_folds", "validate_folds"]
-
-#: docs/validation/01 §3, in the order the spec lists them.
-FOLD_COLUMNS: tuple[str, ...] = (
-    "file_id", "row_kind", "slice", "shadow_kind", "shadow_of", "fold",
-    "artifact_family", "source_name", "speaker_ref_id", "pair_id", "dup_group",
-    "cell", "domain_key", "assigned_at", "scheme_version",
-)
 
 #: docs/validation/01 §1. Every one of them is an equivalence constraint -- "same
 #: slice" or "disjoint across slices" -- so the only correct treatment is a
@@ -124,13 +124,14 @@ class _Union:
 def grouping_atoms(manifest: pd.DataFrame) -> pd.Series:
     """`file_id -> group id`: the smallest unit that can be given a fold.
 
-    🔴 The transitive closure, not five independent checks. A `pair_id` binding a
-    LibriTTS utterance to its HiFi-GAN twin also binds the *whole LibriTTS
-    corpus* to the *whole HiFi-GAN family*, because `source_name` and
-    `artifact_family` are themselves disjointness keys. That closure is the real
-    constraint, and a corpus whose twins were generated before the family
+    Critical: the transitive closure, not five independent checks. A `pair_id`
+    binding a LibriTTS utterance to its HiFi-GAN twin also binds the *whole
+    LibriTTS corpus* to the *whole HiFi-GAN family*, because `source_name` and
+    `artifact_family` are themselves disjointness keys. That closure is the
+    real constraint, and a corpus whose twins were generated before the family
     partition was frozen collapses into one inseparable atom -- which
-    `build_folds` reports as infeasible rather than resolving by ignoring a key.
+    `build_folds` reports as infeasible rather than resolving by ignoring a
+    key.
 
     The group id is the lexicographically smallest `file_id` in the group, so it
     is stable across runs and diffable.
@@ -171,10 +172,11 @@ class FoldConfig:
     #: one-family estimate. Not fatal -- it is the music head's actual situation
     #: at 8 families (docs/validation/01 §3) -- but it is never left unsaid.
     caveat_families_per_val_fold: int = 2
-    #: 🔴 A fold whose VAL side has no real voice components cannot compose cells
-    #: 1/5/6, and `Sampler` only says so at draw time, long after the split is
-    #: frozen. Under rotation this binds per fold, on both the TRAIN and the VAL
-    #: side, which is a much stronger requirement than a static split had.
+    #: Critical: A fold whose VAL side has no real voice components cannot
+    #: compose cells 1/5/6, and `Sampler` only says so at draw time, long after
+    #: the split is frozen. Under rotation this binds per fold, on both the
+    #: TRAIN and the VAL side, which is a much stronger requirement than a
+    #: static split had.
     require_component_coverage: bool = True
     #: PROBE is what catches "we tuned against VAL until VAL became a training
     #: set". Building without it is option 2 of docs/validation/01 §3 and leaves a
@@ -199,10 +201,10 @@ class FoldConfig:
 class FoldPlan:
     """The emitted table, plus what the builder could not guarantee.
 
-    ⚠️ `caveats` are not decoration. The music-head variance caveat exists
-    because at 8 music families a 5-fold leaves 1 sealed and 7 rotating -- one to
-    two families per validation fold (docs/validation/01 §3) -- and that fact has
-    to travel with the table, not with whoever remembers it.
+    Caveat: `caveats` are not decoration. The music-head variance caveat exists
+    because at 8 music families a 5-fold leaves 1 sealed and 7 rotating -- one
+    to two families per validation fold (docs/validation/01 §3) -- and that
+    fact has to travel with the table, not with whoever remembers it.
     """
 
     frame: pd.DataFrame
@@ -287,10 +289,10 @@ def _strata(manifest: pd.DataFrame, atoms: pd.Series,
 def _seal_probe(facts: dict[str, dict], cfg: FoldConfig) -> set[str]:
     """Choose the groups sealed into PROBE, before any fold exists.
 
-    ★ docs/validation/01 §3: "take families in descending size, place each into
-    the fold whose current composition is furthest from target." Deterministic --
-    ties break on the group id, never on an RNG, because a split that moves
-    between runs cannot be audited.
+    Strong evidence, docs/validation/01 §3: "take families in descending size,
+    place each into the fold whose current composition is furthest from
+    target." Deterministic -- ties break on the group id, never on an RNG,
+    because a split that moves between runs cannot be audited.
     """
     if cfg.probe_share <= 0:
         return set()
@@ -303,10 +305,11 @@ def _seal_probe(facts: dict[str, dict], cfg: FoldConfig) -> set[str]:
     for group in sorted(facts, key=lambda g: (-facts[g]["n_families"],
                                               -facts[g]["n_rows"], g)):
         f = facts[group]
-        # Take the group if it advances the family target on some head, or if it
-        # closes a gap in what PROBE can compose. 🔴 Coverage is not optional: a
-        # PROBE with no real voice cannot compose cells 1/5/6, and PROBE is
-        # opened at most three times ever (VG6) -- finding out then is too late.
+        # Take the group if it advances the family target on some head, or if
+        # it closes a gap in what PROBE can compose. Critical: coverage is not
+        # optional: a PROBE with no real voice cannot compose cells 1/5/6, and
+        # PROBE is opened at most three times ever (VG6) -- finding out then is
+        # too late.
         advances = any(totals[h] and f["families"][h] and len(got[h]) < target[h]
                        for h in HEADS)
         closes = len(covered) < len(_COVERAGE) and bool(f["provides"] - covered)
@@ -444,7 +447,7 @@ def _check_feasible(facts: dict[str, dict], probe: set[str],
             raise FoldInfeasible(
                 "the rotation leaves a side the sampler cannot draw from: "
                 + "; ".join(short[:6])
-                + ". 🔴 Under rotation the fold count is bounded by the number of "
+                + ". Critical: Under rotation the fold count is bounded by the number of "
                 "*real source corpora* per role as well as by the family count: "
                 f"every one of the {cfg.n_folds} VAL sides needs its own real "
                 "voice, real music and noise source, and PROBE needs one more. "
@@ -467,9 +470,9 @@ def build_folds(manifest: pd.DataFrame, cfg: FoldConfig | None = None,
     a shadow row inherits its parent's fold, so it is VAL's annex in that fold
     and invisible in the others.
 
-    ⚠️ Any `slice`/`fold` already on the manifest is ignored. This function is
-    the *source* of that assignment, and reading it back would let a stale table
-    reproduce itself.
+    Caveat: any `slice`/`fold` already on the manifest is ignored. This
+    function is the *source* of that assignment, and reading it back would let
+    a stale table reproduce itself.
     """
     cfg = cfg or FoldConfig()
     validate_manifest(manifest)
@@ -500,10 +503,10 @@ def build_folds(manifest: pd.DataFrame, cfg: FoldConfig | None = None,
             f"nothing is not a fold")
     per_fold = [sum(facts[g]["n_rows"] for g in rotating if fold_of[g] == k)
                 for k in range(cfg.n_folds)]
-    # 🔴 Family disjointness dominates row balance: a fold is a whole number of
-    # grouping atoms, and those differ in size by an order of magnitude. This is
-    # where VG1 A8 bites (docs/validation/04), so it is said out loud here rather
-    # than discovered at eval-set materialization.
+    # Critical: family disjointness dominates row balance: a fold is a whole
+    # number of grouping atoms, and those differ in size by an order of
+    # magnitude. This is where VG1 A8 bites (docs/validation/04), so it is said
+    # out loud here rather than discovered at eval-set materialization.
     if max(per_fold) > 3 * min(per_fold):
         caveats.append(
             f"VAL row counts per fold are uneven: {per_fold} "
@@ -514,10 +517,10 @@ def build_folds(manifest: pd.DataFrame, cfg: FoldConfig | None = None,
             f"number.")
 
     # -- SHADOW ------------------------------------------------------------- #
-    # ⚠️ Applied *after* the rotation, never during it. SHADOW is a condition
-    # axis (docs/validation/01 §2) and consumes no family budget; a re-render
-    # that voted in the family partition would let a channel decision move a
-    # generator between folds.
+    # Caveat: applied *after* the rotation, never during it. SHADOW is a
+    # condition axis (docs/validation/01 §2) and consumes no family budget; a
+    # re-render that voted in the family partition would let a channel decision
+    # move a generator between folds.
     slice_of_file = {fid: ("probe" if atoms[fid] in probe else "train_val")
                      for fid in known}
     fold_of_file = {fid: fold_of.get(atoms[fid]) for fid in known}
@@ -559,56 +562,6 @@ def build_folds(manifest: pd.DataFrame, cfg: FoldConfig | None = None,
     return FoldPlan(validate_folds(out[list(FOLD_COLUMNS)]), tuple(caveats))
 
 
-# --------------------------------------------------------------------------- #
-# schema and use
-
-def validate_folds(df: pd.DataFrame) -> pd.DataFrame:
-    """Assert the emitted schema, or raise with what is wrong. Returns `df`."""
-    missing = [c for c in FOLD_COLUMNS if c not in df.columns]
-    if missing:
-        raise ValueError(f"folds table is missing column(s): {missing}")
-    if df.empty:
-        raise ValueError("folds table is empty")
-    if df.file_id.duplicated().any():
-        dup = df.file_id[df.file_id.duplicated()].unique()[:5].tolist()
-        raise ValueError(f"duplicate file_id(s): {dup}")
-    bad = set(df["slice"].unique()) - set(SLICES)
-    if bad:
-        raise ValueError(f"unknown slice(s) {sorted(bad)}; expected {SLICES}")
-    bad = set(df.shadow_kind.dropna().unique()) - {"a", "b"}
-    if bad:
-        raise ValueError(f"shadow_kind must be a|b|null, got {sorted(bad)}")
-    is_shadow = df["slice"] == "shadow"
-    if df.loc[~is_shadow, "shadow_kind"].notna().any():
-        raise ValueError("shadow_kind is set on a row outside the shadow slice")
-    if df.loc[is_shadow, "shadow_kind"].isna().any():
-        raise ValueError("every shadow row needs shadow_kind = a|b")
-    if df.loc[df.shadow_kind != "a", "shadow_of"].notna().any():
-        raise ValueError("shadow_of belongs to S-a rows only; S-b is unpaired")
-    # 🔴 `fold` is non-null exactly off PROBE. A sealed family has no fold: it is
-    # never VAL, so "the fold it is validated in" does not exist for it.
-    rotating = df["slice"] != "probe"
-    if df.loc[~rotating, "fold"].notna().any():
-        raise ValueError("fold must be null on probe rows -- PROBE never rotates")
-    if df.loc[rotating, "fold"].isna().any():
-        raise ValueError("every train_val/shadow row needs a fold")
-    if rotating.any():
-        used = sorted(int(f) for f in df.loc[rotating, "fold"].unique())
-        if used != list(range(len(used))):
-            raise ValueError(f"folds must be 0..k-1 with none empty, got {used}")
-    # docs/validation/01 §3: cell is non-null exactly when row_kind == whole_file.
-    whole = df.row_kind == "whole_file"
-    if df.loc[whole, "cell"].isna().any() or df.loc[~whole, "cell"].notna().any():
-        raise ValueError("cell must be non-null exactly on whole_file rows")
-    if df.scheme_version.nunique() != 1:
-        raise ValueError(
-            f"folds table mixes scheme_version {sorted(df.scheme_version.unique())}; "
-            "regenerating requires bumping it, and versions are never compared")
-    return df
-
-
-def load_folds(path: str | Path) -> pd.DataFrame:
-    return validate_folds(pd.read_parquet(path))
 
 
 def apply_folds(manifest: pd.DataFrame, folds: pd.DataFrame,
@@ -620,10 +573,11 @@ def apply_folds(manifest: pd.DataFrame, folds: pd.DataFrame,
     `train_val` becomes `val` for the families assigned to this fold and `train`
     for all the others.
 
-    ⚠️ SHADOW rows whose parent is TRAIN in this fold are **dropped**, not carried
-    as `train`. SHADOW is "VAL generators × unseen acoustic conditions"; on a
-    fold where those generators are being trained on, the row measures nothing
-    and training on it would retire the condition (docs/validation/01 §2).
+    Caveat: SHADOW rows whose parent is TRAIN in this fold are **dropped**, not
+    carried as `train`. SHADOW is "VAL generators × unseen acoustic
+    conditions"; on a fold where those generators are being trained on, the row
+    measures nothing and training on it would retire the condition
+    (docs/validation/01 §2).
     """
     validate_folds(folds)
     left, right = set(manifest["file_id"].astype(str)), set(folds["file_id"])
@@ -652,142 +606,8 @@ def apply_folds(manifest: pd.DataFrame, folds: pd.DataFrame,
 
     out = manifest.copy()
     out["slice"] = role
-    # ⚠️ Every kept row carries `fold = fold`. This frame IS the fold-`fold` view,
-    # so `Sampler(slice_="train", fold=k)` must see the whole training side --
-    # not a fifth of it.
+    # Caveat: every kept row carries `fold = fold`. This frame IS the
+    # fold-`fold` view, so `Sampler(slice_="train", fold=k)` must see the whole
+    # training side -- not a fifth of it.
     out["fold"] = pd.array([fold] * len(out), dtype="Int64")
     return validate_manifest(out[keep].reset_index(drop=True))
-
-
-# --------------------------------------------------------------------------- #
-# VG1
-
-def _cells(df: pd.DataFrame, key: str) -> dict[str, set]:
-    """Each value of `key` -> the set of (slice, fold) cells it appears in.
-
-    SHADOW folds into `train_val`: it draws from VAL's families by construction,
-    shares their fold, and is never trained on.
-    """
-    sub = df[df[key].notna()]
-    out: dict[str, set] = {}
-    for value, cell in zip(sub[key].astype(str),
-                           zip(np.where(sub["slice"] == "probe", "probe", "train_val"),
-                               [None if pd.isna(f) else int(f) for f in sub["fold"]])):
-        out.setdefault(value, set()).add(cell)
-    return out
-
-
-def _split_across_cells(df: pd.DataFrame, key: str) -> list[str]:
-    """Values of `key` that resolve to more than one (slice, fold) cell.
-
-    🔴 That is the whole safety property of the rotation. A family in two folds
-    is VAL in one and TRAIN in the other -- which means that in *each* of those
-    folds it is on both sides at once.
-    """
-    return sorted(v for v, cells in _cells(df, key).items() if len(cells) > 1)
-
-
-def check_split_integrity(folds: pd.DataFrame,
-                          run_scheme_version: str | None = None) -> AuditReport:
-    """VG1 A1-A7 and A10 over `folds.parquet` (docs/validation/04 §VG1).
-
-    Under the rotating scheme every assertion is the same statement about a
-    different key: the value must resolve to exactly one `(slice, fold)` cell.
-    Two cells means two roles in the same fold -- TRAIN and VAL simultaneously,
-    or sealed and not sealed at once.
-
-    🔴 A8/A9 are **not** here and are not silently passed. They are statements
-    about compositions, evaluated against `val_specs.parquet` by
-    `training.audit.audit_specs(..., eval_floors=True)`; a component row has no
-    cell, so they cannot be computed on this table at all.
-    """
-    validate_folds(folds)
-    df = folds
-    r: dict[str, tuple[bool, str]] = {}
-
-    # A1 -- a family is sealed into PROBE or rotates in exactly one fold.
-    split = _split_across_cells(df, "artifact_family")
-    n_fam = int(df["artifact_family"].nunique())
-    r["A1_family_in_one_cell"] = (
-        not split,
-        f"{len(split)}/{n_fam} artifact_famil(y/ies) appear in more than one of "
-        f"{{probe}} ∪ {{fold 0..k-1}}" + (f": {split[:5]}" if split else "")
-        + " -- i.e. TRAIN and VAL in the same fold, or sealed and rotating at "
-          "once (SHADOW counts as its parent's fold)")
-
-    # A2 / A3 -- source and speaker never straddle the TRAIN/VAL boundary.
-    for key, name in (("source_name", "A2_source_disjoint"),
-                      ("speaker_ref_id", "A3_speaker_disjoint")):
-        split = _split_across_cells(df, key)
-        r[name] = (not split,
-                   f"{len(split)} {key}(s) span two folds or straddle PROBE, so "
-                   f"they are on both sides of some fold's TRAIN/VAL boundary"
-                   + (f": {split[:5]}" if split else ""))
-    # ⚠️ A3 keys on the **bare** speaker_ref_id, not on (source_name, speaker).
-    # docs/validation/01 §1 says "disjoint within source_name", but A2 already
-    # pins a source_name to one cell, so the within-source form is entailed by A2
-    # and could never fail on its own. The bare id is the falsifiable statement,
-    # and it is the one that matters: a LibriTTS speaker reappearing under a
-    # `gen_hifigan` resynthesis is exactly the leak.
-
-    # A4 / A5 -- pair members share a cell; a dup_group is wholly within one.
-    for key, name in (("pair_id", "A4_pair_shares_a_cell"),
-                      ("dup_group", "A5_dup_group_in_one_cell")):
-        split = _split_across_cells(df, key)
-        r[name] = (not split,
-                   f"{len(split)} {key}(s) split across folds or across the PROBE "
-                   f"seal" + (f": {split[:5]}" if split else ""))
-
-    # A6 -- PROBE is sealed, and PROBE exists.
-    # ⚠️ The "seen in neither" clause is entailed by A1. The clause that is not,
-    # and the one that fails in practice, is that PROBE exists at all: a builder
-    # that carved none would leave A1 green over an empty slice
-    # (docs/validation/01 §3). Under rotation this is the main thing A6 carries.
-    probe_fams = set(df.loc[df["slice"] == "probe", "artifact_family"].dropna())
-    rot_fams = set(df.loc[df["slice"] != "probe", "artifact_family"].dropna())
-    leaked = sorted(probe_fams & rot_fams)
-    n_probe_rows = int((df["slice"] == "probe").sum())
-    r["A6_probe_sealed"] = (
-        bool(probe_fams) and not leaked,
-        f"PROBE holds {n_probe_rows} row(s) and {len(probe_fams)} famil(y/ies); "
-        + (f"{len(leaked)} also rotate: {leaked[:5]}" if leaked
-           else "none of them rotate through TRAIN or VAL" if probe_fams
-           else "🔴 PROBE IS EMPTY -- the sealed slice cannot answer whether VAL "
-                "has become a training set"))
-
-    # A7 -- every S-a row points at a real file in its own fold.
-    sa = df[df["shadow_kind"] == "a"]
-    if df["shadow_kind"].isna().all():
-        r["A7_shadow_a_points_at_its_fold"] = (
-            True, AuditReport.SKIP + "no SHADOW rows in this table")
-    else:
-        fold_of = df.set_index("file_id")["fold"]
-        rotating_ids = set(df.loc[df["slice"] == "train_val", "file_id"])
-        bad = sorted(
-            f"{row.file_id}->{row.shadow_of}" for row in sa.itertuples()
-            if row.shadow_of not in rotating_ids
-            or fold_of.get(row.shadow_of) is pd.NA
-            or fold_of[row.shadow_of] != row.fold)
-        r["A7_shadow_a_points_at_its_fold"] = (
-            not bad,
-            f"{len(bad)}/{len(sa)} S-a re-render(s) whose shadow_of is not a "
-            f"rotating file in the same fold" + (f": {bad[:5]}" if bad else ""))
-
-    # A8 / A9 -- not computable here, and never reported as a pass.
-    r["A8_A9_eval_size_floors"] = (
-        True, AuditReport.SKIP + "A8/A9 are statements about compositions and are "
-        "evaluated against val_specs.parquet by "
-        "training.audit.audit_specs(..., eval_floors=True); a component row has "
-        "no cell (docs/validation/04 §VG1)")
-
-    # A10 -- the run's scheme_version matches the table's.
-    got = str(df["scheme_version"].iloc[0])
-    if run_scheme_version is None:
-        r["A10_scheme_version_matches"] = (
-            True, AuditReport.SKIP + f"folds.parquet is {got!r}; pass the run's "
-            "scheme_version to compare it")
-    else:
-        r["A10_scheme_version_matches"] = (
-            str(run_scheme_version) == got,
-            f"run {str(run_scheme_version)!r} vs folds.parquet {got!r}")
-    return AuditReport(r)
