@@ -1,9 +1,9 @@
 """Drawing a `SampleSpec`. Pure: reads the manifest, touches no audio.
 
-★ The Kaggle ordering puts this stage *second*, ahead of architecture --
-`data split -> sampler/loss -> architecture -> optimizer` -- with a named
-warning against over-searching architecture before solving data shift
-(docs/kaggle/05 E8).
+Strong evidence: the Kaggle ordering puts this stage *second*, ahead of
+architecture -- `data split -> sampler/loss -> architecture -> optimizer` --
+with a named warning against over-searching architecture before solving data
+shift (docs/kaggle/05 E8).
 
 Three constraints from the objective live here, because the loss is unsound
 without them (docs/pipelines/02 §4, docs/training/02 §8):
@@ -64,12 +64,12 @@ def composed_fractions(mix: CellMix, f8: float, a: float = 0.0, b: float = 0.0,
                        f9: float = 0.0, balance_marginal: bool = True) -> dict[int, float]:
     """The per-cell composed fraction implied by `f8`.
 
-    🔴 `f8` is the only knob, and the two policies are its endpoints: `f8 = 0`
-    is label-conditional (natural songs and AI songs usable, ~13.8% of the
-    corpus genuine whole-file audio), `f8 = 1` is strict (every mixed file
-    composed). `f6 = f7 = 1` is forced -- those cells cannot be scraped.
+    Critical: `f8` is the only knob, and the two policies are its endpoints:
+    `f8 = 0` is label-conditional (natural songs and AI songs usable, ~13.8%
+    of the corpus genuine whole-file audio), `f8 = 1` is strict (every mixed
+    file composed). `f6 = f7 = 1` is forced -- those cells cannot be scraped.
 
-    ⚠️ Pairwise equality `f5 = f6 = f7 = f8` is *too strong*: it drives
+    Caveat: pairwise equality `f5 = f6 = f7 = f8` is *too strong*: it drives
     `f5 = f8 = 1` and bans both pools. Marginal balance is *too weak*: it can
     hold while composedness predicts the label inside a stratum. The stratified
     form below is neither (docs/data/02).
@@ -93,19 +93,19 @@ def composed_fractions(mix: CellMix, f8: float, a: float = 0.0, b: float = 0.0,
 def _f9_for_marginal_balance(p: dict[int, float], f: dict[int, float]) -> float:
     """The cell-9 composed fraction that removes the *marginal* composedness gap.
 
-    🔴 The stratified constraint leaves a marginal residual, because cell 9 is
-    its own presence stratum with no FAKE counterpart to balance against. It is
-    emitted at p≈0.115 with f₉=0, so "not composed" skews REAL: measured
-    **P(composed|REAL) 0.2875 vs P(composed|FAKE) 0.4090**, a gap of 0.121,
-    against 0.0001 over cells 1-8.
+    Critical: the stratified constraint leaves a marginal residual, because
+    cell 9 is its own presence stratum with no FAKE counterpart to balance
+    against. It is emitted at p≈0.115 with f₉=0, so "not composed" skews REAL:
+    measured **P(composed|REAL) 0.2875 vs P(composed|FAKE) 0.4090**, a gap of
+    0.121, against 0.0001 over cells 1-8.
 
-    ⚠️ The defence -- composedness is uninformative *given* presence, and the
-    model is supervised on presence -- is sound but was asserted in docstrings
-    and measured nowhere. Closing it costs nothing: a composed cell-9 sample is
-    a pool-E noise draw the sampler already supports.
+    Caveat: the defence -- composedness is uninformative *given* presence, and
+    the model is supervised on presence -- is sound but was asserted in
+    docstrings and measured nowhere. Closing it costs nothing: a composed
+    cell-9 sample is a pool-E noise draw the sampler already supports.
 
-    ⚠️ `f₉ = f₅` does **not** close it, it overshoots (0.5015 against a 0.4090
-    target). Solve instead.
+    Caveat: `f₉ = f₅` does **not** close it, it overshoots (0.5015 against a
+    0.4090 target). Solve instead.
     """
     fake = [c for c in p if is_fake_cell(c)]
     real = [c for c in p if not is_fake_cell(c)]
@@ -134,10 +134,10 @@ def head_positive_rates(mix: CellMix) -> dict[str, float]:
 def mixedness_balance(mix: CellMix) -> tuple[float, float]:
     """`P(mixed | FAKE)` and `P(mixed | REAL)` over **cells 1-8**.
 
-    ⚠️ Cell 9 is excluded deliberately: a file with no components cannot be
-    fake, so `P(FAKE | cell 9) = 0` by definition. That is a true property of
-    the label space -- it holds at test time too -- and including cell 9 lets a
-    mix look balanced for the wrong reason.
+    Caveat: cell 9 is excluded deliberately: a file with no components cannot
+    be fake, so `P(FAKE | cell 9) = 0` by definition. That is a true property
+    of the label space -- it holds at test time too -- and including cell 9
+    lets a mix look balanced for the wrong reason.
     """
     p = {c: v for c, v in mix.p.items() if c != 9}
     fake = [c for c in p if is_fake_cell(c)]
@@ -158,30 +158,34 @@ class SamplerConfig:
     #: keep composedness label-independent inside those strata.
     single_composed_rate: float = 0.0
     noise_composed_rate: float = 0.0
-    #: 🔴 Solve `f9` so the *marginal* composedness gap closes. The stratified
-    #: constraint leaves one, because cell 9 is its own presence stratum with no
-    #: FAKE counterpart: measured 0.121 without this. Costs nothing -- a composed
-    #: cell-9 sample is a pool-E noise draw the sampler already supports.
+    #: Critical: solve `f9` so the *marginal* composedness gap closes. The
+    #: stratified constraint leaves one, because cell 9 is its own presence
+    #: stratum with no FAKE counterpart: measured 0.121 without this. Costs
+    #: nothing -- a composed cell-9 sample is a pool-E noise draw the sampler
+    #: already supports.
     balance_marginal_composedness: bool = True
-    #: DOSS per-domain cap. ★ 0.2k h domain-balanced -> 2.77% EER vs 6.4k h
-    #: naive -> 3.29% (docs/papers/05). A weight, so nothing is discarded.
+    #: DOSS per-domain cap. Strong evidence: 0.2k h domain-balanced -> 2.77%
+    #: EER vs 6.4k h naive -> 3.29% (docs/papers/05). A weight, so nothing is
+    #: discarded.
     domain_cap: int = 500
     #: The test duration range (competition/01); AudioConfig agrees.
     duration_range: tuple[float, float] = (4.0, 60.0)
-    #: ★ G2Net: models generalise low-SNR -> high-SNR but not the reverse, so
-    #: the voice/music gain ratio is skewed toward the quiet end (A-A3).
+    #: Strong evidence: G2Net -- models generalise low-SNR -> high-SNR but not
+    #: the reverse, so the voice/music gain ratio is skewed toward the quiet
+    #: end (A-A3).
     gain_db_range: tuple[float, float] = (-15.0, 15.0)
     gain_db_mean: float = -3.6
     gain_db_sigma: float = 4.0
     sequential_prob: float = 0.25
     crossfade_ms_range: tuple[float, float] = (10.0, 200.0)
-    #: 🔴 A-A8 (±0.5 s temporal misalignment) and A-A11 (silence edits), as
-    #: *draws* rather than step-4 augments -- they move audio along the timeline
-    #: `frame_intervals` describe, and only a draw is recorded in the spec
-    #: (docs/pipelines/03 §4). Both are the same mechanism: the components
-    #: occupy `duration_s - lead - tail`, starting at `lead`.
-    #: ⚠️ Default 0.0. Switching them on changes the drawn stream and needs an
-    #: I1b re-run; at 0.0 no RNG draw happens, so the stream is unchanged.
+    #: Critical: A-A8 (±0.5 s temporal misalignment) and A-A11 (silence
+    #: edits), as *draws* rather than step-4 augments -- they move audio along
+    #: the timeline `frame_intervals` describe, and only a draw is recorded in
+    #: the spec (docs/pipelines/03 §4). Both are the same mechanism: the
+    #: components occupy `duration_s - lead - tail`, starting at `lead`.
+    #: Caveat: default 0.0. Switching them on changes the drawn stream and
+    #: needs an I1b re-run; at 0.0 no RNG draw happens, so the stream is
+    #: unchanged.
     silence_lead_s: float = 0.0
     silence_tail_s: float = 0.0
     scheme_version: str = "synthetic-v1"
@@ -205,9 +209,10 @@ class SamplerConfig:
 
     @property
     def f(self) -> dict[int, float]:
-        # ⚠️ Keywords, not position. `noise_composed_rate` is f9; passing it
-        # positionally put it in `b` -- the MUSIC-ONLY composed rate -- so the
-        # two single-component strata silently disagreed (f1=f2=a but f3=f4=f9).
+        # Caveat: keywords, not position. `noise_composed_rate` is f9; passing
+        # it positionally put it in `b` -- the MUSIC-ONLY composed rate -- so
+        # the two single-component strata silently disagreed (f1=f2=a but
+        # f3=f4=f9).
         return composed_fractions(
             self.cell_mix, self.f8,
             a=self.single_composed_rate, b=self.single_composed_rate,
@@ -228,11 +233,12 @@ class Sampler:
             raise ValueError(f"no manifest rows for slice={slice_!r} fold={fold!r}")
         self.slice_, self.fold = slice_, fold
 
-        # 🔴 A source shorter than the minimum duration would produce a spec
-        # below `AudioConfig.min_seconds`: `take = min(duration, row.duration_s)`
-        # silently shortens the timeline. Measured on a corpus of 1.5 s scraped
-        # clips: 2,580 of 4,000 specs came out under the competition's own 4 s
-        # floor. Drop those rows here rather than emit an out-of-range sample.
+        # Critical: a source shorter than the minimum duration would produce
+        # a spec below `AudioConfig.min_seconds`:
+        # `take = min(duration, row.duration_s)` silently shortens the
+        # timeline. Measured on a corpus of 1.5 s scraped clips: 2,580 of
+        # 4,000 specs came out under the competition's own 4 s floor. Drop
+        # those rows here rather than emit an out-of-range sample.
         min_seconds = self.cfg.duration_range[0]
         usable = df[df.duration_s >= min_seconds]
         self.n_dropped_short = int(len(df) - len(usable))
@@ -337,29 +343,32 @@ class Sampler:
             wanted.append(("noise", False))
 
         sequential = len(wanted) > 1 and rng.random() < cfg.sequential_prob
-        # ⚠️ `gain_db` is the voice/music LEVEL RATIO (docs/data/02, A-A3) -- the
-        # quantity G2Net's low-SNR-generalisation result is about. It is only
-        # meaningful against something, so it is drawn only when both components
-        # are present. Applied to a solo voice component it silently became an
-        # absolute level shift: that is A-A7 gain jitter, a label-independent
-        # augment which belongs in the augment registry, not in the component
-        # draw, and which nothing renormalises (`render._normalize` models the
-        # test chain only -- there is no loudness stage), so it reached the
-        # waveform as a composedness cue inside the voice-only stratum.
-        # 🔴 A no-op on the shipped stream: `single_composed_rate = 0.0` emits no
-        # composed voice-only samples at all, so only `a`/`b` sweeps change.
+        # Caveat: `gain_db` is the voice/music LEVEL RATIO (docs/data/02, A-A3)
+        # -- the quantity G2Net's low-SNR-generalisation result is about. It is
+        # only meaningful against something, so it is drawn only when both
+        # components are present. Applied to a solo voice component it silently
+        # became an absolute level shift: that is A-A7 gain jitter, a
+        # label-independent augment which belongs in the augment registry, not
+        # in the component draw, and which nothing renormalises
+        # (`render._normalize` models the test chain only -- there is no
+        # loudness stage), so it reached the waveform as a composedness cue
+        # inside the voice-only stratum.
+        # Critical: a no-op on the shipped stream: `single_composed_rate = 0.0`
+        # emits no composed voice-only samples at all, so only `a`/`b` sweeps
+        # change.
         is_ratio = len(wanted) > 1
-        # 🔴 A-A8 (temporal misalignment, ±0.5 s) and A-A11 (leading/trailing
-        # silence) are drawn HERE, not applied as step-4 augments. They move
-        # audio along the timeline, and `frame_intervals` are intervals on that
-        # timeline: an augment returns only a waveform, so it has no way to say
-        # the timeline moved, and the frame labels would silently describe audio
-        # that is no longer there (docs/pipelines/03 §4). Drawn, they are just a
-        # placement -- the spec records it and the frame targets follow it for
-        # free, because they are computed from the placement.
-        # ⚠️ Both default to 0.0: switching them on changes the drawn stream, so
-        # it needs an I1b re-run rather than a default flip. At 0.0 no RNG draw
-        # happens at all, so the shipped stream is byte-identical.
+        # Critical: A-A8 (temporal misalignment, ±0.5 s) and A-A11
+        # (leading/trailing silence) are drawn HERE, not applied as step-4
+        # augments. They move audio along the timeline, and `frame_intervals`
+        # are intervals on that timeline: an augment returns only a waveform,
+        # so it has no way to say the timeline moved, and the frame labels
+        # would silently describe audio that is no longer there
+        # (docs/pipelines/03 §4). Drawn, they are just a placement -- the spec
+        # records it and the frame targets follow it for free, because they are
+        # computed from the placement.
+        # Caveat: both default to 0.0: switching them on changes the drawn
+        # stream, so it needs an I1b re-run rather than a default flip. At 0.0
+        # no RNG draw happens at all, so the shipped stream is byte-identical.
         lead = float(rng.uniform(0.0, cfg.silence_lead_s)) if cfg.silence_lead_s else 0.0
         tail = float(rng.uniform(0.0, cfg.silence_tail_s)) if cfg.silence_tail_s else 0.0
         if lead + tail > 0.5 * duration:          # never silence half the sample
@@ -395,8 +404,9 @@ class Sampler:
     def epoch_specs(self, n: int, epoch: int = 0, seed: int = 0):
         """An epoch is a fixed count of drawn specs -- otherwise `sample_id` is
         undefined and reproducibility is nominal (docs/pipelines/02 §6)."""
-        # ⚠️ `i`, not `epoch * n + i`. `epoch` is already in the RNG key, and a
-        # global index makes the whole corpus depend on `steps_per_epoch`:
-        # changing the batch size would silently re-roll every sample.
+        # Caveat: `i`, not `epoch * n + i`. `epoch` is already in the RNG key,
+        # and a global index makes the whole corpus depend on
+        # `steps_per_epoch`: changing the batch size would silently re-roll
+        # every sample.
         for i in range(n):
             yield self.sample_spec(i, epoch=epoch, seed=seed)

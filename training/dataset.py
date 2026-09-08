@@ -6,16 +6,16 @@ Two modes, and the difference between them is the point of the module:
   every epoch (``set_epoch``), because an epoch is a fixed count of drawn specs
   and ``epoch`` is part of the RNG key.
 * **evaluation** -- ``SpecDataset.frozen(frozen_eval_specs(...))``. The spec list
-  is a **value**, drawn once and carried, not a seed re-run later. 🔴 That is
-  first-class rather than a convenience: docs/pipelines/01 §1's whole argument
-  for separating sampling from rendering is that the eval set can then be frozen
-  as *specs*. A seed is not a frozen set -- it reproduces only against the same
-  sampler, the same manifest and the same code, and every one of those changes
-  during a competition.
+  is a **value**, drawn once and carried, not a seed re-run later. Critical:
+  that is first-class rather than a convenience: docs/pipelines/01 §1's whole
+  argument for separating sampling from rendering is that the eval set can
+  then be frozen as *specs*. A seed is not a frozen set -- it reproduces only
+  against the same sampler, the same manifest and the same code, and every one
+  of those changes during a competition.
 
-🔴 **The fold is resolved before anything is drawn, never after.** A composed
-sample's components can straddle folds, so "the fold of a composed sample" is
-undefined -- see ``fold_manifest`` below.
+Critical: **the fold is resolved before anything is drawn, never after.** A
+composed sample's components can straddle folds, so "the fold of a composed
+sample" is undefined -- see ``fold_manifest`` below.
 """
 
 from __future__ import annotations
@@ -41,20 +41,20 @@ __all__ = [
 class _Unset:
     """Sentinel type: "this argument was never passed", distinct from ``None``.
 
-    🔴 Needed because ``None`` is a *meaningful* value for ``fold`` -- it says
-    "the frame is fold-resolved, the clause is vacuous" -- so a plain ``None``
-    default would make "I decided" and "I never thought about it" the same
-    argument, which is how the frozen eval set came to report a PASS it had not
-    earned.
+    Critical: needed because ``None`` is a *meaningful* value for ``fold`` --
+    it says "the frame is fold-resolved, the clause is vacuous" -- so a plain
+    ``None`` default would make "I decided" and "I never thought about it" the
+    same argument, which is how the frozen eval set came to report a PASS it
+    had not earned.
 
-    ⚠️ **Do not "simplify" this to a required keyword or a plain default.** Both
-    were tried. A required keyword forces every caller to type something, but a
-    caller can still satisfy it with the value that happens to work and get a
-    PASS they never reasoned about; and it cannot express "explicitly None"
-    distinctly from "had to write something". A plain default is the original
-    defect. The sentinel is the only one of the three that lets `audit_specs`
-    *measure* which case it is in -- SKIP when nobody decided, PASS-with-reason
-    when someone did and the clause is genuinely vacuous.
+    Caveat: **do not "simplify" this to a required keyword or a plain
+    default.** Both were tried. A required keyword forces every caller to type
+    something, but a caller can still satisfy it with the value that happens to
+    work and get a PASS they never reasoned about; and it cannot express
+    "explicitly None" distinctly from "had to write something". A plain default
+    is the original defect. The sentinel is the only one of the three that lets
+    `audit_specs` *measure* which case it is in -- SKIP when nobody decided,
+    PASS-with-reason when someone did and the clause is genuinely vacuous.
     """
 
     def __repr__(self) -> str:                                # pragma: no cover
@@ -68,12 +68,12 @@ def fold_manifest(manifest: pd.DataFrame, folds: pd.DataFrame, *,
                   fold: int) -> pd.DataFrame:
     """The manifest one fold's `Sampler` reads. ``fold`` is required, always.
 
-    🔴 **This is where the straddling question is answered, and the answer is
-    that it never gets asked.** A composed sample draws two or three component
-    files, and nothing stops those files belonging to different families -- so
-    "the fold of a composed sample" is undefined, and any rule that picked one
-    (the first component's fold, the voice component's fold) would be an
-    accident of draw order dressed up as a policy.
+    Critical: **this is where the straddling question is answered, and the
+    answer is that it never gets asked.** A composed sample draws two or three
+    component files, and nothing stops those files belonging to different
+    families -- so "the fold of a composed sample" is undefined, and any rule
+    that picked one (the first component's fold, the voice component's fold)
+    would be an accident of draw order dressed up as a policy.
 
     Instead the fold is resolved **one level up, on the manifest**, before a
     single spec is drawn: ``apply_folds(..., fold=k)`` turns `train_val` into
@@ -82,10 +82,11 @@ def fold_manifest(manifest: pd.DataFrame, folds: pd.DataFrame, *,
     because there is nothing else to draw from -- containment is structural, not
     checked after the fact.
 
-    ⚠️ It is still *measured*: `SpecDataset.audit` forwards `slice_` and `fold`
-    to `audit_specs`, whose **I5** re-derives the allowed `file_id` set from the
-    manifest and reports any drawn component outside it. Do not rebuild that
-    check here (docs/pipelines/05 §5) -- pass the manifest and read I5.
+    Caveat: it is still *measured*: `SpecDataset.audit` forwards `slice_` and
+    `fold` to `audit_specs`, whose **I5** re-derives the allowed `file_id` set
+    from the manifest and reports any drawn component outside it. Do not
+    rebuild that check here (docs/pipelines/05 §5) -- pass the manifest and
+    read I5.
 
     This is a thin wrapper on `apply_folds` and exists only to make the required
     `fold=` visible at the dataset boundary, where forgetting it would train on
@@ -98,8 +99,8 @@ def frozen_eval_specs(sampler: Sampler, n: int, *, epoch: int = 0,
                       seed: int = 0) -> tuple[SampleSpec, ...]:
     """Draw the evaluation set **once**, as a tuple of specs to be carried.
 
-    ⚠️ Deliberately a `tuple`, and deliberately not a generator: an eval set that
-    is regenerated per call is a seed, not a frozen set. Write it to
+    Caveat: deliberately a `tuple`, and deliberately not a generator: an eval
+    set that is regenerated per call is a seed, not a frozen set. Write it to
     `val_specs.parquet` (VG1 A8/A9 in `audit_specs(..., eval_floors=True)`) and
     the same rows are scored in fold 0 and in the 2nd-stage rerun.
     """
@@ -109,10 +110,11 @@ def frozen_eval_specs(sampler: Sampler, n: int, *, epoch: int = 0,
 class SpecDataset(Dataset):
     """``index -> RenderedSample``. Holds specs, not audio.
 
-    ⚠️ ``__getitem__`` returns a `RenderedSample`, not a batch: batching is
-    `training.collate.collate`, passed to the `DataLoader` as `collate_fn`. The
-    two stay separate so the collator can be tested on hand-built samples that
-    no sampler would draw (all-mono batches, a batch with no present component).
+    Caveat: ``__getitem__`` returns a `RenderedSample`, not a batch: batching
+    is `training.collate.collate`, passed to the `DataLoader` as `collate_fn`.
+    The two stay separate so the collator can be tested on hand-built samples
+    that no sampler would draw (all-mono batches, a batch with no present
+    component).
     """
 
     def __init__(self, specs: Sequence[SampleSpec],
@@ -155,12 +157,12 @@ class SpecDataset(Dataset):
                fold: int | None | _Unset = UNSET) -> SpecDataset:
         """The evaluation mode: this exact spec list, for as long as it lives.
 
-        🔴 ``fold`` and ``slice_`` both distinguish **stated** from **omitted**,
-        and that is the whole point. Each used to carry a default, and a review
-        found the same consequence twice: the frozen evaluation set -- the
-        instrument this project trusts over the leaderboard -- audited with half
-        of I5 inactive and reported PASS, in a module whose own convention is
-        that a skipped check must never read as a pass.
+        Critical: ``fold`` and ``slice_`` both distinguish **stated** from
+        **omitted**, and that is the whole point. Each used to carry a default,
+        and a review found the same consequence twice: the frozen evaluation
+        set -- the instrument this project trusts over the leaderboard --
+        audited with half of I5 inactive and reported PASS, in a module whose
+        own convention is that a skipped check must never read as a pass.
 
         * ``fold=k`` -- the specs were drawn under fold ``k``; I5 checks both of
           its clauses.
@@ -171,12 +173,13 @@ class SpecDataset(Dataset):
           whatever the manifest looks like. Not passing an argument is not an
           assertion.
 
-        ⚠️ ``slice_`` names where the specs were **drawn from**, not the role
-        they are being used in, and that is exactly why its old ``"val"`` default
-        was a trap: an eval set drawn from a ``slice_="train"`` sampler inherited
-        the label ``"val"``, and when `training.loop` wired I5 in properly it
-        reported **23 file_ids outside the declared slice**. The specs were fine;
-        the declaration was invented by a default. Pass ``sampler.slice_``.
+        Caveat: ``slice_`` names where the specs were **drawn from**, not the
+        role they are being used in, and that is exactly why its old ``"val"``
+        default was a trap: an eval set drawn from a ``slice_="train"`` sampler
+        inherited the label ``"val"``, and when `training.loop` wired I5 in
+        properly it reported **23 file_ids outside the declared slice**. The
+        specs were fine; the declaration was invented by a default. Pass
+        ``sampler.slice_``.
         """
         fold_stated = not isinstance(fold, _Unset)
         slice_stated = not isinstance(slice_, _Unset)
@@ -201,9 +204,10 @@ class SpecDataset(Dataset):
     def n_per_epoch(self) -> int | None:
         """How many specs `set_epoch` redraws, or None on a frozen set.
 
-        ⚠️ Not `len(self)`: they agree today, but the count is what the *draw* is
-        keyed on and a resume has to record it (`training.loop.SamplerState`).
-        A frozen set has no such number -- its length is the whole story.
+        Caveat: not `len(self)`: they agree today, but the count is what the
+        *draw* is keyed on and a resume has to record it
+        (`training.loop.SamplerState`). A frozen set has no such number -- its
+        length is the whole story.
         """
         return self._n
 
@@ -214,12 +218,12 @@ class SpecDataset(Dataset):
         return render(self._specs[i], self.index, self.cfg)
 
     def set_epoch(self, epoch: int) -> None:
-        """Redraw the epoch. 🔴 Refused on a frozen set, loudly.
+        """Redraw the epoch. Critical: refused on a frozen set, loudly.
 
-        ⚠️ The refusal is the feature. Calling `set_epoch` on the evaluation set
-        would silently swap the rows under the validation curve, and the metric
-        would keep going up while measuring a different set every epoch -- a
-        failure no assertion downstream can see.
+        Caveat: the refusal is the feature. Calling `set_epoch` on the
+        evaluation set would silently swap the rows under the validation curve,
+        and the metric would keep going up while measuring a different set
+        every epoch -- a failure no assertion downstream can see.
         """
         if self._sampler is None or self._n is None:
             raise RuntimeError(
@@ -237,34 +241,36 @@ class SpecDataset(Dataset):
               **kw: Any) -> AuditReport:
         """`audit_specs` over this dataset's specs, with slice and fold wired in.
 
-        🔴 Forwarding `slice_`/`fold` is what makes **I5** run rather than SKIP.
-        Called without a manifest it reports SKIP for I4, I5 and I21 -- which is
-        the `AuditReport.SKIP` convention, never a pass.
+        Critical: forwarding `slice_`/`fold` is what makes **I5** run rather
+        than SKIP. Called without a manifest it reports SKIP for I4, I5 and
+        I21 -- which is the `AuditReport.SKIP` convention, never a pass.
 
-        🔴 Pass ``batches`` -- the plan from `training_batches` -- to audit **C2
-        on the batches the optimiser will actually see**. `audit_specs` otherwise
-        cuts the stream in draw order, and M4 made the training order bucketed by
-        duration, so draw-order slices are batches that never get stepped on.
-        `training/audit.py`'s own note says "audit the same order you train in";
-        this is the argument that makes that possible.
+        Critical: pass ``batches`` -- the plan from `training_batches` -- to
+        audit **C2 on the batches the optimiser will actually see**.
+        `audit_specs` otherwise cuts the stream in draw order, and M4 made the
+        training order bucketed by duration, so draw-order slices are batches
+        that never get stepped on. `training/audit.py`'s own note says "audit
+        the same order you train in"; this is the argument that makes that
+        possible.
         """
         report = audit_specs(self._specs, manifest=manifest, slice_=self.slice_,
                              fold=self.fold, batches=batches, **kw)
         if not self._slice_stated:
-            # 🔴 Same rule as the fold below. With no slice named, `audit_specs`
-            # already SKIPs I5 outright -- there is nothing to compare against --
-            # so this only has to make sure that stays a SKIP and never becomes a
-            # quiet pass if the upstream branch is ever loosened.
+            # Critical: same rule as the fold below. With no slice named,
+            # `audit_specs` already SKIPs I5 outright -- there is nothing to
+            # compare against -- so this only has to make sure that stays a
+            # SKIP and never becomes a quiet pass if the upstream branch is
+            # ever loosened.
             passed, why = report.results["I5_split_safety"]
             if not why.startswith(AuditReport.SKIP):        # pragma: no cover
                 report.results["I5_split_safety"] = (passed, AuditReport.SKIP + (
                     f"{why}; but no slice_ was ever passed to SpecDataset.frozen, "
                     f"so the provenance I5 checks against was never declared"))
         if not self._fold_stated:
-            # 🔴 No fold was ever named, so I5's second clause rests on nothing a
-            # caller decided. Downgrade rather than report a PASS: the
-            # `AuditReport.SKIP` convention exists because a review found I7
-            # printing PASS for a check that existed nowhere.
+            # Critical: no fold was ever named, so I5's second clause rests on
+            # nothing a caller decided. Downgrade rather than report a PASS:
+            # the `AuditReport.SKIP` convention exists because a review found
+            # I7 printing PASS for a check that existed nowhere.
             passed, why = report.results["I5_split_safety"]
             if not why.startswith(AuditReport.SKIP):
                 report.results["I5_split_safety"] = (passed, AuditReport.SKIP + (
@@ -296,7 +302,7 @@ def training_batches(dataset: SpecDataset, batch_size: int, *,
 def eval_batches(dataset: SpecDataset, batch_size: int) -> list[list[int]]:
     """Batches over the frozen eval set: **in order, unbucketed, nothing dropped**.
 
-    🔴 Unbucketed is not an oversight. docs/pipelines/04 §3 requires the
+    Critical: unbucketed is not an oversight. docs/pipelines/04 §3 requires the
     duration-vs-score check on the REAL class (architecture/04 §6.1: `max`
     aggregation carries a **1.63** duration bias) to be measured on unbucketed
     batches, and the frozen eval list gives that for free -- as long as nobody

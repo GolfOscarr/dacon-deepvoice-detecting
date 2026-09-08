@@ -8,14 +8,14 @@ The batch is exactly the five keys docs/pipelines/04 §2 fixes::
     frame_intervals  list[dict], absolute seconds, rasterised late
     specs            list[SampleSpec], for the ledger and the spec-level audits
 
-🔴 **Rule 2.4 governs everything here**: nothing a file's score depends on may
-come from another file. Three violations have already shipped in this repo
-(`bandpass` over the padded batch, `align_time` over padded frame counts,
+Critical: **Rule 2.4 governs everything here**: nothing a file's score depends
+on may come from another file. Three violations have already shipped in this
+repo (`bandpass` over the padded batch, `align_time` over padded frame counts,
 `frame_max` padding-sensitive in the submitted probability), so every decision
 below is written against that rule and tested against it in
 ``tests/test_collate.py``.
 
-⚠️ **The collator does not touch the audio.** No downmix (that is
+Caveat: **the collator does not touch the audio.** No downmix (that is
 ``prepare_waveform``'s job, at the same call site as inference), no bandpass, no
 preprocess chain, no cast to the training precision -- float32 out, and the
 model casts (docs/pipelines/04 §4: GeM overflowed in fp16 and produced NaN
@@ -50,19 +50,19 @@ BATCH_KEYS = ("wav", "lengths", "targets", "frame_intervals", "specs")
 def promote_channels(wav: Tensor, channels: int) -> Tensor:
     """Bring a ``(C, S)`` row up to ``channels`` by **repeating its own channels**.
 
-    🔴 This is the rule-2.4 surface of the batch layout, and the choice is
-    deliberate. ``wav`` is ``(B, C, S_max)`` and rows carry 1 or 2 channels, so a
-    batch that mixes them must agree on a channel axis -- and ``C_max`` is a
-    property of the *other* rows. Two candidate rules:
+    Critical: this is the rule-2.4 surface of the batch layout, and the choice
+    is deliberate. ``wav`` is ``(B, C, S_max)`` and rows carry 1 or 2 channels,
+    so a batch that mixes them must agree on a channel axis -- and ``C_max`` is
+    a property of the *other* rows. Two candidate rules:
 
     * **zero-fill** the missing channels. Rejected: under
       ``AudioConfig.channels="downmix"`` a mono row batched with a stereo one
       would be averaged against a channel of silence and come out at **half
       amplitude**, i.e. its score would depend on what shared its batch. That is
       the violation, not a rounding deviation.
-    * **cyclic repeat** of the row's own channels. Chosen, but 🔴 **only when
-      ``channels`` is an exact multiple of ``have``**, and that qualifier is
-      load-bearing. When it divides, every shipped policy
+    * **cyclic repeat** of the row's own channels. Chosen, but critically
+      **only when ``channels`` is an exact multiple of ``have``**, and that
+      qualifier is load-bearing. When it divides, every shipped policy
       (``models.audio.CHANNEL_POLICIES``) gives **bitwise** the un-promoted row:
       each source channel appears the same number of times, so ``downmix``'s mean
       is unchanged, ``left`` reads channel 0 either way and ``mid_side``'s
@@ -74,26 +74,26 @@ def promote_channels(wav: Tensor, channels: int) -> Tensor:
       boundary for a stereo row collated beside a 3-channel one -- the same
       half-amplitude class of violation this rejects zero-fill for.
 
-    So an uneven promotion is refused rather than performed. ⚠️ It is latent
-    today only because no corpus file has more than 2 channels, which is a
-    property of the corpus and not an invariant of this code: ``sf.read`` is
+    So an uneven promotion is refused rather than performed. Caveat: it is
+    latent today only because no corpus file has more than 2 channels, which is
+    a property of the corpus and not an invariant of this code: ``sf.read`` is
     called with ``always_2d=True``, ``render._to_channels`` keeps the leading
     channels of a multi-channel source rather than downmixing it, and the
     ``channels`` normalize draw accepts ``null``. A 5.1 file entering the corpus
     must fail loudly here, not silently rescale a stereo neighbour's score.
 
-    ⚠️ The invariance is not a property of *this* function alone either: it is a
-    joint property of the promotion and the channel policy, and a new policy
-    could break it (a hypothetical ``side`` policy would read 0 from a promoted
-    mono row rather than its true absence of a second channel). It is therefore
-    **measured** rather than declared --
+    Caveat: the invariance is not a property of *this* function alone either:
+    it is a joint property of the promotion and the channel policy, and a new
+    policy could break it (a hypothetical ``side`` policy would read 0 from a
+    promoted mono row rather than its true absence of a second channel). It is
+    therefore **measured** rather than declared --
     ``tests/test_collate.py::test_promotion_is_invisible_at_the_model_boundary``
     enumerates ``CHANNEL_POLICIES`` from the source of truth, so adding a policy
     without checking it fails the suite instead of shipping.
 
-    ⚠️ Also why the collator does not simply downmix: that would fork the channel
-    policy into two places, disable the A-B3 channel augmentations, and make the
-    ``mid_side`` leak test (09 B8) impossible to run.
+    Caveat: also why the collator does not simply downmix -- that would fork
+    the channel policy into two places, disable the A-B3 channel augmentations,
+    and make the ``mid_side`` leak test (09 B8) impossible to run.
     """
     have = int(wav.shape[0])
     if have == channels:
@@ -122,9 +122,10 @@ def collate(samples: Sequence[RenderedSample], *,
     check the *submitted probability* is unchanged (I16). It defaults to 0.0 and
     training never passes it.
 
-    🔴 ``lengths`` is mandatory and comes from each row's own sample count. It is
-    what makes the frame mask correct; without it every padded frame counts as
-    real audio and ``frame_max`` starts reading another file's padding.
+    Critical: ``lengths`` is mandatory and comes from each row's own sample
+    count. It is what makes the frame mask correct; without it every padded
+    frame counts as real audio and ``frame_max`` starts reading another file's
+    padding.
     """
     if not samples:
         raise ValueError("collate needs at least one sample")
@@ -143,10 +144,10 @@ def collate(samples: Sequence[RenderedSample], *,
     channels = max(int(s.wav.shape[0]) for s in samples)
     s_max = max(int(s.wav.shape[-1]) for s in samples)
 
-    # 🔴 Refused here, with the whole batch in hand, rather than one row at a
-    # time inside `promote_channels`: the caller needs to know which counts
-    # collided, and the answer ("split the batch by channel count") is a
-    # statement about the batch. See `promote_channels` for the arithmetic.
+    # Critical: refused here, with the whole batch in hand, rather than one
+    # row at a time inside `promote_channels`: the caller needs to know which
+    # counts collided, and the answer ("split the batch by channel count") is
+    # a statement about the batch. See `promote_channels` for the arithmetic.
     uneven = sorted({c for c in (int(s.wav.shape[0]) for s in samples)
                      if channels % c})
     if uneven:
@@ -172,9 +173,9 @@ def collate(samples: Sequence[RenderedSample], *,
         "wav": wav,
         "lengths": lengths,
         "targets": targets,
-        # 🔴 Carried through untouched, in **absolute seconds**. Rasterising to a
-        # frame grid here would hard-code a frame rate the collator does not
-        # know -- the `align_time` defect, one layer up.
+        # Critical: carried through untouched, in **absolute seconds**.
+        # Rasterising to a frame grid here would hard-code a frame rate the
+        # collator does not know -- the `align_time` defect, one layer up.
         "frame_intervals": [dict(s.frame_intervals) for s in samples],
         "specs": [s.spec for s in samples],
     }
@@ -183,14 +184,14 @@ def collate(samples: Sequence[RenderedSample], *,
 # --------------------------------------------------------------------------- #
 # Duration bucketing -- docs/pipelines/04 §3
 #
-# ✅ The objection that used to block this has been resolved away rather than
+# The objection that used to block this has been resolved away rather than
 # solved: `pairwise_ranking_loss` formed positive/negative pairs *within* the
 # batch, which would have made batch composition part of the objective. With
 # `LossConfig.ranking_weight` committed at 0 and stage S4 dropped, no loss term
 # is sensitive to batch composition and bucketing may be chosen purely for
 # padding efficiency.
 #
-# ✅ **Duration and cell are independent, by construction rather than by luck.**
+# **Duration and cell are independent, by construction rather than by luck.**
 # `sample_spec` draws `duration_s` FIRST, from the test distribution U(4, 60),
 # and only then draws the cell and fits the components into that timeline
 # (`take = min(seg, row.duration_s)`). Nothing downstream can feed back into the
@@ -199,7 +200,7 @@ def collate(samples: Sequence[RenderedSample], *,
 # 0.694 and music presence 0.656 / 0.678 / 0.674 / 0.688, flat across the whole
 # 4-60 s span.
 #
-# ⚠️ An earlier version of this note claimed the opposite -- "sequential
+# Caveat: an earlier version of this note claimed the opposite -- "sequential
 # compositions run long" -- and it is simply false against this sampler: a
 # sequential draw reuses the same drawn duration rather than concatenating two,
 # so mean duration is 30.85 s sequential against 30.38 s overlap, and sequential
@@ -207,11 +208,11 @@ def collate(samples: Sequence[RenderedSample], *,
 # (draw the length from the test distribution, then fit), which is a stronger
 # guarantee than the accident that was being claimed.
 #
-# 🔴 The **C2** check therefore stays as cheap insurance, not as a live hazard:
-# `audit_specs(specs, batches=training_batches(...))` measures the per-head
-# present count on the plan the optimiser will actually step on. Pass the plan --
-# a `batch_size` alone cuts the stream in draw order, which stopped being the
-# training order the moment bucketing arrived.
+# Critical: the **C2** check therefore stays as cheap insurance, not as a live
+# hazard: `audit_specs(specs, batches=training_batches(...))` measures the
+# per-head present count on the plan the optimiser will actually step on. Pass
+# the plan -- a `batch_size` alone cuts the stream in draw order, which stopped
+# being the training order the moment bucketing arrived.
 #
 # And the duration-vs-score check on the REAL class must be measured on
 # **unbucketed** eval batches, which the frozen eval spec list is by construction
@@ -241,7 +242,7 @@ def bucket_edges(durations: Sequence[float], n_buckets: int = 4) -> tuple[float,
 def bucket_of(duration: float, edges: Sequence[float]) -> int:
     """Which bucket a duration falls in, given ``bucket_edges``' interior edges.
 
-    ⚠️ ``side="right"`` is a tie-break convention with **no observable
+    Caveat: ``side="right"`` is a tie-break convention with **no observable
     consequence here**, and it is documented rather than tested because there is
     nothing to test. It differs from ``side="left"`` only for a duration exactly
     equal to an edge, and over 2,000 drawn specs there were 0 such rows and 0
@@ -250,11 +251,12 @@ def bucket_of(duration: float, edges: Sequence[float]) -> int:
     exact equality has measure zero. Asserting one of them would pin an arbitrary
     choice, which is how a test starts confirming the implementation.
 
-    🔴 The property that *is* worth holding, and is tested: bucketing is a
-    function of the **duration**, so two equal durations always land in the same
-    bucket. A rank-based bucketer (``np.array_split`` over ``argsort``) is the
-    plausible alternative and splits ties across a boundary, which makes the
-    batch a row happens to land in depend on the other rows.
+    Critical: the property that *is* worth holding, and is tested -- bucketing
+    is a function of the **duration**, so two equal durations always land in
+    the same bucket. A rank-based bucketer (``np.array_split`` over
+    ``argsort``) is the plausible alternative and splits ties across a
+    boundary, which makes the batch a row happens to land in depend on the
+    other rows.
     """
     return int(np.searchsorted(np.asarray(edges, dtype=float), float(duration),
                                side="right"))
@@ -265,10 +267,10 @@ def bucket_batches(durations: Sequence[float], batch_size: int, *,
                    drop_last: bool = True) -> list[list[int]]:
     """Index lists, one per batch, grouped so a batch spans one duration bucket.
 
-    ⚠️ ``drop_last`` defaults to True and matches what training does, which is
-    also what `audit_specs`' C2 check assumes: C2's floor is absolute (the
-    gradient norm scales as 1/√n), so a short trailing batch can never satisfy
-    it and the optimiser never sees one.
+    Caveat: ``drop_last`` defaults to True and matches what training does,
+    which is also what `audit_specs`' C2 check assumes: C2's floor is absolute
+    (the gradient norm scales as 1/√n), so a short trailing batch can never
+    satisfy it and the optimiser never sees one.
 
     Deterministic in ``seed``: the same durations and seed give the same
     batches, in the same order, in every process.
@@ -286,10 +288,10 @@ def bucket_batches(durations: Sequence[float], batch_size: int, *,
         stop = len(idx) - (len(idx) % batch_size) if drop_last else len(idx)
         for start in range(0, stop, batch_size):
             batches.append([int(i) for i in idx[start:start + batch_size]])
-    # 🔴 The batch *order* is shuffled too. Otherwise every epoch would walk the
-    # short files first and the long ones last, so the optimiser would see a
-    # duration schedule -- batch composition back in the objective by the side
-    # door, which is exactly what §3 argues bucketing is free of.
+    # Critical: the batch *order* is shuffled too. Otherwise every epoch would
+    # walk the short files first and the long ones last, so the optimiser
+    # would see a duration schedule -- batch composition back in the objective
+    # by the side door, which is exactly what §3 argues bucketing is free of.
     order = rng.permutation(len(batches))
     return [batches[int(i)] for i in order]
 
@@ -316,9 +318,10 @@ def padding_fraction(durations: Sequence[float],
 def spec_durations(specs: Sequence[SampleSpec]) -> list[float]:
     """The bucketing key, taken from the **spec** so no audio is decoded first.
 
-    ⚠️ It is `spec.duration_s`, the drawn timeline, not the rendered length --
-    bucketing has to happen before rendering or it buys nothing. The two agree
-    to within resampler rounding, and `render` refuses a sample whose *rendered*
-    length leaves the length regime (I12), so the approximation cannot drift.
+    Caveat: it is `spec.duration_s`, the drawn timeline, not the rendered
+    length -- bucketing has to happen before rendering or it buys nothing. The
+    two agree to within resampler rounding, and `render` refuses a sample whose
+    *rendered* length leaves the length regime (I12), so the approximation
+    cannot drift.
     """
     return [float(s.duration_s) for s in specs]
