@@ -213,7 +213,13 @@ def checkpoint_soup(paths: Sequence[Path | str]) -> dict[str, Tensor]:
     Critical: refuses a mismatched set instead of averaging what it can. A soup
     of two architectures, or of one model with a differently-shaped head, is not
     a worse model -- it is a `load_state_dict` failure deferred to whoever ships
-    it, or worse, a silent partial average.
+    it, or worse, a silent partial average. There are four refusals -- fewer than
+    two files, a missing `config`, a differing key set, a differing shape -- and
+    `tests/test_checkpoint.py` gives each one a case that **isolates** it,
+    because a single mismatched pair trips whichever check is left standing and
+    would have hidden the deletion of any of the others. Two of the three are
+    silent rather than loud if removed: an extra key is dropped from the average
+    without comment, and a `(1, n)` tensor against an `(n, n)` one broadcasts.
 
     Caveat: non-float entries are taken from the first checkpoint rather than
     averaged, for the reason `EMA` gives.
@@ -226,8 +232,17 @@ def checkpoint_soup(paths: Sequence[Path | str]) -> dict[str, Tensor]:
         blob = torch.load(Path(p), map_location="cpu", weights_only=False)
         if "state_dict" not in blob:
             raise ValueError(f"{p}: not a checkpoint (no 'state_dict')")
+        # Critical: `blob.get("config")` made the check below vacuous for any
+        # checkpoint without one -- two such files both read as `None`, compare
+        # equal, and get souped with nothing having compared their
+        # architectures. A missing config is "cannot tell", not "the same".
+        if "config" not in blob:
+            raise ValueError(
+                f"{p}: has no 'config', so it cannot be checked against the "
+                "others. Souping it would be averaging architectures that were "
+                "never compared")
         states.append(blob["state_dict"])
-        configs.append(blob.get("config"))
+        configs.append(blob["config"])
 
     reference = states[0]
     for p, state in zip(paths[1:], states[1:]):
