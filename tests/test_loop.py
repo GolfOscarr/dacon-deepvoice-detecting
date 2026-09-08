@@ -364,6 +364,67 @@ def test_dropping_the_optimizer_state_makes_the_resume_diverge(corpus, model_cfg
     assert not _same(_flat(full), _flat(resumed))
 
 
+def test_a_pass_boundary_resume_reproduces_an_uninterrupted_run_bitwise(
+        corpus, model_cfg, tmp_path):
+    """The **default** interruption, which nothing covered.
+
+    `checkpoint_every` is 0 by default, so a real run that dies mid-training
+    resumes from a `pass<N>.pt` file -- and every resume test above starts from a
+    `truncated` one, which only `max_steps` ever writes. Two mutants lived here:
+    making the in-loop `batch_seed` constant, and off-by-one-ing the seed the
+    pass-boundary checkpoint stores.
+
+    Critical: the batch seed's formula is written **twice** -- `train_cfg.seed +
+    pass_index` in the loop and `train_cfg.seed + pass_index + 1` in the stored
+    `SamplerState` -- and nothing but this test ties the two together.
+
+    The resumed run is given a different global torch seed on purpose: it has to
+    reproduce the original bitwise anyway, which it can only do by restoring the
+    checkpoint's RNG rather than by happening to start where the first run did.
+    """
+    full, res_full = _run(model_cfg, corpus, tmp_path / "full", epochs=3)
+    assert res_full.passes_done == 3 and len(set(res_full.pass_digests)) == 3
+
+    boundary = _tagged(res_full, "pass0.pt")
+    stopped = torch.load(boundary, map_location="cpu", weights_only=False)["sampler"]
+    assert (stopped["pass_index"], stopped["batch_index"]) == (1, 0), stopped
+
+    resumed, res_resume = _run(model_cfg, corpus, tmp_path / "resume", epochs=3,
+                               resume_from=boundary, torch_seed=4321)
+    assert res_resume.steps == res_full.steps
+    assert res_resume.passes_done == 2
+    # The corpora the remaining passes drew, not only the weights they produced.
+    assert res_resume.pass_digests == res_full.pass_digests[1:]
+    assert _same(_flat(full), _flat(resumed)), (
+        f"resumed run diverged by {_max_abs_diff(_flat(full), _flat(resumed)):.3e}")
+
+
+def test_a_pass_boundary_resume_at_the_wrong_batch_seed_diverges(corpus, model_cfg,
+                                                                 tmp_path):
+    """MUTATION for the test above, aimed at the off-by-one specifically.
+
+    The stored seed is one greater than the seed the pass just used, because it
+    describes the *next* pass. Storing the pass's own seed instead is a plausible
+    mistake, it raises nothing, and it leaves the corpus digests untouched -- only
+    the order the specs are batched in moves, which no field of `StageResult`
+    records.
+    """
+    full, res_full = _run(model_cfg, corpus, tmp_path / "full", epochs=3)
+    boundary = _tagged(res_full, "pass0.pt")
+    stored = torch.load(boundary, map_location="cpu", weights_only=False)["sampler"]
+
+    off_by_one = _rewrite(boundary, tmp_path / "off_by_one.pt",
+                          sampler={**stored,
+                                   "batch_seed": stored["batch_seed"] - 1})
+    resumed, res_resume = _run(model_cfg, corpus, tmp_path / "resume", epochs=3,
+                               resume_from=off_by_one)
+    # The draw is untouched -- which is the point: nothing else can see this.
+    assert res_resume.pass_digests == res_full.pass_digests[1:]
+    assert not _same(_flat(full), _flat(resumed)), (
+        "resuming at the previous pass's batch seed changed nothing, so the "
+        "bitwise test above is not testing the batching order")
+
+
 def _scaler_state(path):
     return torch.load(path, map_location="cpu", weights_only=False)["scaler"]
 
