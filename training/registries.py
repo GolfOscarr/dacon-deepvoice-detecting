@@ -1,33 +1,36 @@
 """The three registries: where a processing idea gets plugged in.
 
-🔴 Which registry a transform belongs to is decided by one question -- *does it
-also run at test time?* (docs/data/10 P2). Getting it wrong is silent in both
-directions, so the three contracts are deliberately **different shapes** and the
-difference is enforced at registration time rather than by convention:
+Critical: which registry a transform belongs to is decided by one question --
+*does it also run at test time?* (docs/data/10 P2). Getting it wrong is silent
+in both directions, so the three contracts are deliberately **different
+shapes** and the difference is enforced at registration time rather than by
+convention:
 
-===============  ====================  ==========  =========  ==================
-Registry         Signature             Test time   Labels     RNG
-===============  ====================  ==========  =========  ==================
-``PREPROCESS``   (wav, sample_rate,    ✅ same      ❌ never    ❌ never
-                  lengths) -> wav       code path
-``AUGMENT``      (wav, rng) -> wav     ❌           ❌ **structurally**  ✅
-``FILTER``       (manifest_row,        ❌           ✅          ❌
-                  quality_row) -> Verdict
-===============  ====================  ==========  =========  ==================
+==============  =======================  =========  ===============  =====
+Registry        Signature                Test time  Labels           RNG
+==============  =======================  =========  ===============  =====
+``PREPROCESS``  (wav, sample_rate,       yes, same  never            never
+                lengths) -> wav          code path
+``AUGMENT``     (wav, rng) -> wav        no         never, and       yes
+                                                    structurally so
+``FILTER``      (manifest_row,           no         yes              never
+                quality_row) -> Verdict
+==============  =======================  =========  ===============  =====
 
-🔴 **An augment cannot receive labels.** Not "must not read them" -- the bound
-callable takes exactly two arguments, and registration refuses a function that
-could take a third. ``P(T | L) = P(T)`` (docs/data/06) is thereby a property of
-the type rather than of a code review.
+Critical: **An augment cannot receive labels.** Not "must not read them" -- the
+bound callable takes exactly two arguments, and registration refuses a function
+that could take a third. ``P(T | L) = P(T)`` (docs/data/06) is thereby a
+property of the type rather than of a code review.
 
-🔴 **A filter cannot touch audio.** Same mechanism: it is handed two metadata
-rows and nothing else, so "verdicts are sidecar annotations" (docs/data/10 §1,
-gate **G5**) is not a promise anybody has to keep.
+Critical: **A filter cannot touch audio.** Same mechanism: it is handed two
+metadata rows and nothing else, so "verdicts are sidecar annotations"
+(docs/data/10 §1, gate **G5**) is not a promise anybody has to keep.
 
-⚠️ This module is the one part of the pipeline vendored into ``submit.zip``, so
-it imports ``numpy`` and ``torch`` and nothing else from this repo. Do not add a
-``pandas``/``models``/``training`` import here: it costs against the offline
-install budget (docs/architecture/01) and drags the sampler into the submission.
+Caveat: this module is the one part of the pipeline vendored into
+``submit.zip``, so it imports ``numpy`` and ``torch`` and nothing else from
+this repo. Do not add a ``pandas``/``models``/``training`` import here: it
+costs against the offline install budget (docs/architecture/01) and drags the
+sampler into the submission.
 """
 
 from __future__ import annotations
@@ -91,10 +94,11 @@ class RegistryError(ValueError):
 class Verdict:
     """What a filter decides about one file.
 
-    ⚠️ ``threshold_version`` is not decoration. docs/data/10 §6 step 5 requires
-    every threshold to carry the version, value and approver that produced it,
-    because a verdict whose threshold nobody can name cannot be revisited -- and
-    revisiting is the entire reason verdicts are sidecar annotations.
+    Caveat: ``threshold_version`` is not decoration. docs/data/10 §6 step 5
+    requires every threshold to carry the version, value and approver that
+    produced it, because a verdict whose threshold nobody can name cannot be
+    revisited -- and revisiting is the entire reason verdicts are sidecar
+    annotations.
     """
 
     action: str
@@ -161,7 +165,7 @@ def _check_signature(fn: Callable[..., Any], *, kind: str,
 
 
 # --------------------------------------------------------------------------- #
-# 🔴 The time-invariance contract
+# Critical: the time-invariance contract
 #
 # > **Steps 4-5 are time-invariant. Every time-warping decision lives in the
 # > draw (steps 0-3), where the spec records it.**
@@ -177,11 +181,12 @@ def _check_signature(fn: Callable[..., Any], *, kind: str,
 #   3. non-monotonic edit internal trimming, splicing, packet-loss concealment
 #   4. group delay        RIR convolution, and any non-linear-phase filter
 #
-# ⚠️ Class 4 is the one nobody lists, and it is why this is measured rather than
-# reviewed. `models.audio.bandpass` is safe only because it is zero-phase
-# (brick wall in rFFT) and `resample_poly` only because it is linear phase and
-# self-compensating. Neither is a decision anyone recorded -- they are load-
-# bearing accidents, and this repo has been bitten four times by exactly that.
+# Caveat: class 4 is the one nobody lists, and it is why this is measured
+# rather than reviewed. `models.audio.bandpass` is safe only because it is
+# zero-phase (brick wall in rFFT) and `resample_poly` only because it is linear
+# phase and self-compensating. Neither is a decision anyone recorded -- they
+# are load-bearing accidents, and this repo has been bitten four times by
+# exactly that.
 #
 # The enforcement is a probe at **registration** time, not a docstring and not a
 # declaration a caller must trust: the step is run on a chirp and its output is
@@ -200,12 +205,12 @@ _PROBE_WINDOWS = (_PROBE_N // 6, _PROBE_N - _PROBE_N // 6 - _PROBE_WIDTH)
 def _probe_signal() -> np.ndarray:
     """Fixed-seed white noise, ``(2, N)``, stereo so channel-wise steps run twice.
 
-    ⚠️ Noise rather than a chirp, and the reason is the whole point of the probe.
-    A chirp's head and tail hold *different frequencies*, so a filter with
-    frequency-dependent phase -- `pre_emphasis`, a 2-tap differencer -- reads as
-    a head and tail that disagree, and a step that moves nothing gets refused.
-    Noise is flat in every window, so what the two windows compare is the time
-    base and nothing else.
+    Caveat: noise rather than a chirp, and the reason is the whole point of the
+    probe. A chirp's head and tail hold *different frequencies*, so a filter
+    with frequency-dependent phase -- `pre_emphasis`, a 2-tap differencer --
+    reads as a head and tail that disagree, and a step that moves nothing gets
+    refused. Noise is flat in every window, so what the two windows compare is
+    the time base and nothing else.
     """
     x = np.random.default_rng(0x7A17).standard_normal((2, _PROBE_N)) * 0.3
     x[1] *= 0.8
@@ -229,10 +234,11 @@ def _window_lag(reference: np.ndarray, signal: np.ndarray,
 def _measure_time_warp(run: Callable[[Tensor], Tensor]) -> tuple[int, int, int]:
     """``(length change, head lag, tail lag)`` of a step, in samples.
 
-    🔴 Two windows, not one. A single lag catches class 1 and 4 but is blind to
-    2 and 3: a 1% stretch and an internal excision both leave the head where it
-    was. Comparing the head's lag with the tail's makes the *rigidity* of the map
-    observable -- if they disagree, the time base was warped rather than moved.
+    Critical: two windows, not one. A single lag catches class 1 and 4 but is
+    blind to 2 and 3: a 1% stretch and an internal excision both leave the head
+    where it was. Comparing the head's lag with the tail's makes the *rigidity*
+    of the map observable -- if they disagree, the time base was warped rather
+    than moved.
     """
     probe = _probe_signal()
     out = run(torch.from_numpy(probe.copy()))
@@ -273,14 +279,14 @@ class Registry:
         """Register a step, **measuring** that it satisfies the contract.
 
         ``group_delay`` is the shift the step introduces, in samples at 16 kHz.
-        🔴 It is a declaration the probe *checks*, not one it believes: declare 0
-        and shift by 137 and registration fails; declare 137 and shift by 0 and
-        it fails too. An undeclared shift cannot be registered, so it cannot
-        reach `render` and cannot desynchronise `frame_intervals`.
+        Critical: it is a declaration the probe *checks*, not one it believes:
+        declare 0 and shift by 137 and registration fails; declare 137 and
+        shift by 0 and it fails too. An undeclared shift cannot be registered,
+        so it cannot reach `render` and cannot desynchronise `frame_intervals`.
 
-        ⚠️ An augment may not declare one at all. A delay it wanted would be a
-        *draw* -- `ComponentDraw.target_start_s` -- where the spec records it and
-        the frame targets are computed from it.
+        Caveat: an augment may not declare one at all. A delay it wanted
+        would be a *draw* -- `ComponentDraw.target_start_s` -- where the spec
+        records it and the frame targets are computed from it.
         """
         def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
             if name in self._fns:
@@ -365,9 +371,10 @@ class Registry:
               ) -> Callable[..., Any]:
         """Bind drawn params, returning a callable with the bare signature.
 
-        ⚠️ An unknown key is an error, not a warning -- the same rule
-        ``models.config`` applies to configs, for the same reason: a typo'd knob
-        that silently does nothing is how an ablation measures the wrong thing.
+        Caveat: an unknown key is an error, not a warning -- the same rule
+        ``models.config`` applies to configs, for the same reason: a typo'd
+        knob that silently does nothing is how an ablation measures the wrong
+        thing.
         """
         fn = self.get(name)
         params = dict(params or {})
@@ -420,8 +427,8 @@ def preprocess_chain(steps: Sequence[tuple[str, Mapping[str, Any]]]) -> Preproce
 def augment_chain(transforms: Sequence[tuple[str, Mapping[str, Any]]]) -> Augment:
     """Compose a spec's ``transforms`` into one ``Augment``.
 
-    🔴 The returned callable's signature is ``(wav, rng)``. Whatever the caller
-    knows about the sample, it has no argument to put it in.
+    Critical: the returned callable's signature is ``(wav, rng)``. Whatever the
+    caller knows about the sample, it has no argument to put it in.
     """
     names = [name for name, _ in transforms]
     fns = [AUGMENT.build(name, params) for name, params in transforms]
@@ -430,11 +437,11 @@ def augment_chain(transforms: Sequence[tuple[str, Mapping[str, Any]]]) -> Augmen
         for name, fn in zip(names, fns):
             before = wav.shape
             wav = fn(wav, rng)
-            # ⚠️ The registration probe runs with *default* params, so it cannot
-            # see a warp that only a drawn parameter turns on. This is the same
-            # check on the real audio, on every sample, for a few hundred
-            # nanoseconds. Defence in depth for the class of defect that has
-            # shipped here four times.
+            # Caveat: the registration probe runs with *default* params, so it
+            # cannot see a warp that only a drawn parameter turns on. This is
+            # the same check on the real audio, on every sample, for a few
+            # hundred nanoseconds. Defence in depth for the class of defect
+            # that has shipped here four times.
             if wav.shape != before:
                 raise RegistryError(
                     f"augment {name!r} returned {tuple(wav.shape)} for "
@@ -447,17 +454,17 @@ def augment_chain(transforms: Sequence[tuple[str, Mapping[str, Any]]]) -> Augmen
 # --------------------------------------------------------------------------- #
 # Preprocess steps -- symmetric, and shipped
 #
-# 🔴 The rule-2.4 contract (docs/pipelines/03 §1): a row's output must not
-# depend on what else is in the batch. `lengths` is required, not optional, and
-# every step below works on `wav[i, :lengths[i]]`. No batch statistics: no
+# Critical: the rule-2.4 contract (docs/pipelines/03 §1): a row's output must
+# not depend on what else is in the batch. `lengths` is required, not optional,
+# and every step below works on `wav[i, :lengths[i]]`. No batch statistics: no
 # per-batch normalisation, no percentile over the batch, no frequency grid
 # derived from the padded width. `models.audio.bandpass` is what happens when a
 # step forgets -- one sample of padding moved its output by up to 1.0.
 #
-# ⚠️ Resampling (P-S2) is deliberately *not* here: it changes the sample count,
-# and a registry whose steps may change `lengths` cannot be composed. It happens
-# once per file at decode time, in `render.load_audio`, with the resampler
-# injected so G1 can swap it.
+# Caveat: resampling (P-S2) is deliberately *not* here: it changes the sample
+# count, and a registry whose steps may change `lengths` cannot be composed. It
+# happens once per file at decode time, in `render.load_audio`, with the
+# resampler injected so G1 can swap it.
 
 
 def _valid_lengths(wav: Tensor, lengths: Tensor | None) -> Tensor:
@@ -482,9 +489,9 @@ def dc_offset(wav: Tensor, sample_rate: int, lengths: Tensor | None) -> Tensor:
     """P-S4 -- remove each row's DC offset. Harmless, symmetric, and it kills a
     trivial corpus-identity cue (docs/data/10 §2).
 
-    🔴 The mean is taken over the row's **valid prefix**. Over the padded row it
-    would be a function of how much padding the batch happens to carry, which is
-    the `bandpass` defect with cheaper arithmetic.
+    Critical: the mean is taken over the row's **valid prefix**. Over the
+    padded row it would be a function of how much padding the batch happens to
+    carry, which is the `bandpass` defect with cheaper arithmetic.
     """
     lengths = _valid_lengths(wav, lengths)
     out = wav.clone()
@@ -520,11 +527,12 @@ def pre_emphasis(wav: Tensor, sample_rate: int, lengths: Tensor | None, *,
 # --------------------------------------------------------------------------- #
 # Augment steps -- training only, label-independent by construction
 #
-# ⚠️ Two entries of the docs/data/06 menu are deliberately absent, and both for
-# the same reason: they move audio along the timeline, while `frame_intervals`
-# report where the components were placed. An augment returns only a waveform,
-# so it has no way to tell the renderer that the timeline moved, and I13
-# ("frame targets and audio describe the same timeline") would silently break.
+# Caveat: two entries of the docs/data/06 menu are deliberately absent, and
+# both for the same reason: they move audio along the timeline, while
+# `frame_intervals` report where the components were placed. An augment returns
+# only a waveform, so it has no way to tell the renderer that the timeline
+# moved, and I13 ("frame targets and audio describe the same timeline") would
+# silently break.
 #
 #   * **A-A8 time shift** belongs in the *placement* -- jitter
 #     `ComponentDraw.target_start_s` in the sampler, where the spec records it.
@@ -546,8 +554,8 @@ def gain_jitter(wav: Tensor, rng: np.random.Generator, *,
                 db_range: tuple[float, float] = (-6.0, 6.0)) -> Tensor:
     """A-A7 -- ±6 dB, "simulates varying recording distances".
 
-    ⚠️ Note how modest this is. The measured recipe does its heavy lifting with
-    MixUp, not with signal mangling (docs/kaggle/06 §5).
+    Caveat: note how modest this is. The measured recipe does its heavy lifting
+    with MixUp, not with signal mangling (docs/kaggle/06 §5).
 
     ``db`` drawn at spec time wins; otherwise it is drawn here from ``db_range``.
     """
@@ -562,10 +570,10 @@ def gaussian_noise(wav: Tensor, rng: np.random.Generator, *,
                    snr_db_range: tuple[float, float] = (10.0, 30.0)) -> Tensor:
     """A-A6-shaped additive noise at a per-file SNR of 10-30 dB.
 
-    ⚠️ White noise stands in for the MUSAN *noise* and *speech* partitions until
-    the corpus exists. Never MUSAN's **music** partition: adding music flips
-    ``MUSIC_PRESENT`` to 1, which makes it a component draw (step 2), not an
-    augmentation (docs/data/06, Tier X).
+    Caveat: white noise stands in for the MUSAN *noise* and *speech* partitions
+    until the corpus exists. Never MUSAN's **music** partition: adding music
+    flips ``MUSIC_PRESENT`` to 1, which makes it a component draw (step 2), not
+    an augmentation (docs/data/06, Tier X).
 
     The SNR reference is the file's own RMS, so the operation is a function of
     one file and nothing else.
@@ -584,11 +592,11 @@ def rawboost_ssi(wav: Tensor, rng: np.random.Generator, *,
                  tilt_db_range: tuple[float, float] = (-12.0, 12.0)) -> Tensor:
     """A-A5, stationary signal-independent variant: coloured additive noise.
 
-    ☆ RawBoost is the most effective single augmentation family in a systematic
-    comparison against AWGN / vocoded / RIR (docs/survey/08). This is its
-    stationary arm only -- a noise floor with a random spectral tilt, modelling
-    transmission and microphone colouration. The convolutive and non-stationary
-    arms are not implemented.
+    Weak evidence: RawBoost is the most effective single augmentation family in
+    a systematic comparison against AWGN / vocoded / RIR (docs/survey/08). This
+    is its stationary arm only -- a noise floor with a random spectral tilt,
+    modelling transmission and microphone colouration. The convolutive and
+    non-stationary arms are not implemented.
     """
     snr_db = float(rng.uniform(*snr_db_range))
     tilt_db = float(rng.uniform(*tilt_db_range))
@@ -609,9 +617,9 @@ def stereo_imbalance(wav: Tensor, rng: np.random.Generator, *,
                      db_range: tuple[float, float] = (-4.0, 4.0)) -> Tensor:
     """A-B3 -- L/R level imbalance. A no-op on mono, by construction.
 
-    ⚠️ This is why ``RenderedSample.wav`` stays ``(C, S)``: downmixing in the
-    dataset would disable the channel augmentations and fork the channel policy
-    away from ``models.audio.prepare_waveform`` (docs/pipelines/01 §4).
+    Caveat: this is why ``RenderedSample.wav`` stays ``(C, S)``: downmixing in
+    the dataset would disable the channel augmentations and fork the channel
+    policy away from ``models.audio.prepare_waveform`` (docs/pipelines/01 §4).
     """
     if wav.shape[0] < 2:
         return wav
@@ -624,7 +632,7 @@ def stereo_imbalance(wav: Tensor, rng: np.random.Generator, *,
 # --------------------------------------------------------------------------- #
 # Filters -- offline, sidecar, never audio
 #
-# 🔴 The criterion is **label-evidence sufficiency, not cleanliness**
+# Critical: the criterion is **label-evidence sufficiency, not cleanliness**
 # (docs/data/10 P1). Our test set contains 전화채널 audio -- narrowband,
 # codec-degraded, noisy by construction. Noise is a property of the target
 # domain, not a defect. The question is never "is this clean?" but "is the
@@ -655,9 +663,9 @@ def usable_duration(manifest_row: Mapping[str, Any], quality_row: Mapping[str, A
                     *, min_seconds: float = 4.0) -> Verdict:
     """F-A3 -- after salvage, no contiguous valid region ≥ the test minimum.
 
-    ⚠️ ``min_seconds`` defaults to 4.0 because that is the competition's own
-    floor (docs/competition/01), not a threshold anyone chose -- which is why
-    this one filter needs no ``threshold_version``.
+    Caveat: ``min_seconds`` defaults to 4.0 because that is the competition's
+    own floor (docs/competition/01), not a threshold anyone chose -- which is
+    why this one filter needs no ``threshold_version``.
     """
     longest = quality_row.get("longest_valid_span_s")
     if longest is None:
@@ -677,11 +685,12 @@ def label_evidence(manifest_row: Mapping[str, Any], quality_row: Mapping[str, An
     """F-A2 -- the real version of "too noisy": is the *labelled* component
     still perceptible?
 
-    🔴 Raises unless a threshold **and** its version are supplied. docs/data/10
-    §6: no threshold is ever hardcoded from intuition -- it is measured, expressed
-    as a quantile of our own data, put in front of a human (**G3**) and recorded
-    with a version. A default here would be exactly the hardcoded intuition the
-    protocol exists to forbid, and it would be invisible in a green suite.
+    Critical: raises unless a threshold **and** its version are supplied.
+    docs/data/10 §6: no threshold is ever hardcoded from intuition -- it is
+    measured, expressed as a quantile of our own data, put in front of a human
+    (**G3**) and recorded with a version. A default here would be exactly the
+    hardcoded intuition the protocol exists to forbid, and it would be
+    invisible in a green suite.
     """
     if min_component_snr_db is None or not threshold_version:
         raise RegistryError(

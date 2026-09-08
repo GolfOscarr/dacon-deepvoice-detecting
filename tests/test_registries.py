@@ -1,10 +1,10 @@
 """The three registries, and the guarantees that are supposed to be structural.
 
-🔴 Every check here is mutation-tested: for each invariant there is a paired
-test that breaks the thing deliberately and proves the check fires. A review of
-this repo found three checks that could not fail -- a brute force over all nine
-cells produced 0 specs able to trip one of them -- so "the test passes" is not
-evidence until "the broken version fails" is also evidence.
+Critical: every check here is mutation-tested: for each invariant there is a
+paired test that breaks the thing deliberately and proves the check fires. A
+review of this repo found three checks that could not fail -- a brute force
+over all nine cells produced 0 specs able to trip one of them -- so "the test
+passes" is not evidence until "the broken version fails" is also evidence.
 """
 
 import inspect
@@ -57,7 +57,7 @@ def test_preprocess_step_is_batch_invariant(name):
 
 
 def test_the_batch_invariance_check_can_fail():
-    """🔴 Mutation test for I14 itself.
+    """Critical: mutation test for I14 itself.
 
     `models/audio.py::bandpass` shipped this defect with a docstring asserting
     the opposite, and a green suite. A batch-dependent step -- the mean taken
@@ -129,7 +129,7 @@ def test_preprocess_rejects_lengths_longer_than_the_tensor():
 
 
 def test_a_bound_augment_takes_exactly_wav_and_rng():
-    """🔴 `P(T | L) = P(T)` is a property of the type, not of a code review.
+    """Critical: `P(T | L) = P(T)` is a property of the type, not of a code review.
 
     Whatever the caller knows about the sample, the composed augment has no
     argument to put it in.
@@ -150,7 +150,7 @@ def test_every_registered_augment_has_the_bare_signature(name):
 
 
 def test_registering_an_augment_that_takes_a_label_is_refused():
-    """🔴 Mutation test: the enforcement must actually refuse something."""
+    """Critical mutation test: the enforcement must actually refuse something."""
     reg = Registry("augment", ("wav", "rng"), LABEL_PARAM_NAMES)
 
     with pytest.raises(RegistryError, match="positionally"):
@@ -229,7 +229,7 @@ def test_stereo_imbalance_is_a_no_op_on_mono():
 
 
 def test_the_menu_entries_that_would_desynchronise_frame_targets_are_absent():
-    """⚠️ A-A8 time shift and A-A11 silence edits move audio along the timeline.
+    """Caveat: A-A8 time shift and A-A11 silence edits move audio along the timeline.
 
     An augment returns only a waveform, so it cannot tell the renderer the
     timeline moved, and I13 -- "frame targets and audio describe the same
@@ -241,7 +241,7 @@ def test_the_menu_entries_that_would_desynchronise_frame_targets_are_absent():
 
 
 # --------------------------------------------------------------------------- #
-# 🔴 The time-invariance contract
+# Critical: the time-invariance contract
 #
 # > Steps 4-5 are time-invariant. Every time-warping decision lives in the draw.
 #
@@ -268,7 +268,7 @@ def test_class_1_an_undeclared_rigid_shift_cannot_be_registered():
 
 
 def test_a_declared_group_delay_is_checked_against_the_measurement():
-    """🔴 A declaration the probe believes would be worthless. Declare 37 and
+    """Critical: A declaration the probe believes would be worthless. Declare 37 and
     shift by 37 and it registers; declare 37 and shift by 12 and it does not."""
     reg = _fresh()
 
@@ -312,7 +312,7 @@ def test_class_3_a_non_monotonic_edit_cannot_be_registered():
 
 
 def test_class_4_group_delay_is_measured_not_assumed():
-    """🔴 The class nobody lists. A-A10 RIR convolution shifts by its direct-path
+    """Critical: the class nobody lists. A-A10 RIR convolution shifts by its direct-path
     offset; `bandpass` is safe only because it is zero-phase and `resample_poly`
     only because it is linear phase. Those are load-bearing accidents until
     something measures them."""
@@ -350,7 +350,7 @@ def test_a_length_change_is_refused_and_named_as_a_draw():
 
 
 def test_an_augment_may_not_even_declare_a_delay():
-    """⚠️ A delay an augment wanted is a *draw*. Letting it declare one would
+    """Caveat: A delay an augment wanted is a *draw*. Letting it declare one would
     reopen the case-by-case tracking the contract exists to close."""
     reg = _fresh("augment")
     with pytest.raises(RegistryError, match="cannot move audio in time"):
@@ -377,7 +377,7 @@ def test_a_chain_reports_the_delay_it_would_impose():
 
 
 def test_the_runtime_guard_catches_a_warp_a_default_probe_cannot_see():
-    """⚠️ Registration probes with *default* params, so a warp that only a drawn
+    """Caveat: registration probes with *default* params, so a warp that only a drawn
     parameter turns on gets past it. `augment_chain` re-checks on the real audio.
     A step like this is exactly how A-A11 would come back."""
     reg = Registry("augment", ("wav", "rng"), frozenset(), time_invariant=True)
@@ -405,7 +405,7 @@ def test_the_runtime_guard_catches_a_warp_a_default_probe_cannot_see():
 
 
 def test_a_filter_cannot_be_given_audio():
-    """🔴 G5: nothing in this registry rewrites or deletes audio. It is not
+    """Critical, G5: nothing in this registry rewrites or deletes audio. It is not
     handed any, and registration refuses a function that asks for some."""
     reg = Registry("filter", ("manifest_row", "quality_row"),
                    frozenset({"wav", "audio"}))
@@ -441,7 +441,7 @@ def test_corruption_drops_only_what_carries_no_evidence():
 
 
 def test_a_noisy_file_is_not_dropped_for_being_noisy():
-    """🔴 P1: noise is a property of the target domain, not a defect. Our test
+    """Critical, P1: noise is a property of the target domain, not a defect. Our test
     set contains 전화채널 audio by construction."""
     telephone = {"file_id": "x", "duration_s": 12.0}
     quality = {"decode_ok": True, "snr_db": 2.0, "component_snr_db": 2.0,
@@ -456,7 +456,7 @@ def test_a_noisy_file_is_not_dropped_for_being_noisy():
 
 
 def test_label_evidence_refuses_to_run_on_an_unapproved_threshold():
-    """🔴 docs/data/10 §6: no threshold is hardcoded from intuition, and G3 has
+    """Critical, docs/data/10 §6: no threshold is hardcoded from intuition, and G3 has
     to have approved it. A default here would be invisible in a green suite."""
     row, quality = {"file_id": "x"}, {"component_snr_db": -20.0}
     with pytest.raises(RegistryError, match="G3"):
