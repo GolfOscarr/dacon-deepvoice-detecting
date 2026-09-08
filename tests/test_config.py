@@ -91,12 +91,13 @@ def test_every_shipped_config_loads():
     fourth config kind turn this red instead of routing it to whichever loader
     happens not to complain.
 
-    Caveat: the ambiguity half (`len == 1`) cannot currently fail, because no
-    shipped config is accepted by two loaders and each loader rejects unknown
-    top-level keys. It is kept as a statement of the contract for a future
-    loader whose schema overlaps another's, not as a check earning its keep
-    today -- a mutation that returns the first acceptance survives, and that is
-    expected rather than a gap to close.
+    ⚠️ Both halves are reachable and both are covered below. An earlier version
+    of this docstring said the ambiguity half "cannot currently fail" and stood
+    down a mutation that returns the first acceptance; that was wrong. A config
+    of nothing but defaults is accepted by `load_train_config` *and* by
+    `load_run_config` today -- neither needs a single key to build a complete
+    config -- so two loaders reading one file is a live failure mode, not a
+    contract kept for a hypothetical future loader.
     """
     assert SHIPPED, "no configs found"
     for path in SHIPPED:
@@ -121,6 +122,34 @@ def test_an_unclassifiable_config_is_not_silently_accepted(tmp_path):
     assert _classify(orphan) == [], (
         "a config belonging to no loader was accepted by one; the sweep would "
         "have reported it as loaded")
+
+
+def test_a_config_two_loaders_accept_is_ambiguous_rather_than_the_first_one(tmp_path):
+    """🔴 The other half of the guard, and it fails today -- not hypothetically.
+
+    A config of nothing but defaults is accepted by `load_train_config` and by
+    `load_run_config` both: neither schema requires a single key, so each builds
+    a complete config out of an empty mapping and nothing in the file prefers
+    either. `load_model_config` rejects it ("at least one branch is required"),
+    which is the only reason this is a two-way tie rather than a three-way one.
+
+    Critical: `_classify` must report the tie rather than resolve it. Returning
+    the first acceptance is the same defect as the filename `else` branch it
+    replaced -- a router picking a loader on something incidental, here dict
+    ordering in LOADERS, and reporting the file as loaded. The sweep's
+    `len(accepted) == 1` is what turns that into a red, so the tie has to reach
+    it intact.
+    """
+    defaults = tmp_path / "nothing_but_defaults.yaml"
+    defaults.write_text("{}\n")
+    accepted = _classify(defaults)
+    assert accepted == ["train", "run"], (
+        "an all-defaults config is genuinely ambiguous between the train and "
+        "run loaders; _classify resolved it instead of reporting the tie")
+    # `test_every_shipped_config_loads` asserts `len(accepted) == 1` on exactly
+    # this value, so a tie that survives _classify is a red sweep. Asserting the
+    # tie here rather than re-running the sweep keeps the message in one place.
+    assert len(accepted) > 1
 
 
 def test_a_and_b_produce_exactly_the_submission_columns():
