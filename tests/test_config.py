@@ -174,7 +174,32 @@ def test_unknown_frontend_is_rejected():
 def test_bad_mask_key_is_rejected():
     raw = _raw("a_shared_trunk.yaml")
     raw["branches"]["voice"]["masked_by"] = "voice_fake"     # a label, not a mask
-    with pytest.raises(ConfigError, match="masked_by"):
+    with pytest.raises(ConfigError, match="must be one of"):
+        _built(raw)
+
+
+@pytest.mark.parametrize("branch,mask", [
+    ("voice", "music_present"),      # the wrong pool, both keys valid
+    ("voice", None),                 # unmasked: trains on music-only files
+    ("music", "voice_present"),
+    ("music", None),
+    ("file", "voice_present"),       # File EER is over every file
+    ("v_pres", "voice_present"),     # circular: masked by its own target
+    ("m_pres", "music_present"),
+])
+def test_a_mask_that_is_not_the_metrics_pool_is_rejected(branch, mask):
+    """🔴 The column decides the mask, because the metric decides the pool.
+
+    Validation used to check only that `masked_by` was in MASK_KEYS or null, so
+    `voice: masked_by: music_present` alongside `music: masked_by: null` loaded
+    clean -- a voice head trained on the files the metric never scores it on,
+    which is the exact defect the masks exist to prevent. Both shipped configs
+    are correct and pinned by `test_masks_mirror_the_metric`; this protects the
+    next one.
+    """
+    raw = _raw("a_shared_trunk.yaml")
+    raw["branches"][branch]["masked_by"] = mask
+    with pytest.raises(ConfigError, match="is scored over"):
         _built(raw)
 
 

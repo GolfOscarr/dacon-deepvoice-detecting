@@ -52,6 +52,21 @@ KNOWN_FRONTENDS = (
 #: voice-present files (docs/competition/03-evaluation.md).
 MASK_KEYS = ("voice_present", "music_present")
 
+#: The mask each submission column's loss **must** take. 🔴 Not a convention: the
+#: metric fixes it. Voice EER is scored over voice-present files only, Music EER
+#: over music-present files only, and File EER and both presence AUCs over every
+#: file (docs/validation/02 §1). Validating only that `masked_by` is *a* mask key
+#: accepted `voice: masked_by: music_present` -- a branch trained on a pool the
+#: metric never scores it on, and shaped exactly like the defect the masks exist
+#: to prevent.
+MASK_FOR_COLUMN = {
+    "VOICE_FAKE_PROB": "voice_present",
+    "MUSIC_FAKE_PROB": "music_present",
+    "FILE_FAKE_PROB": None,
+    "VOICE_PRESENT_PROB": None,
+    "MUSIC_PRESENT_PROB": None,
+}
+
 #: The per-head keys `LossConfig.weights` must carry -- one per submission
 #: column, matching `models.losses.WEIGHT_KEY_FOR_COLUMN`. 🔴 All five are
 #: **required**, not optional: a YAML `weights: {file: 0.45}` used to load clean
@@ -488,6 +503,16 @@ def validate_model_config(cfg: ModelConfig) -> None:
         if br.masked_by is not None and br.masked_by not in MASK_KEYS:
             raise ConfigError(
                 f"branches.{name}.masked_by must be one of {list(MASK_KEYS)} or null")
+        # The column decides the mask, because the metric decides the pool. A
+        # column this branch has no business producing is caught below, by the
+        # exactly-the-five-columns check; say nothing about its mask here.
+        if br.column in MASK_FOR_COLUMN and br.masked_by != MASK_FOR_COLUMN[br.column]:
+            required = MASK_FOR_COLUMN[br.column]
+            pool = "every file" if required is None else f"{required} files only"
+            raise ConfigError(
+                f"branches.{name}.masked_by is {br.masked_by!r}, but {br.column} "
+                f"is scored over {pool}, so its loss must be masked by "
+                f"{required!r} (docs/validation/02 §1)")
         if not 0.0 <= br.head.clip_weight <= 1.0:
             raise ConfigError(f"branches.{name}.head.clip_weight must be in [0, 1]")
         if br.head.attention not in ("linear", "scaled_tanh", "tanh"):
