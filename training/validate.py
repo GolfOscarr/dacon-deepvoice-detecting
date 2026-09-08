@@ -247,6 +247,14 @@ def _worst_slice(table: pd.DataFrame) -> float:
     return float(usable["eer"].max()) if len(usable) else float("nan")
 
 
+def _worst_over_folds(values: Any) -> float:
+    """The worst fold's worst slice. Caveat: a fold with nothing usable is skipped,
+    not propagated -- `max` over a sequence containing NaN answers whatever the
+    fold order happens to be."""
+    finite = [v for v in values if np.isfinite(v)]
+    return max(finite) if finite else float("nan")
+
+
 @dataclass(frozen=True)
 class ValidationReport:
     """One fold's numbers. Pooled *and* sliced, because pooled alone is not a result.
@@ -550,9 +558,14 @@ def run_gates(report: ValidationReport, *,
 
     Caveat: VG3 is the honest gap. It needs a TRAIN-vs-VAL classifier over the
     metadata features VG2 uses, which is real work and would land as a green
-    stub if it were faked here. It reports SKIP, and `RunReport.quotable`
-    counts SKIPs so the shortfall is visible in the ledger rather than in a
-    docstring.
+    stub if it were faked here. It reports SKIP.
+
+    Critical: `RunReport.quotable` does **not** count SKIPs, and this docstring used
+    to claim it did. VG3 skips on every run today, so a SKIP that blocked would
+    make nothing quotable and the distinction would stop being read. The
+    shortfall reaches the ledger instead, per gate and machine-readably, as
+    `vg3=na` in `RunReport.as_ledger_row()` -- which is where a ledger filter
+    can act on it, and is what the docstring was promising.
     """
     r: dict[str, tuple[bool, str]] = {}
 
@@ -663,7 +676,9 @@ class RunReport:
 
         Caveat: SKIPs do not block -- they are recorded and printed. VG3 is skipped on
         every run today, so treating a SKIP as a failure would make nothing
-        quotable and the distinction would stop being read.
+        quotable and the distinction would stop being read. Where the shortfall
+        does land is `gate_status()`, which reports a gate with any skipped
+        sub-check as `na` rather than `pass`, in the ledger row a filter reads.
         """
         return all(f.ok for f in self.folds)
 
@@ -674,8 +689,53 @@ class RunReport:
             out.update(f.tripwires.skipped)
         return out
 
+    def gate_status(self) -> dict[str, str]:
+        """`vg1..vg6` as docs/validation/03 §5's ``pass|fail|na``, over all folds.
+
+        Critical: **fail beats na beats pass**, so a gate is `pass` only when every one
+        of its sub-checks ran and passed in every fold. VG1 is wired to nine of
+        them and any one skipping leaves it `na` -- which is the honest answer
+        and the whole reason the ledger schema has a third state. Anything that
+        rounded `na` up to `pass` would be `quotable` all over again, one column
+        further on.
+        """
+        out: dict[str, str] = {}
+        for n in range(1, 7):
+            rows = [v for f in self.folds for k, v in f.gates.results.items()
+                    if k.startswith(f"VG{n}_")]
+            if any(not passed for passed, _ in rows):
+                out[f"vg{n}"] = "fail"
+            elif not rows or any(why.startswith(AuditReport.SKIP) for _, why in rows):
+                out[f"vg{n}"] = "na"
+            else:
+                out[f"vg{n}"] = "pass"
+        return out
+
+    def _slice_eers(self, attr: str) -> dict[str, float]:
+        """One breakdown's file-head EERs, meaned over the folds that have them.
+
+        Caveat: the same qualifiers as `_worst_slice`, deliberately -- a ledger whose
+        `per_cell_eer` listed a cell that `worst_cell_eer` had excluded as thin
+        would be two different definitions of "the per-cell EER" in one row.
+        """
+        acc: dict[str, list[float]] = {}
+        for f in self.folds:
+            table = getattr(f.validation, attr)
+            usable = table[(table["head"] == "file") & (~table["thin"])
+                           & table["eer"].notna()]
+            for row in usable.itertuples():
+                acc.setdefault(str(row.value), []).append(float(row.eer))
+        return {k: float(np.mean(v)) for k, v in sorted(acc.items())}
+
     def as_ledger_row(self) -> dict[str, Any]:
-        """The subset of docs/validation/03 §5's schema this module can fill."""
+        """The subset of docs/validation/03 §5's schema this module can fill.
+
+        Critical: the `vg1..vg6` tri-state is the machine-readable half of the SKIP
+        convention. `__str__` has always printed the SKIP lines, but a ledger
+        filter reads the row, not the printout -- so a run with six skipped
+        gates used to be a row of numbers with nothing saying they were
+        unguarded.
+        """
         m = self.aggregate.mean
         return {
             "score_mean": m.score, "score_sd": self.score_sd,
@@ -686,8 +746,13 @@ class RunReport:
             "excluded_folds": json.dumps(list(self.aggregate.excluded_folds)),
             "per_fold_score": json.dumps(
                 {str(f.fold): f.validation.metrics.score for f in self.folds}),
-            "worst_cell_eer": max(
-                (f.validation.worst_cell_eer for f in self.folds), default=float("nan")),
+            "per_cell_eer": json.dumps(self._slice_eers("per_cell")),
+            "per_family_eer": json.dumps(self._slice_eers("per_generator")),
+            "worst_cell_eer": _worst_over_folds(
+                f.validation.worst_cell_eer for f in self.folds),
+            "worst_family_eer": _worst_over_folds(
+                f.validation.worst_family_eer for f in self.folds),
+            **self.gate_status(),
             "quotable": self.quotable,
             "caveats": json.dumps(list(self.caveats)),
         }

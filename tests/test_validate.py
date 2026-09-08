@@ -12,6 +12,7 @@ has already shipped a padding defect that every test missed for exactly that
 reason: every fixture used `lengths = SR * 4`.
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -386,6 +387,96 @@ def test_a_run_with_a_red_gate_is_not_quotable():
     assert not report.quotable
     assert "NOT QUOTABLE" in str(report)
     assert report.as_ledger_row()["quotable"] is False
+
+
+#: The columns of docs/validation/03 §5's schema this module is the source of.
+#: The rest -- exp_id, git_sha, hypothesis, runtime, SHADOW -- belong to the
+#: experiment runner.
+LEDGER_COLUMNS = {
+    "score_mean", "score_sd", "ads", "cps",
+    "eer_file", "eer_voice", "eer_music", "auc_vp", "auc_mp",
+    "per_cell_eer", "per_family_eer", "per_fold_score",
+    "worst_cell_eer", "worst_family_eer",
+    "vg1", "vg2", "vg3", "vg4", "vg5", "vg6",
+}
+
+
+def test_the_ledger_row_carries_every_schema_column_this_module_can_fill():
+    """docs/validation/03 §5 names `vg1..vg6`, `per_cell_eer` and
+    `per_family_eer`; none were emitted, though `per_fold_score` from the same
+    schema line was. A ledger filter reads the row, not `__str__`."""
+    row = aggregate_folds([_fold_result(0, _metric_set(0.10))]).as_ledger_row()
+    assert LEDGER_COLUMNS <= set(row), LEDGER_COLUMNS - set(row)
+
+
+def test_a_skipped_gate_reaches_the_ledger_as_na_and_never_as_pass():
+    """The SKIP convention, in the column a machine reads. `quotable` cannot
+    carry it -- VG3 skips on every run, so a SKIP that blocked would make
+    nothing quotable -- so the tri-state is where the shortfall lands.
+
+    Fail beats na beats pass: VG1 has one green sub-check and one skipped one
+    here, and reporting it `pass` would be `quotable`'s problem one column on.
+    """
+    gates = AuditReport({
+        "VG1_A1_family_in_one_cell": (True, "no family in two folds"),
+        "VG1_A8A9_eval_size_floors": (True, AuditReport.SKIP + "no eval specs"),
+        "VG3_adversarial_validation": (True, AuditReport.SKIP + "not implemented"),
+        "VG4_corpus_identity": (True, "gate <= 0.10"),
+        "VG5_B2_ranking_resolution": (False, "241 unique of 400"),
+    })
+    report = aggregate_folds([_fold_result(0, _metric_set(0.10), gates=gates)])
+    status = report.gate_status()
+
+    assert status["vg1"] == "na"          # one sub-check skipped: not a pass
+    assert status["vg2"] == "na"          # never ran at all
+    assert status["vg3"] == "na"
+    assert status["vg4"] == "pass"
+    assert status["vg5"] == "fail"        # red beats everything
+    assert status["vg6"] == "na"
+    row = report.as_ledger_row()
+    assert {k: row[k] for k in status} == status
+
+
+def test_the_ledger_reports_the_gates_that_actually_ran_as_pass():
+    """The other direction: a gate that ran green must read `pass`, or `na`
+    would be a synonym for "we do not fill this column" and stop meaning
+    anything."""
+    gates = AuditReport({f"VG{n}_x": (True, "green") for n in range(1, 7)})
+    status = aggregate_folds(
+        [_fold_result(0, _metric_set(0.10), gates=gates)]).gate_status()
+    assert set(status.values()) == {"pass"}
+
+
+def test_the_per_slice_ledger_columns_mean_over_folds_on_the_file_head():
+    """`per_cell_eer` and `per_family_eer` use `worst_cell_eer`'s qualifiers --
+    file head, thin excluded -- so a ledger row cannot list a cell under one
+    definition and exclude it from the worst under another."""
+    def report(fold, cell_eer):
+        per_cell = _slices([(1, "file", cell_eer, False),
+                            (2, "file", 0.30, False),
+                            (3, "file", 0.99, True),
+                            (1, "voice", 0.95, False)])
+        per_family = _slices([("hifigan", "file", 0.40, False)])
+        return _fold_result(fold, _metric_set(0.10), per_cell=per_cell,
+                            per_family=per_family)
+
+    row = aggregate_folds([report(0, 0.20), report(1, 0.40)]).as_ledger_row()
+    assert json.loads(row["per_cell_eer"]) == pytest.approx({"1": 0.30, "2": 0.30})
+    assert json.loads(row["per_family_eer"]) == pytest.approx({"hifigan": 0.40})
+    assert row["worst_cell_eer"] == 0.40           # fold 1's cell 1
+    assert row["worst_family_eer"] == 0.40
+
+
+def test_a_fold_with_no_usable_slice_does_not_poison_the_worst_columns():
+    """`max` over a sequence containing NaN answers whatever the fold order is."""
+    empty = _slices([(1, "file", 0.9, True)])
+    good = _slices([(1, "file", 0.35, False)])
+    rows = [_fold_result(0, _metric_set(0.10), per_cell=empty, per_family=empty),
+            _fold_result(1, _metric_set(0.10), per_cell=good, per_family=good)]
+    for order in (rows, rows[::-1]):
+        row = aggregate_folds(list(order)).as_ledger_row()
+        assert row["worst_cell_eer"] == 0.35
+        assert row["worst_family_eer"] == 0.35
 
 
 def test_a_skipped_gate_does_not_block_but_is_reported():

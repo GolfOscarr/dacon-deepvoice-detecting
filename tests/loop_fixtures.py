@@ -98,9 +98,12 @@ def _breakdown(values):
         for i, v in enumerate(values)])
 
 
-def _fold_result(fold, metrics, gates=None, tripwires=None, n=200):
-    report = ValidationReport(fold, metrics, _breakdown(range(1, 10)),
-                              _breakdown(["hifigan", "suno_v3"]),
-                              pd.DataFrame({"file_id": [f"s{i}" for i in range(n)]}))
+def _fold_result(fold, metrics, gates=None, tripwires=None, n=200,
+                 per_cell=None, per_family=None):
+    report = ValidationReport(
+        fold, metrics,
+        _breakdown(range(1, 10)) if per_cell is None else per_cell,
+        _breakdown(["hifigan", "suno_v3"]) if per_family is None else per_family,
+        pd.DataFrame({"file_id": [f"s{i}" for i in range(n)]}))
     green = AuditReport({"x": (True, "fine")})
     return FoldResult(fold, report, gates or green, tripwires or green)
