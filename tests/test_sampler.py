@@ -4,8 +4,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from training.sampler import (REFERENCE_MIX, CellMix, Sampler, SamplerConfig,
-                              composed_fractions, head_positive_rates)
+from training.sampler import (C1_BOUNDS, C3_DESIGN_TOL, REFERENCE_MIX, CellMix,
+                              Sampler, SamplerConfig, check_mix,
+                              composed_fractions, head_positive_rates,
+                              mixedness_balance)
 from training.spec import CELL_TABLE
 from training.synthetic import synthetic_manifest
 
@@ -389,3 +391,76 @@ def test_restricting_gain_to_the_ratio_does_not_move_the_shipped_stream(manifest
 def test_malformed_sampler_configs_are_rejected(bad):
     with pytest.raises(ValueError):
         SamplerConfig(**bad)
+
+
+# --------------------------------------------------------------------------- #
+# C1 and C3 are enforced on the mix, not only measured on the drawn stream
+
+#: The two documented unsound mixes, with the numbers docs/pipelines/02 §4
+#: quotes for them. Both are legal `CellMix` values -- nine cells, non-negative,
+#: summing to 1 -- which is exactly the point: `CellMix.__post_init__` proves a
+#: mix is a distribution and says nothing about whether the loss over it is
+#: sound.
+_NAIVE_6_7_HEAVY = {1: .08, 2: .08, 3: .08, 4: .08, 5: .10,
+                    6: .22, 7: .22, 8: .12, 9: .02}
+_MIXEDNESS_TRAP = {1: .10, 2: .10, 3: .10, 4: .10, 5: .12,
+                   6: .15, 7: .15, 8: .10, 9: .08}
+
+
+def test_the_reference_mix_passes_the_construction_check():
+    """The shipped default, through the same gate as everything else."""
+    check_mix(CellMix())
+    assert SamplerConfig().cell_mix == CellMix()
+    pm_f, pm_r = mixedness_balance(CellMix())
+    assert abs(pm_f - pm_r) < C3_DESIGN_TOL / 4, (pm_f, pm_r)
+
+
+def test_a_c1_violating_mix_is_rejected_at_construction():
+    """Mutation: the 6/7-heavy mix reaches `SamplerConfig` and must not pass.
+
+    `head_positive_rates` and `mixedness_balance` existed, were correct, and
+    were called by nothing on the construction path -- so this mix built a
+    `SamplerConfig`, built a `Sampler` and trained, and C1 was only ever
+    consulted by `training.audit` over a stream drawn afterwards.
+    """
+    naive = CellMix(_NAIVE_6_7_HEAVY)
+    rates = head_positive_rates(naive)
+    assert rates["v_pres"] == pytest.approx(0.820, abs=1e-3)
+    assert rates["m_pres"] == pytest.approx(0.820, abs=1e-3)
+
+    with pytest.raises(ValueError, match="violates C1"):
+        check_mix(naive)
+    with pytest.raises(ValueError, match="violates C1"):
+        SamplerConfig(cell_mix=naive)
+
+
+def test_a_c3_violating_mix_that_passes_c1_is_rejected_at_construction():
+    """The half C1 cannot see: mixedness predicting the label.
+
+    Every one of the five rates is inside [0.2, 0.8] -- that is the point of
+    this mix -- and `P(mixed|FAKE)` is still 0.667 against 0.375.
+    """
+    trapped = CellMix(_MIXEDNESS_TRAP)
+    lo, hi = C1_BOUNDS
+    assert all(lo <= v <= hi for v in head_positive_rates(trapped).values()), \
+        "this mix passes C1 -- that is what makes it the C3 mutation"
+    pm_f, pm_r = mixedness_balance(trapped)
+    assert (pm_f, pm_r) == pytest.approx((0.667, 0.375), abs=1e-3)
+    assert abs(pm_f - pm_r) == pytest.approx(0.2917, abs=1e-3)
+
+    with pytest.raises(ValueError, match="violates C3"):
+        check_mix(trapped)
+    with pytest.raises(ValueError, match="violates C3"):
+        SamplerConfig(cell_mix=trapped)
+
+
+@pytest.mark.parametrize("bad", [_NAIVE_6_7_HEAVY, _MIXEDNESS_TRAP])
+def test_the_unsound_mix_escape_hatch_must_be_asked_for(bad):
+    """`allow_unsound_mix` exists for the audit's own mutation tests.
+
+    Those tests must be able to draw a stream from an unsound mix, or I8 and
+    I2b are checks nobody has seen fail. The hatch is opt-in, like
+    `FoldConfig.allow_no_probe`, so it cannot be reached by accident.
+    """
+    cfg = SamplerConfig(cell_mix=CellMix(bad), allow_unsound_mix=True)
+    assert cfg.cell_mix.p == bad

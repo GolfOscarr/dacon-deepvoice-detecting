@@ -25,12 +25,27 @@ from training.manifest import POOL_IS_FAKE, ROLE_POOLS
 from training.spec import (CELL_TABLE, ComponentDraw, SampleSpec, is_fake_cell,
                            spec_rng, stratum_of)
 
-__all__ = ["C1_BOUNDS", "REFERENCE_MIX", "CellMix", "SamplerConfig", "Sampler",
-           "composed_fractions", "head_positive_rates", "mixedness_balance"]
+__all__ = ["C1_BOUNDS", "C3_DESIGN_TOL", "REFERENCE_MIX", "CellMix",
+           "SamplerConfig", "Sampler", "check_mix", "composed_fractions",
+           "head_positive_rates", "mixedness_balance"]
 
 #: docs/training/01 §2.4. Below ~0.10 is where published AUC-surrogate gains
 #: start to exceed our noise floor; inside this band a pairwise term is worth 0.
 C1_BOUNDS = (0.2, 0.8)
+
+#: Design-time tolerance on C3's mixedness gap.
+#:
+#: Critical: derived, not picked. `training.audit`'s I2b judges the **drawn
+#: stream** against `max(tol, 4 SE)` with `tol = 0.02`, so a mix whose *exact*
+#: arithmetic already exceeds 0.02 cannot pass I2b at any draw budget. This
+#: constant rejects exactly those: the statement is "this mix is unsound by
+#: construction", not a second and stricter opinion about sampling noise --
+#: there is no noise in a closed-form fraction.
+#:
+#: Caveat: it is a floor, not headroom. A mix designed at 0.019 still trips I2b
+#: about half the time once the draw is large enough for 4 SE to fall below the
+#: floor. Keep the design gap well under it; the reference mix is at 0.002.
+C3_DESIGN_TOL = 0.02
 
 #: Verified against C1 and C3 (docs/pipelines/02 §4). Over-weights cells 6/7
 #: above their uniform 1/9 share while keeping every head inside its bound.
@@ -147,6 +162,54 @@ def mixedness_balance(mix: CellMix) -> tuple[float, float]:
             sum(p[c] for c in real if mixed(c)) / sum(p[c] for c in real))
 
 
+def check_mix(mix: CellMix) -> None:
+    """Raise unless `mix` satisfies C1 and C3 (docs/training/02 §8).
+
+    Critical: this is the *design* check, and it is the only one that runs
+    before a single spec is drawn. `CellMix.__post_init__` proves a mix is a
+    distribution (nine cells, non-negative, sums to 1) and nothing else, and
+    `SamplerConfig` used to stop there -- so a legal, normalised, entirely
+    unsound mix reached the loop and was caught only if someone ran the audit
+    over a drawn stream afterwards. The two constraints are exactly the ones
+    docs/training/02 §8 says the loss is unsound without:
+
+    * **C1** -- every one of the five per-head positive rates inside
+      `C1_BOUNDS`, measured after masking. Over-weighting cells 6/7 is the
+      documented way to break it: it drives both presence heads toward 1.
+    * **C3** -- `P(mixed | FAKE) = P(mixed | REAL)` over cells 1-8, within
+      `C3_DESIGN_TOL`. C1 alone does not catch this: the mix
+      `.10 .10 .10 .10 .12 .15 .15 .10 .08` passes C1 and puts
+      `P(FAKE | mixed)` at 0.769 against 0.500 (docs/pipelines/02 §4).
+
+    Caveat: C3's *composedness* half is not here. It is a property of the `f`
+    vector rather than of the mix, `composed_fractions` constructs it to hold
+    by stratum, and the residual it cannot close is what
+    `balance_marginal_composedness` solves -- all of which `SamplerConfig`
+    already validates. C2 is a property of a *batch*, not of a mix, and lives
+    in `training.audit` (`min_present`).
+    """
+    lo, hi = C1_BOUNDS
+    rates = head_positive_rates(mix)
+    out = {h: v for h, v in rates.items() if not lo <= v <= hi}
+    if out:
+        raise ValueError(
+            "cell mix violates C1: " + ", ".join(f"{h}={v:.4f}" for h, v in out.items())
+            + f" outside [{lo}, {hi}] (measured "
+            + ", ".join(f"{h}={v:.4f}" for h, v in sorted(rates.items()))
+            + "). The loss is unsound without it (docs/training/02 §8); "
+              "over-weighting cells 6/7 is the documented way to break the "
+              "presence heads (docs/pipelines/02 §4).")
+    pm_f, pm_r = mixedness_balance(mix)
+    gap = abs(pm_f - pm_r)
+    if gap > C3_DESIGN_TOL:
+        raise ValueError(
+            f"cell mix violates C3: P(mixed|FAKE) = {pm_f:.4f} vs "
+            f"P(mixed|REAL) = {pm_r:.4f} over cells 1-8, gap {gap:.4f} > "
+            f"{C3_DESIGN_TOL}. 'is a mixed file' then predicts the label, which "
+            f"is the composition trap wearing a different hat -- and C1 does not "
+            f"catch it (docs/pipelines/02 §4).")
+
+
 @dataclass(frozen=True)
 class SamplerConfig:
     """Everything the sampler needs, and nothing it does not."""
@@ -189,6 +252,12 @@ class SamplerConfig:
     silence_lead_s: float = 0.0
     silence_tail_s: float = 0.0
     scheme_version: str = "synthetic-v1"
+    #: Critical: build a config whose mix breaks C1 or C3 anyway. It exists for
+    #: one purpose -- the audit's own mutation tests, which prove I8 and I2b can
+    #: fail by drawing a stream from an unsound mix -- and it must be asked for,
+    #: like `FoldConfig.allow_no_probe`. A run that sets it is not quotable: the
+    #: loss is unsound (docs/training/02 §8).
+    allow_unsound_mix: bool = False
 
     def __post_init__(self) -> None:
         lo, hi = self.duration_range
@@ -206,6 +275,13 @@ class SamplerConfig:
             a=self.single_composed_rate, b=self.single_composed_rate,
             f9=self.noise_composed_rate,
             balance_marginal=self.balance_marginal_composedness)
+        # Critical: C1 and C3, on the mix itself. `CellMix.__post_init__` only
+        # proves the mix is a distribution, and `composed_fractions` only range-
+        # checks its knobs, so before this every objective constraint of
+        # docs/training/02 §8 was reachable only by running the audit over a
+        # drawn stream -- after the config had already been accepted.
+        if not self.allow_unsound_mix:
+            check_mix(self.cell_mix)
 
     @property
     def f(self) -> dict[int, float]:

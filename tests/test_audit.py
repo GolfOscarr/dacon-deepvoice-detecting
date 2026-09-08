@@ -139,7 +139,11 @@ def test_I8_catches_the_naive_6_7_heavy_mix(manifest):
     assert rates["v_pres"] == pytest.approx(0.820, abs=1e-3)
     assert rates["m_pres"] == pytest.approx(0.820, abs=1e-3)
 
-    sampler = Sampler(manifest, SamplerConfig(cell_mix=naive))
+    # `allow_unsound_mix`: C1 is now enforced by `SamplerConfig` itself, so
+    # this mix cannot build a config without asking. That check and this one are
+    # different statements -- the design arithmetic versus the drawn stream --
+    # and I8 would be a check nobody had seen fail if the hatch did not exist.
+    sampler = Sampler(manifest, SamplerConfig(cell_mix=naive, allow_unsound_mix=True))
     report = run_audit(sampler, n=N, manifest=manifest)
     assert not report.ok
     assert "I8_C1_positive_rates" in report.failures
@@ -161,8 +165,11 @@ def test_I2b_catches_mixedness_predicting_fakeness(manifest):
     assert pm_f == pytest.approx(0.667, abs=1e-3)
     assert pm_r == pytest.approx(0.375, abs=1e-3)
 
-    report = run_audit(Sampler(manifest, SamplerConfig(cell_mix=trapped)),
-                       n=N, manifest=manifest)
+    # `allow_unsound_mix`, for the same reason as above: C3 is enforced on the
+    # mix at construction, and I2b is the same statement measured on a stream.
+    report = run_audit(
+        Sampler(manifest, SamplerConfig(cell_mix=trapped, allow_unsound_mix=True)),
+        n=N, manifest=manifest)
     assert not report.ok
     assert "I2b_mixedness_balance" in report.failures
 
