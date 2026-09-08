@@ -269,6 +269,12 @@ class RenderConfig:
     #: I12 -- the rendered duration must sit in the length regime the model and
     #: the competition agree on. Off only for tests that build a deliberate
     #: violation.
+    #: Critical: the default is pinned by
+    #: `tests/test_render.py::test_the_shipped_render_defaults_are_pinned`, and
+    #: both sides of the bound are mutation-tested with it on. This is a
+    #: repeat-offence guard, not caution (docs/pipelines/04 §1): `tanh`
+    #: attention was correct at T~=250 and had become a mean pool at T~=3000,
+    #: ~12x worse.
     check_duration: bool = True
 
     def __post_init__(self) -> None:

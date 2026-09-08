@@ -13,6 +13,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from dataclasses import fields
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +39,11 @@ def corpus(tmp_path_factory):
     manifest = synthetic_manifest(**CORPUS)
     write_synthetic_corpus(manifest, root, seed=0)
     return root, manifest, ManifestIndex.from_frame(manifest)
+
+
+@pytest.fixture(scope="module")
+def corpus_root(corpus):
+    return corpus[0]
 
 
 @pytest.fixture(scope="module")
@@ -715,3 +721,83 @@ def test_resampling_preserves_a_tone_rather_than_shifting_it(tmp_path):
     got = load_audio(path, sample_rate=target, duration_s=2.0)[0]
     want = (0.3 * np.sin(2 * np.pi * 300 * np.arange(target * 2) / target))
     assert float(np.abs(got[800:-800] - want[800:-800]).max()) < 0.02
+
+
+# --------------------------------------------------------------------------- #
+# I12 -- the length regime, and the guard in its ON state
+
+#: Every `RenderConfig` field, with the value the pipeline ships. Critical: the
+#: table is asserted exhaustive below, so a new field arrives with a pinned
+#: default or the suite goes red. `resampler` is compared by identity because it
+#: is a callable, not a value.
+_SHIPPED_RENDER_DEFAULTS = {
+    "root": Path("."),
+    "audio": AudioConfig(),
+    "resampler": resample_poly_to,
+    "crossfade_shape": "sigmoid",
+    # I12, the length-regime guard. Off only for tests that build a deliberate
+    # violation.
+    "check_duration": True,
+}
+
+
+def test_the_shipped_render_defaults_are_pinned():
+    """A default nothing asserts is a default anyone can flip in a diff review.
+
+    Caveat: `check_duration` was *already* pinned, incidentally --
+    `test_a_sample_below_the_floor_is_refused` runs on the module `cfg`, which
+    carries the default, so flipping it to `False` turns that test red. This
+    table makes the pinning deliberate and exhaustive rather than a side effect
+    of one test's fixture choice, and covers the other four fields, which
+    nothing pinned at all.
+    """
+    cfg = RenderConfig()
+    assert set(_SHIPPED_RENDER_DEFAULTS) == {f.name for f in fields(RenderConfig)}, \
+        "a new RenderConfig field arrived without a pinned default"
+    for name, want in _SHIPPED_RENDER_DEFAULTS.items():
+        got = getattr(cfg, name)
+        if callable(want):
+            assert got is want, name
+        else:
+            assert got == want, name
+
+
+def test_the_length_regime_guard_fires_on_a_long_render(corpus, corpus_root):
+    """The other side of the bound, which nothing covered.
+
+    `test_a_sample_below_the_floor_is_refused` mutation-tests the floor. The
+    ceiling had no test at all, and it is the half docs/pipelines/04 §1 is
+    actually about: `tanh` attention was correct at T~=250 and had become a mean
+    pool at T~=3000, ~12x worse.
+
+    Caveat: driven by narrowing `AudioConfig` rather than by rendering a 61 s
+    sample -- the synthetic corpus holds 7-10 s sources, and padding one out to
+    61 s would be testing the pad rather than the bound. The quantity compared
+    is the same one either way.
+    """
+    _, manifest, index = corpus
+    narrow = RenderConfig(root=corpus_root,
+                          audio=AudioConfig(min_seconds=4.0, max_seconds=5.0))
+    with pytest.raises(ValueError, match="I12"):
+        render(_spec(manifest, duration=6.0), index, narrow)
+
+
+def test_the_guard_is_the_only_thing_that_rejects_an_out_of_regime_render(
+        corpus, corpus_root):
+    """The other half of both mutations: with the guard off, both renders succeed.
+
+    Without this, the two `raises` tests would still pass if a 1.5 s or 6 s spec
+    were unrenderable for some unrelated reason, and the check they name would
+    not be the thing under test.
+    """
+    _, manifest, index = corpus
+    off = RenderConfig(root=corpus_root, check_duration=False)
+    short = render(_spec(manifest, duration=1.5), index, off)
+    assert short.duration_s == pytest.approx(1.5, abs=1e-6)
+    assert short.duration_s < AudioConfig().min_seconds
+
+    narrow_off = RenderConfig(root=corpus_root, check_duration=False,
+                              audio=AudioConfig(min_seconds=4.0, max_seconds=5.0))
+    long_ = render(_spec(manifest, duration=6.0), index, narrow_off)
+    assert long_.duration_s == pytest.approx(6.0, abs=1e-6)
+    assert long_.duration_s > narrow_off.audio.max_seconds
