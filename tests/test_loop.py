@@ -971,9 +971,13 @@ def test_evaluate_goes_through_the_official_estimator(scored, monkeypatch):
 
 
 def test_the_loop_contains_no_roc_code_of_its_own():
-    source = Path("training/loop.py").read_text()
-    for forbidden in ("roc_curve", "roc_auc_score", "def eer("):
-        assert forbidden not in source, forbidden
+    """The guard covers every module the scoring path was split across, or the
+    split would have moved the code out from under it."""
+    for module in ("training/loop.py", "training/validate.py",
+                   "training/stages.py", "training/checkpoint.py"):
+        source = Path(module).read_text()
+        for forbidden in ("roc_curve", "roc_auc_score", "def eer("):
+            assert forbidden not in source, (module, forbidden)
 
 
 def test_the_report_carries_per_cell_and_per_generator_not_pooled_only(scored):
