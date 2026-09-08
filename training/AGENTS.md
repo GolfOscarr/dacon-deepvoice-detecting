@@ -914,10 +914,15 @@ from training.loop import checkpoint_soup
 `checkpoint_soup([a, b, c])` is ★ free ensembling at zero inference cost, across
 **epochs and seeds** — hence a list of files rather than an in-run buffer, since
 the across-seed soup comes from separate runs. It **refuses** a mismatched key
-set, a shape mismatch or a differing config rather than averaging what it can:
-the average of two architectures is not a model, and a partial average is a
-`load_state_dict` failure deferred onto whoever ships it. Integer buffers are
-carried, not averaged.
+set, a shape mismatch, a differing config, or a checkpoint that carries **no**
+config rather than averaging what it can: the average of two architectures is
+not a model, and a partial average is a `load_state_dict` failure deferred onto
+whoever ships it. The missing-config case is the one that reads as pedantry and
+is not — this used `blob.get("config")`, so two config-less files both came out
+`None`, compared equal, and were souped with nothing having compared their
+architectures. Integer buffers are carried, not averaged, and
+`tests/test_checkpoint.py` asserts the carried **value** (3 and 9 soup to 3),
+since `(acc / n).to(v.dtype)` preserves the dtype while averaging.
 
 ---
 
@@ -950,7 +955,7 @@ in the eval set's own order. A silent permutation moves the score and moves no
 gate: measured on the 40-row fixture, reversing each eval batch moved `score`
 0.5548 → 0.4492 with every gate green.
 
-🔴 **`LoopConfig.eval_precision` defaults to `fp32` and should stay there**, even
+🔴 **`predict`'s `precision` defaults to `fp32` and should stay there**, even
 though inference ships fp16. bf16 carries 8 mantissa bits, and squashing a bf16
 logit *ties files together*. Measured, and 🔴 the effect is size-dependent:
 
