@@ -18,7 +18,8 @@ Why each choice was made: [`docs/pipelines/`](../docs/pipelines/README.md) and
 | `training.manifest` | Loading and validating the manifest. Rejects the two row kinds' confusions |
 | `training.sampler` | Drawing specs. C1 / C3 / DOSS live here |
 | `training.audit` | **I1–I9** and **I21** over a drawn stream. No corpus, no model, no GPU |
-| `training.folds` | Building `folds.parquet`, and **VG1 A1–A7 / A10** over it |
+| `training.folds` | Building `folds.parquet` |
+| `training.foldcheck` | Judging one: the schema, and **VG1 A1–A7 / A10**. Splitting the judge from the builder is why `folds` no longer imports `audit` |
 | `training.synthetic` | A manifest with the real corpus's pathologies, and the audio it names |
 | `training.registries` | The three transform contracts. **I14** lives here |
 | `training.render` | `SampleSpec` → audio. All the I/O, and `render(spec) == render(spec)` |
@@ -28,6 +29,7 @@ Why each choice was made: [`docs/pipelines/`](../docs/pipelines/README.md) and
 | `training.checkpoint` | The on-disk contract of a run: EMA, `SamplerState`, save/load, the soup |
 | `training.loop` | `train_stage` / `run_schedule`: the passes, the optimizer steps and the resume |
 | `training.validate` | Scoring a fold, the **VG gates** and the leak tripwires |
+| `training.config` | YAML for the four run-shaping dataclasses. `configs/run_*.yaml` |
 
 ---
 
@@ -684,7 +686,7 @@ Four modules, split along the seam that the second half never needed the first:
 
 | Module | Holds | Depends on |
 |---|---|---|
-| `training.stages` | `STAGES`, `CODEC_VARIANTS`, `stage_plan`, `codec_variant_specs`, `trainable_parameters`, `autocast_for` | a `ModelConfig`, nothing else |
+| `training.stages` | `STAGES`, `CODEC_VARIANTS`, `stage_plan`, `codec_variant_specs`, `pass_plan`, `trainable_parameters`, `autocast_for` | a `ModelConfig`, nothing else |
 | `training.checkpoint` | `EMA`, `SamplerState`, `TrainCheckpoint`, `save_train_checkpoint`, `load_train_checkpoint`, `checkpoint_soup` | a model and a path |
 | `training.loop` | `LoopConfig`, `StageResult`, `spec_digest`, `train_stage`, `run_schedule` | the two above |
 | `training.validate` | `predict`, `evaluate`, `ValidationReport`, `run_gates`, `output_sanity`, `leak_tripwires`, `measured_split_kind`, `validate_fold`, `aggregate_folds`, `FoldResult`, `RunReport` | a model and a frozen dataset — **not the loop** |
@@ -694,6 +696,45 @@ dataset and nothing else, so the gates and the tripwires can be read without the
 trainer. The dependency runs one way only: `stages` and `checkpoint` import
 neither `loop` nor `validate`, and `validate` reaches up only for
 `stages.autocast_for`.
+
+### `pass_plan` — audit the order you actually train in
+
+`audit_specs(..., batches=...)` checks constraint **C2**, the per-head
+present-count floor per batch. For that to mean anything, the batches it is
+handed have to be the batches the optimiser steps through — and for a while they
+were not. `train_stage` expanded the codec variants and bucketed at
+`seed + pass_index`; `dataset.training_batches` bucketed the *unexpanded* specs
+at `n_buckets=4, seed=0`. The two agreed only for pass 0 at `TrainConfig.seed`
+of 0. For any later pass the plan differed; under **S3** the *list* differed —
+32 batches over 256 codec-expanded specs against 8 over 64.
+
+`training.stages.pass_plan` is now the single constructor, used by the loop and
+available to the audit:
+
+```python
+from models.config import load_model_config
+from training.stages import pass_plan, stage_plan
+
+drawn = list(sampler.epoch_specs(64, epoch=2, seed=0))
+cfg = load_model_config("configs/a_stub.yaml")
+
+specs, batches = pass_plan(drawn, stage_plan("joint", cfg), batch_size=16,
+                           n_buckets=4, seed=0, pass_index=2)
+assert len(specs) == len(drawn)          # joint does not expand
+
+s3_specs, s3_batches = pass_plan(drawn, stage_plan("codec_aware", cfg),
+                                 batch_size=16, n_buckets=4, seed=0, pass_index=2)
+assert len(s3_specs) == 4 * len(drawn)   # S3 is the 4-way codec cross product
+
+# `batches` indexes into `specs`, not into the list you passed in -- which is
+# the whole reason the audit could not reconstruct S3's plan from the dataset.
+```
+
+Caveat: `seed` is `TrainConfig.seed`, **not** the per-pass batch seed — the
+`+ pass_index` happens inside, so a caller cannot double-apply it. `train_stage`
+overrides the plan only when resuming mid-pass, where the seed comes from the
+checkpoint rather than the schedule; otherwise the resumed pass would step
+through a different batching than the one it was interrupted in.
 
 `training.loop` re-exports every public name of the other three, so the
 `from training.loop import ...` lines below — and any written before the split —

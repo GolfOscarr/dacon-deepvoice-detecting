@@ -21,11 +21,12 @@ import torch
 
 from models.config import ModelConfig
 from models.model import DeepVoiceNet
+from training.collate import bucket_batches, spec_durations
 from training.spec import SampleSpec
 
 __all__ = [
     "CODEC_VARIANTS", "STAGES", "StagePlan",
-    "autocast_for", "codec_variant_specs", "stage_plan", "trainable_parameters",
+    "autocast_for", "codec_variant_specs", "pass_plan", "stage_plan", "trainable_parameters",
 ]
 
 
@@ -184,6 +185,35 @@ def codec_variant_specs(specs: Sequence[SampleSpec],
             merged = {**spec.normalize, **dict(variant)}
             out.append(dataclasses.replace(spec, normalize=merged))
     return tuple(out)
+
+
+def pass_plan(specs: Sequence[SampleSpec], plan: StagePlan, *, batch_size: int,
+              n_buckets: int, seed: int,
+              pass_index: int) -> tuple[list[SampleSpec], list[list[int]]]:
+    """The exact spec list and batch plan one training pass will step through.
+
+    Critical: this exists because the loop and the audit used to build it twice.
+    `train_stage` expanded the codec variants and bucketed them at
+    `seed + pass_index`; `dataset.training_batches` bucketed the *unexpanded*
+    specs at `n_buckets=4, seed=0`. So `audit_specs(..., batches=...)` -- the
+    documented way to check constraint C2, the per-head present-count floor per
+    batch -- measured the batches the optimiser steps on only for pass 0 at
+    `train_cfg.seed == 0`. For any later pass it measured a different plan, and
+    under S3 a different *list*: 32 batches over 256 codec-expanded specs
+    against 8 over 64.
+
+    `training/audit.py` states the requirement as "audit the same order you
+    train in". One constructor is what makes that true rather than aspirational.
+
+    Caveat: the `seed` argument is `TrainConfig.seed`, not the per-pass batch
+    seed -- the `+ pass_index` is applied here, so a caller cannot get it wrong
+    by passing the already-offset value. `train_stage` overrides it only when
+    resuming mid-pass, where the seed comes from the checkpoint instead.
+    """
+    expanded = codec_variant_specs(specs, plan.codec_variants)
+    batches = bucket_batches(spec_durations(expanded), batch_size,
+                             n_buckets=n_buckets, seed=seed + pass_index)
+    return expanded, batches
 
 
 def trainable_parameters(model: DeepVoiceNet, plan: StagePlan,

@@ -50,7 +50,8 @@ from training.dataset import SpecDataset
 from training.render import ManifestIndex, RenderConfig, render
 from training.spec import SampleSpec
 from training.stages import (CODEC_VARIANTS, STAGES, StagePlan, _stage_loss_config,
-                             autocast_for, codec_variant_specs, stage_plan,
+                             autocast_for, codec_variant_specs, pass_plan,
+                             stage_plan,
                              trainable_parameters)
 
 __all__ = [
@@ -270,12 +271,23 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
         # cross-branch comparison an artefact of the schedule. Recorded rather
         # than trusted: `pass_digests` is what a test can assert on.
         dataset.set_epoch(pass_index)
-        specs = codec_variant_specs(dataset.specs, plan.codec_variants)
+        # One constructor for the spec list and the batch plan, shared with the
+        # audit (training/stages.py::pass_plan). Building it here and again in
+        # `dataset.training_batches` is what made "audit the same order you
+        # train in" false for every pass but pass 0 at seed 0.
+        specs, batches = pass_plan(dataset.specs, plan,
+                                   batch_size=train_cfg.batch_size,
+                                   n_buckets=loop_cfg.n_buckets,
+                                   seed=train_cfg.seed, pass_index=pass_index)
         result.pass_digests.append(spec_digest(specs))
         batch_seed = start.batch_seed if pass_index == start.pass_index \
             else train_cfg.seed + pass_index
-        batches = bucket_batches(spec_durations(specs), train_cfg.batch_size,
-                                 n_buckets=loop_cfg.n_buckets, seed=batch_seed)
+        if batch_seed != train_cfg.seed + pass_index:
+            # Resuming mid-pass: the plan must come from the checkpoint's seed,
+            # not the schedule's, or the resumed pass steps through a different
+            # batching than the one it was interrupted in.
+            batches = bucket_batches(spec_durations(specs), train_cfg.batch_size,
+                                     n_buckets=loop_cfg.n_buckets, seed=batch_seed)
         first_batch = start.batch_index if pass_index == start.pass_index else 0
 
         model.train()
