@@ -465,13 +465,26 @@ downmix, does not bandpass, does not run the preprocess chain and does not cast
 to the training precision.
 
 🔴 **Rows with fewer channels than the batch are promoted by *repeating their own
-channels*, never by zero-filling.** That is the rule-2.4 surface of the layout:
-`C_max` belongs to the other rows, so the promotion must be invisible at the
-model boundary — and under `downmix` a zero-filled mono row comes back at **half
-amplitude**, i.e. its score would depend on what shared its batch. Cyclic repeat
-is bitwise the identity for every policy in `models.config.CHANNEL_POLICIES`, and
-`tests/test_collate.py` enumerates that tuple rather than restating it, so a new
-policy that breaks the property fails the suite instead of shipping.
+channels*, never by zero-filling — and only when the count divides.** That is the
+rule-2.4 surface of the layout: `C_max` belongs to the other rows, so the
+promotion must be invisible at the model boundary, and under `downmix` a
+zero-filled mono row comes back at **half amplitude**, i.e. its score would
+depend on what shared its batch.
+
+⚠️ **The "only when it divides" qualifier is load-bearing, not pedantry.** Cyclic
+repeat is bitwise the identity for every policy in
+`models.config.CHANNEL_POLICIES` when `C_max` is an exact multiple of the row's
+own channel count, and wrong otherwise: 2 → 3 gives `[L, R, L]`, which `downmix`
+averages to `(2L+R)/3` instead of `(L+R)/2` — measured **1.05** raw and **1.12**
+end to end, the same violation zero-fill was rejected for. `promote_channels`
+therefore *refuses* an uneven promotion, and `collate` refuses the batch that
+would need one, naming both counts. It is latent today only because no corpus
+file has more than 2 channels, which is a property of the corpus and not of this
+code: `sf.read` uses `always_2d=True`, `render._to_channels` keeps the leading
+channels of a multi-channel source, and the `channels` normalize draw accepts
+`null`. `tests/test_collate.py` enumerates `CHANNEL_POLICIES` rather than
+restating it, so a new policy that breaks the property fails the suite instead of
+shipping.
 
 ⚠️ `collate(..., pad_value=...)` exists for the tests, not for training. §2 of
 [`docs/pipelines/04`](../docs/pipelines/04-collation.md) says the padding value
@@ -482,15 +495,31 @@ does, at `atol=0.0`.
 
 🔴 That was not true until M4 measured it. `frontends.frames_for` rounds *up*, so
 a row whose length is not a multiple of the frontend hop has a last valid frame
-that is **part padding**, and that frame is masked *in* — so the pad content was
-reaching the score through it, by 1.35e-3 on rendered audio. It went unseen
-because every padding test in the suite used `lengths = SR * 4`, an exact
-multiple of the 320-sample hop; the pipeline draws `U(4, 60)` s and produces
-arbitrary lengths, so in production the partial frame is the normal case.
-`Frontend.forward` now zeroes past each row's `lengths` before encoding, which is
-a **no-op on the shipped path** (both sides pad with zeros) and makes the
-guarantee structural rather than incidental. `tests/test_model.py::ragged`
-carries the fixture convention forward.
+that is **part padding**, and that frame is masked *in* — so whatever filled the
+pad reached the score through it. It went unseen because every padding test in
+the suite used `lengths = SR * 4`, an exact multiple of the 320-sample hop; the
+pipeline draws `U(4, 60)` s and produces arbitrary lengths, so in production the
+partial frame is the normal case. `Frontend.forward` now zeroes past each row's
+`lengths` before encoding, and `tests/test_model.py::ragged` carries the fixture
+convention forward.
+
+⚠️ **Which number belongs to which claim**, because they are three different
+quantities and only one of them is the defect:
+
+| Quantity | Measured | What it is |
+|---|---|---|
+| `pad_value` 0.0 vs 7.5, pre-fix | **1.35e-3** | the leak, driven by an *adversarial* filling nothing in production produces |
+| same, post-fix | **0.0** exactly | the guarantee, at `atol=0.0` |
+| shipped path, pre-fix vs post-fix | **0.0** exactly | padding is zeros on both sides, so the fix moved no number this repo produces |
+
+So the fix is a **no-op on the shipped path**; what it changes is that "a row's
+features are a function of its own samples" stops being incidental — true only
+because everyone happens to pad with zeros — and becomes structural. 🔴 Do not
+quote 1.35e-3 as a shipped effect: it is the size of the hole, not of anything
+that fell through it. (A fourth number, ~2e-6, is sometimes mistaken for the
+shipped figure — it is the gap between a zero-padded row and the same row
+*trimmed* to whole frames, which is a different input by 15–235 samples, and it
+is identical before and after the fix.)
 
 ### Duration bucketing
 
@@ -511,12 +540,29 @@ assert padding_fraction(d, tight) < padding_fraction(d, loose)
 ✅ Bucketing is free to choose: `LossConfig.ranking_weight` is committed at 0 and
 stage S4 is dropped, so **no loss term is sensitive to batch composition**.
 
-⚠️ Two caveats survive. Bucketing reshapes the per-batch cell mix (duration and
-cell are not independent — sequential compositions run long), so a bucketed plan
-must still meet **C2**: audit it with `audit_specs(specs, batch_size=...)` and
-read `I9_C2_present_count_floor`. And the duration-vs-score check on the REAL
-class must be measured on **unbucketed** batches — which is why `eval_batches`
-refuses to bucket and `training_batches` refuses a frozen list.
+✅ **Duration and cell are independent by construction**, so a duration bucket
+cannot act as a cell filter: `sample_spec` draws `duration_s` **first**, from the
+test distribution `U(4, 60)`, and only then draws the cell and fits the
+components into that timeline. The length cannot depend on the cell because the
+cell does not exist yet. Measured over 2,000 specs in four quantile buckets:
+voice presence 0.682 / 0.678 / 0.676 / 0.694, music presence
+0.656 / 0.678 / 0.674 / 0.688.
+
+⚠️ This corrects an earlier claim here that "sequential compositions run long",
+which is false against the shipped sampler — a sequential draw *reuses* the drawn
+duration rather than concatenating two, so its mean length is 30.85 s against
+overlap's 30.38 s. The independence is imposed, not observed, which is the
+stronger guarantee.
+
+🔴 **Audit the plan, not a batch size.** C2 stays as cheap insurance, and the way
+to run it is `audit_specs(specs, batches=training_batches(...))` — passing only
+`batch_size=` cuts the stream in *draw order*, which stopped being the training
+order the moment bucketing arrived, so it would measure batches the optimiser
+never steps on. `SpecDataset.audit(manifest, batches=plan)` wires it up. And the
+duration-vs-score check on the REAL class must be measured on **unbucketed**
+batches — which is why `eval_batches` refuses to bucket, `training_batches`
+refuses a frozen list, and `eval_batches` refuses a *training* dataset, whose
+specs `set_epoch` redraws underneath a plan that would still look valid.
 
 ---
 
@@ -546,7 +592,8 @@ train.set_epoch(1)
 plan = training_batches(train, 4, n_buckets=2, seed=0)
 
 held = SpecDataset.frozen(frozen_eval_specs(sampler, 6, seed=0), index, cfg,
-                          slice_="train")
+                          slice_=sampler.slice_,   # where they were DRAWN from
+                          fold=None)               # this frame is fold-resolved
 with pytest.raises(RuntimeError):        # the eval set is a value, not a seed
     held.set_epoch(1)
 assert [i for b in eval_batches(held, 4) for i in b] == list(range(6))
@@ -557,6 +604,35 @@ only against the same sampler, the same manifest and the same code, and all
 three change during a competition. `set_epoch` on a frozen dataset raises — the
 alternative is a validation curve whose rows quietly change underneath it, which
 no downstream assertion can see.
+
+### 🔴 `slice_` and `fold` distinguish *stated* from *omitted*
+
+Both used to carry a default and both produced the same defect: the frozen eval
+set — the instrument this project trusts over the leaderboard — audited with half
+of **I5** inactive and reported **PASS**, in a module whose own convention is
+that a skipped check must never read as a pass.
+
+| You pass | I5 does |
+|---|---|
+| `fold=k` | checks both clauses |
+| `fold=None` **explicitly** | passes, and says the fold clause was *vacuous* — correct on a `fold_manifest`-resolved frame, where the fold is already baked into `slice` |
+| `fold` omitted | reports **SKIP**, whatever the manifest looks like |
+| `slice_="train"` | checks provenance against that slice |
+| `slice_` omitted | reports **SKIP**; no provenance was declared |
+
+⚠️ `slice_` names where the specs were **drawn from**, not the role they are used
+in. Its old `"val"` default is not a cosmetic problem: an eval set drawn from a
+`slice_="train"` sampler inherited the label `"val"`, and when `training.loop`
+wired I5 in properly it reported **23 file_ids outside the declared slice**. The
+specs were fine — the declaration had been invented by a default.
+
+🔴 The sentinel is deliberate and **must not be "simplified"** to a required
+keyword or a plain default. A required keyword forces every caller to type
+something but cannot tell "explicitly `None`" from "had to write something", so a
+caller still earns a PASS they never reasoned about; a plain default is the
+original defect. Only the sentinel lets `audit_specs` *measure* which case it is
+in — and it does, rather than assuming: SKIP when the manifest spans several
+folds and none was named, PASS-with-reason when the frame is a single fold.
 
 ### 🔴 A composed sample has no fold, so the fold is resolved first
 
@@ -723,6 +799,25 @@ the override itself is the schedule.
 ⚠️ "Each branch alone" is enforced by the **parameter set**, not by zeroing loss
 terms: AdamW's weight decay and momentum move a branch nobody is training this
 pass, so a loss-only restriction would make "alone" a claim rather than a fact.
+
+🔴 **Every pass draws its own corpus, and the run records which one.**
+`train_stage` uses the flat `pass_index` as the epoch key, so S1's five branch
+passes do not replay epoch 0 five times — five identical training sets would make
+any cross-branch reading an artefact of the schedule. That was true, documented,
+and **held by nothing**: a review mutated `set_epoch(pass_index)` to
+`set_epoch(0)` and all 97 tests stayed green, because every one of them looked at
+losses, weights or checkpoint fields and none looked at which specs were drawn.
+
+```python
+from training.loop import spec_digest
+```
+
+`StageResult.pass_digests` is now the record — `spec_digest` over the specs each
+pass drew, covering the whole `SampleSpec` including `normalize`, so S3's codec
+variants move it too. Equal digests mean two passes trained on the same samples.
+⚠️ The tests assert on the drawn spec *contents* and cross-check the digest
+against them, not the other way round: a digest that folded in a counter would
+differ every pass and let the same mutation straight back through.
 
 ---
 

@@ -45,6 +45,7 @@ else is how an ablation reports a difference it never tested.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import math
 from contextlib import nullcontext
@@ -78,6 +79,7 @@ __all__ = [
     "aggregate_folds", "autocast_for", "checkpoint_soup", "codec_variant_specs",
     "evaluate", "generator_key", "leak_tripwires", "measured_split_kind",
     "output_sanity", "predict", "prediction_frame", "run_gates", "run_schedule",
+    "spec_digest",
     "stage_plan", "train_stage", "trainable_parameters", "validate_fold",
 ]
 
@@ -568,6 +570,10 @@ class StageResult:
     steps: int
     passes_done: int
     loss_history: list[dict[str, float]] = field(default_factory=list)
+    #: `spec_digest` of the corpus each pass drew, in pass order. 🔴 Two equal
+    #: digests mean two passes trained on the same samples, which under S1 would
+    #: make any cross-branch comparison an artefact of the schedule.
+    pass_digests: list[str] = field(default_factory=list)
     checkpoints: list[TrainCheckpoint] = field(default_factory=list)
     ema: EMA | None = None
     truncated: bool = False
@@ -598,6 +604,34 @@ def _schedule(plan: StagePlan, epochs: int) -> list[tuple[int, int]]:
     make the branches' training sets identical and their comparison a coincidence.
     """
     return [(g, e) for g in range(len(plan.branch_groups)) for e in range(epochs)]
+
+
+def spec_digest(specs: Sequence[SampleSpec]) -> str:
+    """A stable fingerprint of a drawn corpus. 🔴 Measured, not asserted.
+
+    `SamplerState` claims `pass_index` "doubles as the epoch key for the draw",
+    so that every branch pass and every epoch sees its own corpus rather than
+    replaying epoch 0. That claim lived only in a docstring: a review mutated
+    `set_epoch(pass_index)` to `set_epoch(0)` and the whole suite stayed green,
+    because every test looked at losses, weights and checkpoint fields and none
+    looked at *which specs were drawn*.
+
+    So the drawn corpus is now recorded per pass, in `StageResult.pass_digests`.
+    Two passes with the same digest drew the same samples; two runs that claim
+    the same corpus can be compared without shipping the spec lists around. It
+    covers the full `SampleSpec`, `normalize` included, so S3's codec variants
+    change it too.
+
+    ⚠️ Not a substitute for the assertion: `tests/test_loop.py` checks the drawn
+    spec *contents* directly and cross-checks the digest against them, because a
+    digest that happened to include a counter would differ every pass and let the
+    same mutation through again.
+    """
+    h = hashlib.blake2b(digest_size=16)
+    for spec in specs:
+        h.update(repr(spec.to_dict()).encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()
 
 
 def _render_batch(specs: Sequence[SampleSpec], indices: Sequence[int],
@@ -690,9 +724,13 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
                 scaler_state = None
         loss_cfg_model = _stage_loss_config(model.cfg, group)
 
-        # 🔴 `pass_index` is the epoch key, so every pass draws its own corpus.
+        # 🔴 `pass_index` is the epoch key, so every pass draws its own corpus --
+        # rather than five branch passes replaying epoch 0, which would make any
+        # cross-branch comparison an artefact of the schedule. Recorded rather
+        # than trusted: `pass_digests` is what a test can assert on.
         dataset.set_epoch(pass_index)
         specs = codec_variant_specs(dataset.specs, plan.codec_variants)
+        result.pass_digests.append(spec_digest(specs))
         batch_seed = start.batch_seed if pass_index == start.pass_index \
             else train_cfg.seed + pass_index
         batches = bucket_batches(spec_durations(specs), train_cfg.batch_size,

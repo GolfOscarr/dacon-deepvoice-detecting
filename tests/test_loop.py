@@ -38,10 +38,12 @@ from training.loop import (CODEC_VARIANTS, STAGES, EMA, FoldResult, LoopConfig,
                            load_train_checkpoint, measured_split_kind,
                            RESOLUTION_FLOOR, output_sanity, prediction_frame,
                            run_gates,
-                           run_schedule, save_train_checkpoint, stage_plan,
-                           train_stage, trainable_parameters, validate_fold)
+                           run_schedule, save_train_checkpoint, spec_digest,
+                           stage_plan, train_stage, trainable_parameters,
+                           validate_fold)
 from training.render import ManifestIndex, RenderConfig, render
 from training.sampler import Sampler, SamplerConfig
+from training.spec import SampleSpec
 from training.synthetic import synthetic_manifest, write_synthetic_corpus
 
 CORPUS = dict(n_per_pool=8, n_whole_file=8, seed=0, duration_range=(6.0, 8.0))
@@ -557,15 +559,129 @@ def test_train_stage_refuses_the_frozen_eval_set(corpus, model_cfg, tmp_path):
                     loop_cfg=LoopConfig(out_dir=tmp_path))
 
 
-def test_each_pass_draws_its_own_corpus(corpus, model_cfg, tmp_path):
-    """⚠️ Under S1 there are five branch passes; if they all replayed epoch 0 the
-    five branches would see byte-identical training sets and any comparison
-    between them would be an artefact of the schedule."""
+def test_set_epoch_redraws_the_dataset(corpus):
+    """The dataset half, in isolation. ⚠️ Necessary and **not sufficient** -- it
+    says `set_epoch` works, not that `train_stage` calls it with the pass index.
+    A review mutated `set_epoch(pass_index)` to `set_epoch(0)` and this test, and
+    all 96 others, stayed green. `test_each_pass_trains_on_its_own_corpus` is the
+    one that covers the wiring."""
     ds = _dataset(corpus, n=4)
     ds.set_epoch(0)
     first = [s.to_dict() for s in ds.specs]
     ds.set_epoch(1)
     assert [s.to_dict() for s in ds.specs] != first
+
+
+def _specs_rendered_per_pass(monkeypatch, model_cfg, corpus, out, *, stage, epochs,
+                             n=6):
+    """Run a stage and capture the spec **actually rendered** on every step.
+
+    🔴 Spying on `render` rather than reading a field of the result: the question
+    is which samples reached the model, and every field on `StageResult` is
+    something this module computed and could compute wrongly in the same way.
+    """
+    import training.loop as loop_mod
+
+    seen: list[SampleSpec] = []
+    real_render = loop_mod.render
+
+    def spy(spec, index, cfg):
+        seen.append(spec)
+        return real_render(spec, index, cfg)
+
+    monkeypatch.setattr(loop_mod, "render", spy)
+    torch.manual_seed(0)
+    result = train_stage(_model(model_cfg), _dataset(corpus, n=n),
+                         train_cfg=_train_cfg(stage=stage, epochs=epochs),
+                         loop_cfg=LoopConfig(out_dir=out, n_buckets=1,
+                                             ema_decay=0.0))
+    return result, seen
+
+
+def test_each_pass_trains_on_its_own_corpus(corpus, model_cfg, tmp_path,
+                                            monkeypatch):
+    """🔴 The wiring from `pass_index` to the epoch key, which nothing covered.
+
+    `SamplerState`'s docstring claims `pass_index` "doubles as the epoch key for
+    the draw", so every branch pass and every epoch sees its own corpus rather
+    than replaying epoch 0. A review mutated `dataset.set_epoch(pass_index)` to
+    `dataset.set_epoch(0)` and all 97 tests passed: multi-pass runs were
+    exercised, but nothing asserted on *which specs each pass drew*. Under S1
+    that mutation gives the five branches byte-identical training sets and makes
+    any comparison between them an artefact of the schedule.
+
+    Asserted on the rendered spec **contents** -- a `SampleSpec` is the whole
+    decision to build a sample, so two passes that drew the same corpus produce
+    equal `to_dict()`s and different ones do not.
+    """
+    result, seen = _specs_rendered_per_pass(monkeypatch, model_cfg, corpus,
+                                            tmp_path, stage="joint", epochs=3)
+    assert result.passes_done == 3
+
+    by_epoch: dict[int, list[dict]] = {}
+    for spec in seen:
+        by_epoch.setdefault(spec.epoch, []).append(spec.to_dict())
+    # One distinct epoch key per pass, and they are the pass indices themselves.
+    assert sorted(by_epoch) == [0, 1, 2], sorted(by_epoch)
+
+    # ... and the corpora those keys produced genuinely differ in content, not
+    # only in the `epoch` field they carry.
+    def content(rows):
+        return sorted(repr({k: v for k, v in r.items() if k != "epoch"})
+                      for r in rows)
+
+    zero, one, two = (content(by_epoch[e]) for e in (0, 1, 2))
+    assert zero != one and one != two and zero != two
+
+
+def test_the_recorded_pass_digests_agree_with_what_was_rendered(
+        corpus, model_cfg, tmp_path, monkeypatch):
+    """`StageResult.pass_digests` is the permanent record of the above.
+
+    ⚠️ Cross-checked against the rendered specs rather than trusted: a digest
+    that happened to fold in a counter would differ every pass and let the same
+    mutation straight back through.
+    """
+    result, seen = _specs_rendered_per_pass(monkeypatch, model_cfg, corpus,
+                                            tmp_path, stage="joint", epochs=2)
+    assert len(result.pass_digests) == 2
+    assert len(set(result.pass_digests)) == 2, "two passes drew the same corpus"
+
+    # Recompute from what the spy saw, in draw order, per pass.
+    for pass_index, digest in enumerate(result.pass_digests):
+        drawn = sorted((s for s in seen if s.epoch == pass_index),
+                       key=lambda s: s.sample_id)
+        assert spec_digest(drawn) == digest, pass_index
+
+
+def test_spec_digest_is_stable_and_content_sensitive(corpus):
+    """The digest's own contract, so the cross-check above means something."""
+    manifest, index, rcfg = corpus
+    sampler = Sampler(manifest, DRAW)
+    a = list(sampler.epoch_specs(8, epoch=0))
+    assert spec_digest(a) == spec_digest(list(sampler.epoch_specs(8, epoch=0)))
+    assert spec_digest(a) != spec_digest(list(sampler.epoch_specs(8, epoch=1)))
+    # 🔴 S3's codec variants must move it, or the digest could not tell two
+    # codec-aware passes apart.
+    assert spec_digest(a) != spec_digest(
+        [dataclasses.replace(s, normalize={"container": "flac"}) for s in a])
+
+
+def test_s1_gives_each_branch_pass_its_own_corpus(corpus, model_cfg, tmp_path,
+                                                  monkeypatch):
+    """The consequence that motivated the design, stated on S1 itself.
+
+    Five branch passes replaying epoch 0 would train every branch on
+    byte-identical data, so a "voice head vs music head" reading would be an
+    artefact of the schedule rather than a result.
+    """
+    result, seen = _specs_rendered_per_pass(monkeypatch, model_cfg, corpus,
+                                            tmp_path, stage="independent",
+                                            epochs=1, n=4)
+    assert result.passes_done == len(model_cfg.branches)
+    assert len(result.pass_digests) == len(model_cfg.branches)
+    assert len(set(result.pass_digests)) == len(model_cfg.branches)
+    assert sorted({s.epoch for s in seen}) == list(range(len(model_cfg.branches)))
 
 
 # --------------------------------------------------------------------------- #
