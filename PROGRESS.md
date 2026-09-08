@@ -1,9 +1,9 @@
 # PROGRESS
 
 **DACON 236749 — 딥보이스 범죄 대응을 위한 AI 탐지 모델 경진대회**
-Updated 2026-09-07 · **22 days to LB close** (2026-09-29 10:00 KST) · 2nd-stage materials 2026-10-05
+Updated 2026-09-08 · **21 days to LB close** (2026-09-29 10:00 KST) · 2nd-stage materials 2026-10-05
 
-Docs: 87 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGENTS.md) + [`models/`](models/AGENTS.md) — **231 tests green** on `main`
+Docs: 87 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGENTS.md) + [`models/`](models/AGENTS.md) + [`training/`](training/AGENTS.md) — **749 tests green** on `feat/training-pipeline` (231 on `main`)
 
 ---
 
@@ -15,8 +15,9 @@ Docs: 87 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGE
 | **+** | Kaggle intelligence | ✅ done → [`docs/kaggle/`](docs/kaggle/README.md) |
 | **+** | Paper research | ✅ done → [`docs/papers/`](docs/papers/INDEX.md) — ~75 indexed, 12 deep-read |
 | **B** | Data strategy | ✅ planned, ⬜ **not executed** → [`docs/data/`](docs/data/README.md) |
-| **C** | Validation design | ✅ designed → [`docs/validation/`](docs/validation/README.md) · ✅ metric pipeline shipped → [`metrics/`](metrics/AGENTS.md) · ⬜ fold builder + gates |
+| **C** | Validation design | ✅ designed → [`docs/validation/`](docs/validation/README.md) · ✅ metric pipeline shipped → [`metrics/`](metrics/AGENTS.md) · ✅ fold builder + VG1–VG6 wired → [`training/`](training/AGENTS.md) |
 | **D** | Model architecture | ✅ designed → [`docs/architecture/`](docs/architecture/README.md) · ✅ implemented → [`models/`](models/AGENTS.md) · ⬜ **no real frontends, nothing trained** |
+| **D+** | Training & data pipeline | ✅ designed → [`docs/pipelines/`](docs/pipelines/README.md) + [`docs/training/`](docs/training/README.md) · ✅ implemented → [`training/`](training/AGENTS.md) · ⬜ **never run on real audio — no corpus** |
 | **E** | Score fusion & calibration | ⬜ |
 | **F** | Engineering / submission | ⬜ |
 | **G** | Report & compliance | ⬜ runs throughout |
@@ -105,7 +106,7 @@ Docs: 87 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGE
 - [x] 🔴 **Fixed 19 silently-ignored config fields** — `freeze` did nothing (the encoder was fully trainable) and all three `file_head.mode` settings produced identical output. Guarded by `test_no_config_field_is_silently_ignored`
 - [x] 🔴 Fixed a stub bug found by writing the batch tests — adaptive pooling *stretched* short files across the padded width, so the frame mask described the wrong frames. Frames are now absolutely positioned
 - [ ] ⚠️ **Real frontends are deliberately not wired** — gated on the licence verification in [`architecture/09 C1–C3`](docs/architecture/09-open-questions.md). `build_frontend` raises with that reason
-- [ ] Training loop, data loading, teacher wiring — all need the corpus, which does not exist yet
+- [x] Training loop and data loading **implemented** → [`training/`](training/AGENTS.md). Teacher wiring still needs the corpus
 - [ ] ⚠️ **Six defects were found this session, none by a green test suite.** Two shapes recur: a test asserting an *adjacent* quantity (`clip_logits` instead of the submitted probability), and a component inherited from a source recipe that was correct in *its* regime and silently wrong in ours after a later decision changed the regime. Both are worth checking for deliberately rather than trusting coverage
 - [x] **Reviewed by a separate fact-check and critique pass**; corrections recorded in the [`architecture README`](docs/architecture/README.md) rather than silently applied. The hard-routing rejection was re-argued from scratch, the inference blend was defeating our own saturation finding, `P0` had to split in two, and a claim about noisy-OR monotonicity was simply false
 - [ ] 🔴 Open from review: tile vs **whole-file single pass** (deletes the duration-bias problem at ~1.6× cost); does distillation still work with a **frozen** frontend; add a binned **duration stratum** to `metrics/breakdown.py`
@@ -116,6 +117,32 @@ Docs: 87 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGE
 - [ ] 🔴 **Check PANNs fires `VOICE_PRESENT` on a sung song** before trusting the day-one presence baseline — one song answers it; AudioSet conflates singing with Music
 - [ ] ⚠️ **Re-validate every technique on the music head specifically.** Layer truncation, meta-LoRA, AASIST and the distillation recipe were all measured on *speech*, while the music branch carries 0.27 plus most of the 0.45 file head — and the one time our literature applied a speech recipe to music (MERT-AASIST) it produced the 46.4% cross-generator EER
 
+**Training & data pipeline (D+)** — [`training/`](training/AGENTS.md), branch `feat/training-pipeline`
+- [x] `spec` · `manifest` · `sampler` · `audit` · `folds` · `foldcheck` · `registries` · `render` · `collate` · `dataset` · `stages` · `checkpoint` · `loop` · `validate` · `synthetic`, plus [`AGENTS.md`](training/AGENTS.md) whose snippets the suite executes
+- [x] 🔴 **`sample_spec()` is pure and label-free.** `SampleSpec` has no label fields — labels are derived properties of the cell, so no transform can reach them. Auditing a stream costs no audio decode
+- [x] 🔴 **The reference cell mix was itself trapped when first published**: `P(mixed|FAKE)=0.667` vs `P(mixed|REAL)=0.300`, so "is a mixed file" predicted FAKE at 0.769. Re-solved; the shipped mix satisfies C1 and C3 simultaneously
+- [x] Composedness is **one knob** (`f8`), conditional (`f8=0`) primary and strict (`f8=1`) its endpoint — not two code paths
+- [x] 🔴 **Registries measure time-invariance at registration** rather than trusting a declaration: each step runs on fixed-seed broadband noise correlated in two windows, and a shift refuses registration *whether undeclared or wrongly declared*. A chirp probe wrongly accepted `pre_emphasis`; the two-window noise probe is required
+- [x] 🔴 **The resume guarantee is bitwise and the state list is complete** — no hidden generator anywhere (`render` draws from `spec.rng` keyed on `(sample_id, epoch, seed)`, `bucket_batches` from a local seeded generator), no LR schedule, no gradient accumulation
+- [x] S1→S3 stage runner, EMA, checkpoint soup, VG1–VG6 wired, leak tripwires. `rank_polish` **raises** — S4 is dropped, and a knob that validates and silently does nothing is its own defect
+- [x] 🔴 **`quotable` cannot be earned by SKIPs.** The ledger row carries a `vg1..vg6` tri-state where **fail beats na beats pass**, so a gate reads `pass` only if every sub-check actually ran
+- [x] **Refactor**: `loop.py` 1,456 → 386 lines split into `stages` / `checkpoint` / `loop` / `validate`; `folds.py` split builder-from-judge. `registries.py`, `audit.py`, `render.py` deliberately left whole — `registries` is the one module vendored into `submit.zip`, and splitting `audit` would separate each estimator from the invariant whose tolerance it justifies. All 283 emoji removed from the Python sources
+- [ ] ⚠️ **Nothing here has run on real audio.** Every number is against synthetic corpora and stub models
+- [ ] ⚠️ **Four shipped model configs say `runtime.precision: fp16` while `configs/train_joint.yaml` says `bf16`** — which precision a real run trains at is not currently obvious from the configs. Settle before T1
+- [ ] **VG3 reports SKIP by name.** Unguarded until a corpus exists: label-independent TRAIN/VAL domain drift, and a corpus edit silently breaking ledger comparability (only the VG2 half of the re-trigger is detectable). VG1 A1–A7, the tripwires and VG4's T3 gap cover part of the same ground
+
+**🔴 What the pipeline sessions cost, and what actually found it** — none of the following was found by a passing test
+- [x] **A trapped spec stream passed the entire audit clean**: transform *parameters* scored AUC 1.000 while I1 counted only names, and the whole `normalize` draw was read by nothing. Three checks could not fail at all, and I7 printed PASS for size floors implemented nowhere
+- [x] **The pad *value* reached the submitted probability.** `frames_for` rounds up, so a row whose length is not a multiple of the 320-sample hop has a final frame that is part padding — and it is masked *in*. The real finding was the fixture convention: every padding test used `lengths = SR*4`, an exact multiple of the hop, so the four tests guarding this repo's most-repeated defect class had **never once exercised a partial boundary frame**
+- [x] **A frozen epoch key made every training pass replay epoch 0** while all 97 loop tests stayed green. Found by hand-running a mutation, not by the suite
+- [x] **The mid-epoch checkpoint dropped the fp16 loss scale**, so a resumed run replayed the scaler warm-up. With a backoff forced, max weight divergence **5.476e-07**. Invisible because no test set `checkpoint_every` non-zero *and* no test trained at fp16 — two independent holes, either of which alone would still hide it
+- [x] **A perfectly separating file head tripped no tripwire** on the generator-disjoint split we actually validate on. L3 skipped claiming "L1/L2 cover this one"; L1 reads `eer_music`, L2 reads `eer_voice`, and neither reads `eer_file` — the 0.45-weight head
+- [x] **The predictions-to-specs join was asserted by nothing.** Reversing each eval batch moved `score` 0.5548 → 0.4492 with **every gate green**, because `prediction_frame` paired predictions to specs positionally
+- [x] **`test_no_loop_config_field_is_silently_ignored` was a textual grep** for `loop_cfg.<name>` — the guard against dead config knobs was satisfied by a mere mention, and 2 of 6 knobs slipped through it
+- [x] **`synthetic.py` built its digest from Python's salted `hash()`**, contradicting its own "byte-identical corpora" claim — the exact hazard `spec.py` documents and avoids two files away
+- [x] 🔴 **The lesson, stated once**: an adversarial mutation pass on `loop.py` left **28 of 85 mutants alive** under a green 101-test suite. Three of the defects above were found by an agent *asking itself whether it had tested something*, not by running anything. Budget a review pass per module; a green suite is not evidence that a check can fail
+
+
 ---
 
 ## Next — do in this order
@@ -123,13 +150,18 @@ Docs: 87 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGE
 **Now (blocking, days 1–2)**
 - [ ] Post `[DACON 답변 요청]` — **only 2 left**: commercial-API terms, and **AI-Hub/NIA**. Q1–Q7 of ours were asked by another participant in [#417333](https://dacon.io/competitions/official/236749/talkboard/417333) on 2026-09-05 (⏳ unanswered) — watch, don't duplicate
 - [ ] Email AI-Hub (safezone1@aihub.kr) re: NIA / competition use
-- [ ] **G1** dummy-file forensics → `signal_chain.yaml`
+- [ ] 🔴 **Record `source_name` at track/artist/speaker granularity from the first download.** A 5-fold needs ≥6 real corpora per role otherwise, and it **cannot be retrofitted** for generated audio — this is the one Phase B decision with no second chance
+- [ ] **G1** dummy-file forensics → `signal_chain.yaml` (🔴 `normalize` in the render path is unparameterized until this lands, so A-S1 — the highest-leverage augmentation step — is structurally present but doing nothing)
 - [ ] **G2** license audit of `docs/data/11-source-inventory.md` (top 10 first)
 - [ ] `submit.zip` skeleton + trivial model → validate I/O, runtime, offline packaging (`metrics/submission.py` is ready to vendor)
 - [ ] LB probe **P0-a**: all-constant 0.5 submission → **must score exactly 0.5000**. ⚠️ P0-a is deliberately degenerate, so it must be written with `validate=False` — the VG5 resolution gate rejects a constant column and would otherwise block the first submission
 - [ ] Then **P0-b**: PANNs presence heads + constant fake columns. 🔴 **Expect ~0.535, not 0.5000** (`Score = 0.45 + 0.1·CPS`) — do not let this trip the P0-a stop rule ([`architecture/03`](docs/architecture/03-candidates.md#p0--the-baselines-that-are-not-models))
 
 - [ ] 🔴 `pip download mamba-ssm causal-conv1d` against torch 2.7.1+cu128 / py3.11 / CUDA 12.8 — **one command**, and it decides whether the best published speech backbones (Fake-Mamba, 5.85% ITW EER) exist for us at all (V5)
+
+**First training experiment — ready, blocked only on the corpus**
+- [ ] 🔴 `T1` **`clip_weight` 1.0 vs 0.5** at Medium speed (⚠️ never Replay — it systematically favours ideas that help early, and a loss-structure change is exactly that shape). One config value, the correct control, and we currently ship a value chosen by symmetry against evidence that it may cost up to 3.63 EER points. Read its **sign** before its size ([`training/04 §6`](docs/training/04-schedule.md))
+- [ ] ⚠️ Two pre-existing thin single-seed margins in `tests/test_aggregate.py` / `test_breakdown.py` would gate T1
 
 **Highest-value single experiment**
 - [ ] 🔴 `E-A1` **16 kHz survivability probe** — ArtifactNet's Table XI shows AI residual bandwidth ~291 Hz vs human ~1,996 Hz, which *looks* like it should survive an 8 kHz Nyquist, yet the paper insists 44.1 kHz is required. Settling this decides the whole music-head approach
