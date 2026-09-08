@@ -52,23 +52,75 @@ def _built(raw):
 # --------------------------------------------------------------------------- #
 # the shipped configs
 
-def test_every_shipped_config_loads():
-    """Critical: dispatched by filename prefix, and every prefix is handled.
+#: The loaders a shipped config may belong to. A config must be accepted by
+#: exactly one; the filename is not consulted.
+LOADERS = {
+    "model": load_model_config,
+    "train": load_train_config,
+    "run": load_run_config,
+}
 
-    `run_*` is `training.config`'s: the sampler, renderer, fold builder and loop
-    settings, which `load_model_config` would reject as unknown keys. The
-    `else` branch used to catch them, so adding a run config turned this red --
-    which is the right failure, but the fix is to name the third loader rather
-    than to skip the file.
+
+def _classify(path):
+    """Which loaders accept `path`. Content decides, not the filename.
+
+    Critical: this dispatched on the filename prefix with a `load_model_config`
+    fallback in the `else` branch, so a config whose name matched no prefix was
+    silently validated as a *model* config -- the sweep reported it as loaded
+    while nothing had read its schema. That is the failure mode this test
+    exists to catch, reintroduced inside the test itself. It only surfaced
+    because `load_model_config` happens to reject unknown top-level keys; a
+    laxer loader would have kept it green. Every loader here rejects unknown
+    top-level keys, so acceptance is a real classification rather than a guess.
+    """
+    accepted = []
+    for kind, load in LOADERS.items():
+        try:
+            load(path)
+        except Exception:
+            continue
+        accepted.append(kind)
+    return accepted
+
+
+def test_every_shipped_config_loads():
+    """Critical: every shipped config is accepted by exactly one loader.
+
+    Not "each loader loads its own files" -- that phrasing passes while a
+    config nobody classified sits unloaded. Exactly-one is what makes adding a
+    fourth config kind turn this red instead of routing it to whichever loader
+    happens not to complain.
+
+    Caveat: the ambiguity half (`len == 1`) cannot currently fail, because no
+    shipped config is accepted by two loaders and each loader rejects unknown
+    top-level keys. It is kept as a statement of the contract for a future
+    loader whose schema overlaps another's, not as a check earning its keep
+    today -- a mutation that returns the first acceptance survives, and that is
+    expected rather than a gap to close.
     """
     assert SHIPPED, "no configs found"
     for path in SHIPPED:
-        if path.name.startswith("train"):
-            load_train_config(path)
-        elif path.name.startswith("run"):
-            load_run_config(path)
-        else:
-            load_model_config(path)
+        accepted = _classify(path)
+        assert accepted, (
+            f"{path.name} is accepted by no loader: it ships in configs/ and "
+            f"nothing can read it. Add its loader to LOADERS.")
+        assert len(accepted) == 1, (
+            f"{path.name} is accepted by {accepted} -- ambiguous. Two loaders "
+            f"reading one file means neither owns its schema.")
+
+
+def test_an_unclassifiable_config_is_not_silently_accepted(tmp_path):
+    """The non-vacuity guard: prove the sweep above can fail.
+
+    Caveat: without this, `test_every_shipped_config_loads` passes for exactly
+    as long as every shipped file happens to be classifiable -- which is until
+    someone adds a new kind, the moment it would have earned its keep.
+    """
+    orphan = tmp_path / "orphan.yaml"
+    orphan.write_text("wholly_unknown_section:\n  a: 1\n")
+    assert _classify(orphan) == [], (
+        "a config belonging to no loader was accepted by one; the sweep would "
+        "have reported it as loaded")
 
 
 def test_a_and_b_produce_exactly_the_submission_columns():
