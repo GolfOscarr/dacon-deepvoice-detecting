@@ -217,9 +217,10 @@ def checkpoint_soup(paths: Sequence[Path | str]) -> dict[str, Tensor]:
     two files, a missing `config`, a differing key set, a differing shape -- and
     `tests/test_checkpoint.py` gives each one a case that **isolates** it,
     because a single mismatched pair trips whichever check is left standing and
-    would have hidden the deletion of any of the others. Two of the three are
-    silent rather than loud if removed: an extra key is dropped from the average
-    without comment, and a `(1, n)` tensor against an `(n, n)` one broadcasts.
+    would have hidden the deletion of any of the others. Deleting any of the
+    four is **silent** -- nothing raises, a soup comes out -- and the two worth
+    naming are that an extra key is dropped from the average without comment,
+    and that a `(1, n)` tensor against an `(n, n)` one broadcasts.
 
     Caveat: non-float entries are taken from the first checkpoint rather than
     averaged, for the reason `EMA` gives.
