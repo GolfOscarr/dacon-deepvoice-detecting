@@ -161,11 +161,156 @@ def test_rejects_labels_that_disagree_with_the_cell(df):
     """Two sources of truth for a label is one too many."""
     whole_idx = df.index[df.row_kind == "whole_file"][0]
     bad = df.copy()
-    bad.loc[whole_idx, "cell"] = 5                      # implies presence (1, 1)
+    bad.loc[whole_idx, "cell"] = 5                      # implies (1, 1, 0, 0)
     bad.loc[whole_idx, "label_voice_present"] = 0
     bad.loc[whole_idx, "label_music_present"] = 0
-    with pytest.raises(ValueError, match="implies presence"):
+    bad.loc[whole_idx, "label_voice_fake"] = 0
+    bad.loc[whole_idx, "label_music_fake"] = 0
+    with pytest.raises(ValueError, match="label_voice_present"):
         validate_manifest(bad)
+
+
+# --------------------------------------------------------------------------- #
+# the fake labels, which nothing checked
+
+def test_rejects_a_whole_file_row_whose_fake_labels_disagree_with_its_cell(df):
+    """Mutation: only the *presence* half was ever checked.
+
+    The fake half is not inert. `folds._group_facts` builds the per-head
+    artifact-family sets from `label_voice_fake` / `label_music_fake` and from
+    nothing else, and `audit.py`'s I4 explicitly skips whole_file rows -- so a
+    mislabelled one reached the fold builder unchallenged from both directions.
+    """
+    whole = df[df.row_kind == "whole_file"]
+    fake_voice_idx = whole.index[whole.cell.isin([2, 8])][0]
+    bad = df.copy()
+    bad.loc[fake_voice_idx, "label_voice_fake"] = 0
+    with pytest.raises(ValueError, match="label_voice_fake"):
+        validate_manifest(bad)
+
+
+def test_rejects_a_whole_file_row_carrying_an_absent_components_fake_label(df):
+    """The null direction: cell 1 has no music, so its music_fake must be null.
+
+    `None` in CELL_TABLE means "the metric ignores this label", and writing a 0
+    there asserts something about a component that is not present.
+    """
+    whole = df[df.row_kind == "whole_file"]
+    idx = whole.index[whole.cell == 1][0]
+    bad = df.copy()
+    bad.loc[idx, "label_music_fake"] = 0
+    with pytest.raises(ValueError, match="label_music_fake"):
+        validate_manifest(bad)
+
+
+@pytest.mark.parametrize("pool,column,value", [
+    ("B", "label_voice_fake", 0),      # a fake voice pool row claiming to be real
+    ("A", "label_voice_fake", 1),      # and the reverse
+    ("D", "label_music_fake", 0),
+    ("A", "label_music_fake", 0),      # a label for a component that is absent
+    ("E", "label_voice_present", 1),   # noise has neither component
+])
+def test_rejects_component_labels_that_disagree_with_the_pool(df, pool, column,
+                                                              value):
+    """A component's labels are fixed by its pool -- the only thing it has.
+
+    Nothing checked them at all. Zeroing `label_voice_fake` across a manifest
+    validated cleanly, took the voice artifact-family count 24 -> 0 in
+    `folds._group_facts`, and `build_folds` went on to emit a full table.
+    """
+    idx = df.index[(df.row_kind == "component") & (df.pool == pool)][0]
+    bad = df.copy()
+    bad.loc[idx, column] = value
+    with pytest.raises(ValueError, match=column):
+        validate_manifest(bad)
+
+
+def test_zeroing_a_fake_label_across_the_manifest_is_now_refused(df):
+    """The whole-corpus version, which is what a real mislabelling looks like.
+
+    One bad row is a typo; a column-wide default is a schema mistake, and it is
+    the one that emptied the family sets while every check stayed green.
+    """
+    bad = df.copy()
+    bad["label_voice_fake"] = 0
+    with pytest.raises(ValueError, match="label_voice_fake"):
+        validate_manifest(bad)
+
+
+# --------------------------------------------------------------------------- #
+# the two remaining value constraints, both already asserted in comments
+
+def test_rejects_a_fake_component_without_a_domain_key(df):
+    """Critical: a null domain_key does not opt a row out of DOSS, it renames it.
+
+    `Sampler._doss_weights` does `domain_key.fillna("__real__")`, so every fake
+    component missing one collapses into a single synthetic domain sharing one
+    cap -- the DOSS failure (6.4k h naive 3.29% EER vs 0.2k h balanced 2.77%)
+    with a manifest that validates.
+    """
+    fake_idx = df.index[(df.row_kind == "component") & df.pool.isin(["B", "D"])][0]
+    bad = df.copy()
+    bad.loc[fake_idx, "domain_key"] = None
+    with pytest.raises(ValueError, match="domain_key"):
+        validate_manifest(bad)
+
+
+def test_the_null_domain_key_collapse_is_the_reason(df):
+    """The mechanism the check exists for, measured rather than asserted.
+
+    Without this, `test_rejects_a_fake_component_without_a_domain_key` would be
+    a schema rule with no stated consequence.
+    """
+    import pandas as pd
+
+    fake = df[(df.row_kind == "component") & (df.pool == "B")]
+    assert fake.domain_key.nunique() >= 8, fake.domain_key.nunique()
+    collapsed = fake.domain_key.where(pd.Series(False, index=fake.index))
+    assert collapsed.fillna("__real__").nunique() == 1, (
+        "a null domain_key resolves to one bucket, not to no bucket")
+
+
+@pytest.mark.parametrize("kind", ["component", "whole_file"])
+def test_rejects_a_real_row_carrying_an_artifact_family(df, kind):
+    """`grouping_atoms` unions on artifact_family whatever the labels say.
+
+    So a stray family on a real row binds that real file into a generator
+    family's union-find group -- and therefore into its fold, decided before
+    any label-aware code runs. Both row kinds: a real whole_file row has no
+    pool, so its fake status comes from its cell.
+    """
+    if kind == "component":
+        idx = df.index[(df.row_kind == "component") & df.pool.isin(["A", "C", "E"])][0]
+    else:
+        whole = df[df.row_kind == "whole_file"]
+        idx = whole.index[whole.cell.isin([1, 3, 5, 9])][0]
+    bad = df.copy()
+    bad.loc[idx, "artifact_family"] = "hifigan"
+    with pytest.raises(ValueError, match="artifact_family"):
+        validate_manifest(bad)
+
+
+def test_a_stray_family_really_would_move_the_real_file(df):
+    """The consequence, measured on `grouping_atoms` with validation bypassed.
+
+    A schema rule whose cost is only asserted in a docstring is the thing this
+    repo keeps finding; this runs the union-find both ways.
+    """
+    from training.folds import grouping_atoms
+
+    real_idx = df.index[(df.row_kind == "component") & (df.pool == "A")][0]
+    fam = df.loc[df.pool == "B", "artifact_family"].iloc[0]
+    fake_ids = set(df.loc[df.artifact_family == fam, "file_id"].astype(str))
+
+    before = grouping_atoms(df)
+    real_id = str(df.loc[real_idx, "file_id"])
+    assert before[real_id] not in {before[f] for f in fake_ids}
+
+    stray = df.copy()
+    stray.loc[real_idx, "artifact_family"] = fam
+    after = grouping_atoms(stray)
+    assert after[real_id] in {after[f] for f in fake_ids}, (
+        "the stray family must be what pulls the real file into the group")
 
 
 def test_rejects_a_fake_component_without_artifact_family(df):

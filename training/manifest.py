@@ -14,9 +14,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from training.spec import CELL_TABLE
+from training.spec import CELL_TABLE, is_fake_cell
 
-__all__ = ["POOLS", "REQUIRED_COLUMNS", "ROW_KINDS", "SLICES",
+__all__ = ["POOLS", "POOL_LABELS", "REQUIRED_COLUMNS", "ROW_KINDS", "SLICES",
            "load_manifest", "validate_manifest"]
 
 ROW_KINDS = ("component", "whole_file")
@@ -39,8 +39,50 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
 #: Which pools can serve which sampler role.
 ROLE_POOLS = {"voice": ("A", "B"), "music": ("C", "D"), "noise": ("E",)}
 
-#: A pool's fake status. Real pools have no artifact_family and no domain_key.
+#: A pool's fake status. A real pool has no artifact_family; only a fake pool
+#: carries a domain_key, because DOSS caps generator domains.
 POOL_IS_FAKE = {"A": False, "B": True, "C": False, "D": True, "E": False}
+
+
+def _pool_labels() -> dict[str, tuple[int, int, int | None, int | None]]:
+    """`pool -> (voice_present, music_present, voice_fake, music_fake)`.
+
+    Derived from ``ROLE_POOLS`` and ``POOL_IS_FAKE`` rather than written out, so
+    a pool added to either mapping cannot drift out of this one. Same shape as
+    ``training.spec.CELL_TABLE``, and ``None`` means the same thing: the
+    component is absent and the metric ignores its fake label.
+    """
+    out: dict[str, tuple[int, int, int | None, int | None]] = {}
+    for role, pools in ROLE_POOLS.items():
+        for pool in pools:
+            fake = int(POOL_IS_FAKE[pool])
+            out[pool] = ((1, 0, fake, None) if role == "voice" else
+                         (0, 1, None, fake) if role == "music" else
+                         (0, 0, None, None))
+    return out
+
+
+#: What a component row of each pool must carry. Critical: the fake half is
+#: load-bearing -- ``folds._group_facts`` builds the per-head artifact-family
+#: sets from ``label_voice_fake`` / ``label_music_fake`` and from nothing else.
+POOL_LABELS = _pool_labels()
+
+#: The four label columns, in the order ``CELL_TABLE`` and ``POOL_LABELS`` list
+#: them.
+_LABEL_COLUMNS = ("label_voice_present", "label_music_present",
+                  "label_voice_fake", "label_music_fake")
+
+
+def _disagrees(col: pd.Series, want: int | None) -> pd.Series:
+    """Rows of ``col`` that do not carry ``want``. ``None`` means "must be null".
+
+    Caveat: the two-step form is not decoration. ``col != want`` is ``pd.NA``
+    wherever ``col`` is null, and a mask carrying NA raises at indexing time --
+    so nullness is decided first and the comparison only ever sees real values.
+    """
+    if want is None:
+        return col.notna()
+    return (col.isna() | (col != want)).fillna(True).astype(bool)
 
 
 def validate_manifest(df: pd.DataFrame) -> pd.DataFrame:
@@ -97,22 +139,80 @@ def validate_manifest(df: pd.DataFrame) -> pd.DataFrame:
 
     # Caveat: a whole_file row's stored labels must agree with its cell, or the
     # two label sources disagree and the sampler silently picks one.
+    #
+    # Critical: all four labels, not just the two presence ones. The fake half
+    # was unchecked on both row kinds, and it is not inert:
+    # `folds._group_facts` builds the per-head artifact-family sets from
+    # `label_voice_fake` / `label_music_fake` and from nothing else. Zeroing
+    # `label_voice_fake` across a manifest validated, took the voice family
+    # count 24 -> 0, and `build_folds` went on to emit a full table.
+    # `audit.py`'s I4 explicitly skips whole_file rows, so nothing downstream
+    # closed it either.
     for _, row in df.loc[whole].iterrows():
-        vp, mp, vf, mf = CELL_TABLE[int(row.cell)]
-        got = (row.label_voice_present, row.label_music_present)
-        if (int(got[0]), int(got[1])) != (vp, mp):
-            raise ValueError(
-                f"{row.file_id}: cell {int(row.cell)} implies presence {(vp, mp)}, "
-                f"manifest says {tuple(int(g) for g in got)}")
+        want = CELL_TABLE[int(row.cell)]
+        got = tuple(row[c] for c in _LABEL_COLUMNS)
+        for column, g, w in zip(_LABEL_COLUMNS, got, want):
+            null = pd.isna(g)
+            if ((not null) if w is None else (null or int(g) != w)):
+                raise ValueError(
+                    f"{row.file_id}: cell {int(row.cell)} implies "
+                    f"{dict(zip(_LABEL_COLUMNS, want))}, manifest says "
+                    f"{column} = {None if null else int(g)}"
+                    + ("" if column.endswith("present") else
+                       " -- the fake labels are the per-head family key that "
+                       "folds._group_facts reads"))
+
+    # The same statement for the other row kind: a component row's labels are
+    # fixed by its pool, which is the only thing a component has.
+    for pool, want in POOL_LABELS.items():
+        rows = comp & (df["pool"] == pool)
+        if not rows.any():
+            continue
+        for column, w in zip(_LABEL_COLUMNS, want):
+            wrong = df.index[rows & _disagrees(df[column], w)]
+            if len(wrong):
+                raise ValueError(
+                    f"{len(wrong)} pool-{pool} component row(s) whose {column} is "
+                    f"not {w}: {df.loc[wrong, 'file_id'].head(3).tolist()}. A "
+                    f"component's labels are fixed by its pool "
+                    f"(POOL_LABELS[{pool!r}] = {want})")
 
     # Fake components carry an artifact_family (the split key) and a domain_key
-    # (the DOSS capping key); real ones carry neither.
+    # (the DOSS capping key).
     fake_pool = df.pool.map(POOL_IS_FAKE)
-    orphan = df[comp & fake_pool.fillna(False) & df.artifact_family.isna()]
+    is_fake_comp = comp & fake_pool.fillna(False)
+    orphan = df[is_fake_comp & df.artifact_family.isna()]
     if len(orphan):
         raise ValueError(
             f"{len(orphan)} fake component row(s) without artifact_family, which is "
             f"the split key: {orphan.file_id.head(3).tolist()}")
+    # Critical: a null domain_key does not opt a row out of DOSS, it renames it.
+    # `Sampler._doss_weights` does `domain_key.fillna("__real__")`, so every
+    # fake component missing one collapses into a single synthetic domain and
+    # shares one cap -- the DOSS failure (6.4k h naive 3.29% EER vs 0.2k h
+    # balanced 2.77%, docs/papers/05) with a green manifest.
+    uncapped = df[is_fake_comp & df.domain_key.isna()]
+    if len(uncapped):
+        raise ValueError(
+            f"{len(uncapped)} fake component row(s) without domain_key, which is "
+            f"the DOSS capping key: {uncapped.file_id.head(3).tolist()}. A null "
+            f"one is not 'no domain' -- it collapses into the single "
+            f"'__real__' bucket and shares one cap with every other null")
+    # Critical: and a REAL row must carry no family. `folds.grouping_atoms`
+    # unions on `artifact_family` whatever the row's labels say, so a stray one
+    # binds that real file into the family's group -- which is a fold
+    # assignment, decided before any of the label-aware code runs.
+    # Caveat: both row kinds. A real whole_file row has no pool to be judged by,
+    # so its fake status comes from its cell.
+    real_row = ~(is_fake_comp | (whole & df.cell.map(
+        lambda c: pd.notna(c) and is_fake_cell(int(c))).fillna(False)))
+    stray = df[real_row & df.artifact_family.notna()]
+    if len(stray):
+        raise ValueError(
+            f"{len(stray)} real row(s) carrying an artifact_family, which is the "
+            f"fake-side split key: {stray.file_id.head(3).tolist()}. "
+            f"grouping_atoms unions on it regardless of the labels, so this "
+            f"binds a real file into a generator family's fold")
 
     if (df.duration_s <= 0).any():
         raise ValueError("duration_s must be > 0 for every row")
