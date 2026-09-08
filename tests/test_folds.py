@@ -349,3 +349,88 @@ def test_s_b_rows_are_unpaired(manifest, folds):
     out = build_folds(manifest, FoldConfig(assigned_at="x"), shadow_b=ids).frame
     sb = out[out.shadow_kind == "b"]
     assert len(sb) == 4 and sb["shadow_of"].isna().all()
+
+
+# --------------------------------------------------------------------------- #
+# every FoldConfig field is a knob, and every knob moves the emitted table
+#
+# Same template and same known limit as `tests/test_loop.py`'s `_KNOB_PROBES`:
+# it proves a knob does *something*, not that it does the right thing. What it
+# rules out is a field that validates, round-trips through
+# `training.config`, and is read nowhere.
+
+#: `field -> (value a, value b, observable, extra config)`.
+_FOLD_KNOBS: dict[str, tuple] = {
+    "n_folds": (5, 3, "folds", {}),
+    "probe_share": (0.10, 0.30, "probe_rows", {}),
+    "scheme_version": (None, "synthetic-v9", "scheme", {}),
+    "caveat_families_per_val_fold": (2, 1000, "caveats", {}),
+    # The only observable is whether the build is refused, so the extra config
+    # puts the corpus in the regime where coverage actually fails: 8 folds over
+    # 8 real source corpora leaves VAL sides with no real music to compose from.
+    "require_component_coverage": (True, False, "raises", {"n_folds": 8}),
+    "allow_no_probe": (False, True, "raises", {"probe_share": 0.0}),
+    "assigned_at": ("2026-01-01T00:00:00+00:00", "2027-02-03T04:05:06+00:00",
+                    "assigned_at", {}),
+}
+
+
+def _fold_observables(manifest, **overrides):
+    """One built table, reduced to everything a `FoldConfig` knob can move."""
+    kwargs = {"assigned_at": "2026-01-01T00:00:00+00:00", **overrides}
+    try:
+        plan = build_folds(manifest, FoldConfig(**kwargs))
+    except FoldInfeasible:
+        return {"raises": True, "folds": None, "probe_rows": None,
+                "scheme": None, "caveats": None, "assigned_at": None}
+    frame = plan.frame
+    return {
+        "raises": False,
+        "folds": sorted({int(f) for f in frame["fold"].dropna()}),
+        "probe_rows": int((frame["slice"] == "probe").sum()),
+        "scheme": sorted(frame["scheme_version"].unique()),
+        "caveats": plan.caveats,
+        "assigned_at": sorted(frame["assigned_at"].unique()),
+    }
+
+
+def test_the_knob_table_names_every_fold_config_field():
+    """A new knob arrives with a probe; adding the field alone turns this red."""
+    import dataclasses
+
+    assert set(_FOLD_KNOBS) == {f.name for f in dataclasses.fields(FoldConfig)}
+
+
+@pytest.mark.parametrize("field", sorted(_FOLD_KNOBS))
+def test_every_fold_config_knob_changes_the_built_table(field, manifest):
+    a_value, b_value, key, extra = _FOLD_KNOBS[field]
+    a = _fold_observables(manifest, **{**extra, field: a_value})
+    b = _fold_observables(manifest, **{**extra, field: b_value})
+    assert a[key] != b[key], (
+        f"FoldConfig.{field} = {a_value!r} and {b_value!r} produced the same "
+        f"{key}: the knob validates and then does nothing")
+
+
+#: Every `FoldConfig` field, with the value the pipeline ships.
+_SHIPPED_FOLD_DEFAULTS = {
+    "n_folds": 5,
+    "probe_share": 0.10,
+    "scheme_version": None,
+    "caveat_families_per_val_fold": 2,
+    # Critical: False lets a fold whose VAL side cannot compose cells 1/5/6 be
+    # built, and `Sampler` only says so at draw time -- after the split is frozen.
+    "require_component_coverage": True,
+    # Critical: True is option 2 of docs/validation/01 §3 -- a blind spot on the
+    # head that matters most, not a shortcut.
+    "allow_no_probe": False,
+    "assigned_at": None,
+}
+
+
+def test_the_shipped_fold_defaults_are_pinned():
+    import dataclasses
+
+    cfg = FoldConfig()
+    assert set(_SHIPPED_FOLD_DEFAULTS) == {f.name for f in dataclasses.fields(FoldConfig)}
+    for name, want in _SHIPPED_FOLD_DEFAULTS.items():
+        assert getattr(cfg, name) == want, name

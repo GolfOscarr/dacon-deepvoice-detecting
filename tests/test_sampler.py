@@ -1,5 +1,7 @@
 """The sampler: split safety, DOSS capping, determinism, epoch semantics."""
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -464,3 +466,184 @@ def test_the_unsound_mix_escape_hatch_must_be_asked_for(bad):
     """
     cfg = SamplerConfig(cell_mix=CellMix(bad), allow_unsound_mix=True)
     assert cfg.cell_mix.p == bad
+
+
+# --------------------------------------------------------------------------- #
+# every SamplerConfig field is a knob, and every knob moves the drawn stream
+#
+# The template is `tests/test_loop.py`'s `_KNOB_PROBES`: a table naming every
+# field, two values each and the observable that must move, with the table
+# itself asserted exhaustive so adding a field without a probe goes red.
+#
+# Caveat, and it is the same one that table carries: this proves a knob *does
+# something*, not that it does the *right* thing. What it rules out is the
+# failure that actually happens -- a field that validates, round-trips through
+# a config file, and is read nowhere, so an ablation reports a difference it
+# never tested.
+
+#: `field -> (value a, value b, observable, extra config)`. The extra config is
+#: not decoration: `noise_composed_rate` is only readable with the marginal
+#: balance off, and `crossfade_ms_range` only with `sequential_prob` at 1.
+_SAMPLER_KNOBS: dict[str, tuple] = {
+    "cell_mix": (CellMix(), CellMix({**REFERENCE_MIX, 6: 0.095, 8: 0.125}),
+                 "cells", {}),
+    "f8": (0.0, 1.0, "cell8_composed", {}),
+    "single_composed_rate": (0.0, 1.0, "voice_only_composed", {}),
+    # Critical: with `balance_marginal_composedness` on -- the shipped default
+    # -- `composed_fractions` SOLVES f9 and overwrites whatever this field says,
+    # so the knob is dead on the shipped stream. It is a knob only in the
+    # unbalanced arm, which is what the extra config here records.
+    "noise_composed_rate": (0.0, 1.0, "cell9_composed",
+                            {"balance_marginal_composedness": False}),
+    "balance_marginal_composedness": (True, False, "cell9_composed", {}),
+    "domain_cap": (500, 1, "component_files", {}),
+    "duration_range": ((4.0, 60.0), (4.0, 8.0), "durations", {}),
+    "gain_db_range": ((-15.0, 15.0), (-1.0, 1.0), "gains", {}),
+    "gain_db_mean": (-3.6, 6.0, "gains", {}),
+    "gain_db_sigma": (4.0, 0.001, "gains", {}),
+    "sequential_prob": (0.0, 1.0, "structures", {}),
+    "crossfade_ms_range": ((10.0, 200.0), (300.0, 400.0), "crossfades",
+                           {"sequential_prob": 1.0}),
+    "silence_lead_s": (0.0, 1.0, "starts", {}),
+    "silence_tail_s": (0.0, 1.0, "ends", {}),
+    "scheme_version": ("synthetic-v1", "synthetic-v2", "scheme", {}),
+}
+
+#: Fields no probe here can move, each with the reason. Caveat: an entry is a
+#: hole, not an exemption -- keep it short and keep the reason true.
+_NOT_A_STREAM_KNOB = {
+    "allow_unsound_mix": "a validation hatch, not a draw parameter -- it changes "
+                         "which configs are constructible, and that is asserted "
+                         "in test_the_unsound_mix_escape_hatch_must_be_asked_for",
+}
+
+
+def _observables(manifest, n=400, **overrides):
+    """One drawn stream, reduced to everything a `SamplerConfig` knob can move."""
+    from collections import Counter
+
+    specs = list(Sampler(manifest, SamplerConfig(**overrides)).epoch_specs(n))
+    composed = [s for s in specs if s.render_mode == "composed"]
+    return {
+        "cells": Counter(s.cell for s in specs),
+        "cell8_composed": sum(s.cell == 8 and s.render_mode == "composed"
+                              for s in specs),
+        "cell9_composed": sum(s.cell == 9 and s.render_mode == "composed"
+                              for s in specs),
+        "voice_only_composed": sum(s.stratum == "voice-only"
+                                   and s.render_mode == "composed" for s in specs),
+        "component_files": Counter(c.file_id for s in specs for c in s.components),
+        "durations": tuple(round(s.duration_s, 6) for s in specs),
+        "gains": tuple(round(c.gain_db, 9) for s in specs for c in s.components),
+        "structures": Counter(s.structure for s in composed),
+        "crossfades": tuple(round(s.crossfade_ms, 9) for s in composed),
+        "starts": tuple(round(c.target_start_s, 9)
+                        for s in composed for c in s.components),
+        "ends": tuple(round(c.target_start_s + c.duration_s, 9)
+                      for s in composed for c in s.components),
+        "scheme": {s.scheme_version for s in specs},
+    }
+
+
+def test_the_knob_table_names_every_sampler_config_field():
+    """A new knob arrives with a probe or an admitted hole; there is no third
+    option, and adding the field alone turns this red."""
+    named = set(_SAMPLER_KNOBS) | set(_NOT_A_STREAM_KNOB)
+    assert named == {f.name for f in dataclasses.fields(SamplerConfig)}
+
+
+@pytest.mark.parametrize("field", sorted(_SAMPLER_KNOBS))
+def test_every_sampler_config_knob_changes_the_drawn_stream(field, manifest):
+    a_value, b_value, key, extra = _SAMPLER_KNOBS[field]
+    a = _observables(manifest, **{**extra, field: a_value})
+    b = _observables(manifest, **{**extra, field: b_value})
+    assert a[key] != b[key], (
+        f"SamplerConfig.{field} = {a_value!r} and {b_value!r} produced the same "
+        f"{key}: the knob validates and then does nothing")
+
+
+def test_noise_composed_rate_is_overwritten_by_the_marginal_balance(manifest):
+    """Critical: the shipped config reads `noise_composed_rate` nowhere.
+
+    `composed_fractions` sets `f[9]` from `noise_composed_rate` and then, when
+    `balance_marginal_composedness` is on, *solves* f9 and overwrites it. The
+    default is on, so on the shipped stream this field is inert -- exactly the
+    "validates and does nothing" failure the knob table exists to find. It is
+    left as a knob rather than removed because the unbalanced arm is a real
+    configuration (`test_I2c_catches_the_marginal_composedness_residual` draws
+    it), but the dead-at-default status has to be said out loud.
+    """
+    solved = composed_fractions(CellMix(), 0.0, f9=0.0, balance_marginal=True)[9]
+    for value in (0.0, 0.5, 1.0):
+        assert composed_fractions(CellMix(), 0.0, f9=value,
+                                  balance_marginal=True)[9] == solved
+        assert composed_fractions(CellMix(), 0.0, f9=value,
+                                  balance_marginal=False)[9] == value
+    assert solved == pytest.approx(0.4132, abs=1e-4), solved
+    assert SamplerConfig().balance_marginal_composedness is True
+
+
+#: Every `SamplerConfig` field, with the value the pipeline ships. Critical: the
+#: three load-bearing ones carry a measured number in the comment, because the
+#: cost of flipping them is the only argument against flipping them.
+_SHIPPED_SAMPLER_DEFAULTS = {
+    "cell_mix": CellMix(),
+    "f8": 0.0,
+    "single_composed_rate": 0.0,
+    "noise_composed_rate": 0.0,
+    # Critical: False reopens a measured marginal composedness gap of 0.121
+    # (P(composed|REAL) 0.2875 vs P(composed|FAKE) 0.4090).
+    "balance_marginal_composedness": True,
+    "domain_cap": 500,
+    "duration_range": (4.0, 60.0),
+    "gain_db_range": (-15.0, 15.0),
+    "gain_db_mean": -3.6,
+    "gain_db_sigma": 4.0,
+    "sequential_prob": 0.25,
+    "crossfade_ms_range": (10.0, 200.0),
+    # Critical: both 0.0, and not as taste. At 0.0 no RNG draw happens at all,
+    # so the shipped stream is byte-identical to the pre-A-A8/A-A11 one.
+    # Anything else changes the drawn stream and needs an I1b re-run.
+    "silence_lead_s": 0.0,
+    "silence_tail_s": 0.0,
+    "scheme_version": "synthetic-v1",
+    "allow_unsound_mix": False,
+}
+
+
+def test_the_shipped_sampler_defaults_are_pinned():
+    """A default nothing asserts is a default anyone can flip in a diff review.
+
+    Three of these are load-bearing beyond taste and none of them was pinned:
+    the two silence knobs, whose non-zero values change the drawn stream and
+    invalidate the I1b audit, and the marginal balance, whose `False` reopens a
+    measured 0.121 composedness gap.
+    """
+    cfg = SamplerConfig()
+    assert set(_SHIPPED_SAMPLER_DEFAULTS) == \
+        {f.name for f in dataclasses.fields(SamplerConfig)}, \
+        "a new SamplerConfig field arrived without a pinned default"
+    for name, want in _SHIPPED_SAMPLER_DEFAULTS.items():
+        assert getattr(cfg, name) == want, name
+
+
+def test_the_silence_defaults_leave_the_drawn_stream_untouched(manifest):
+    """The premise the 0.0 defaults rest on: at zero, no RNG draw happens.
+
+    So the specs are byte-identical to a build with the placement code removed,
+    which is what makes A-A8/A-A11 additions rather than a stream change. A
+    version that drew `uniform(0, 0)` would re-roll every later draw while
+    looking like a no-op.
+    """
+    shipped = list(Sampler(manifest, SamplerConfig()).epoch_specs(300))
+    for spec in shipped:
+        if spec.render_mode == "composed":
+            assert min(c.target_start_s for c in spec.components) == 0.0, (
+                "at lead 0.0 every overlap component starts at the origin")
+    for knob in ("silence_lead_s", "silence_tail_s"):
+        moved = list(Sampler(manifest, SamplerConfig(**{knob: 1e-9}))
+                     .epoch_specs(300))
+        assert moved != shipped, (
+            f"{knob} = 1e-9 consumes an RNG draw, so the whole later stream "
+            f"shifts; if this passes, the 0.0 default is not the no-draw case "
+            f"it claims")

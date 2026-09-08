@@ -801,3 +801,102 @@ def test_the_guard_is_the_only_thing_that_rejects_an_out_of_regime_render(
     long_ = render(_spec(manifest, duration=6.0), index, narrow_off)
     assert long_.duration_s == pytest.approx(6.0, abs=1e-6)
     assert long_.duration_s > narrow_off.audio.max_seconds
+
+
+# --------------------------------------------------------------------------- #
+# every RenderConfig field is a knob, and every knob moves the rendered sample
+#
+# Same template and same known limit as `tests/test_loop.py`'s `_KNOB_PROBES`:
+# it proves a knob does *something*, not that it does the right thing.
+
+
+def _fourier_resample(x, orig_sr, target_sr):
+    """A genuinely different kernel, which is the point of the injection.
+
+    Not a mangled copy of `resample_poly_to`: `scipy.signal.resample` is the
+    Fourier method, and swapping the kernel is a live plan -- if G1's dummy-file
+    forensics name the organizers' resampler, matching it is worth more than
+    kernel quality (A-S1). This is what that swap looks like.
+    """
+    from scipy.signal import resample as _fourier
+
+    if orig_sr == target_sr:
+        return np.ascontiguousarray(x, dtype=np.float32)
+    n = int(round(x.shape[-1] * target_sr / orig_sr))
+    return np.ascontiguousarray(_fourier(x.astype(np.float64), n, axis=-1),
+                                dtype=np.float32)
+
+
+#: `field -> (value a, value b, observable, spec kwargs)`. The spec differs per
+#: probe because two of these knobs are only readable on a particular sample:
+#: `crossfade_shape` needs a sequential spec with a crossfade, and
+#: `check_duration` needs one outside the length regime.
+_RENDER_KNOBS: dict[str, tuple] = {
+    "audio": (AudioConfig(), AudioConfig(sample_rate=8_000), "shape", {}),
+    "resampler": (resample_poly_to, _fourier_resample, "wav", {}),
+    "crossfade_shape": ("sigmoid", "linear", "wav",
+                        {"structure": "sequential", "crossfade_ms": 50.0}),
+    "check_duration": (True, False, "raises", {"duration": 1.5}),
+}
+
+#: Fields no probe here can move, with the reason. An entry is a hole, not an
+#: exemption.
+_NOT_A_RENDER_KNOB = {
+    "root": "where the corpus is read FROM rather than a rendering parameter, so "
+            "it cannot be varied against a fixed source the way these are; it "
+            "has its own test below",
+}
+
+
+def _render_observables(root, manifest, index, spec_kwargs, **overrides):
+    """One rendered sample, reduced to everything a `RenderConfig` knob can move."""
+    cfg = RenderConfig(root=root, **overrides)
+    try:
+        out = render(_spec(manifest, **spec_kwargs), index, cfg)
+    except ValueError:
+        return {"raises": True, "wav": None, "shape": None}
+    return {"raises": False,
+            "wav": hashlib.blake2b(out.wav.numpy().tobytes()).hexdigest(),
+            "shape": tuple(out.wav.shape)}
+
+
+def test_the_knob_table_names_every_render_config_field():
+    """A new knob arrives with a probe or an admitted hole; there is no third
+    option, and adding the field alone turns this red."""
+    named = set(_RENDER_KNOBS) | set(_NOT_A_RENDER_KNOB)
+    assert named == {f.name for f in fields(RenderConfig)}
+
+
+@pytest.mark.parametrize("field", sorted(_RENDER_KNOBS))
+def test_every_render_config_knob_changes_the_rendered_sample(field, corpus,
+                                                              corpus_root):
+    _, manifest, index = corpus
+    a_value, b_value, key, spec_kwargs = _RENDER_KNOBS[field]
+    a = _render_observables(corpus_root, manifest, index, spec_kwargs,
+                            **{field: a_value})
+    b = _render_observables(corpus_root, manifest, index, spec_kwargs,
+                            **{field: b_value})
+    assert a[key] != b[key], (
+        f"RenderConfig.{field} = {a_value!r} and {b_value!r} produced the same "
+        f"{key}: the knob validates and then does nothing")
+
+
+def test_root_is_where_the_audio_is_read_from(corpus, corpus_root, tmp_path):
+    """`root`'s own probe: it is the source, so it cannot be varied against a
+    fixed one the way the table's knobs are.
+
+    Two directions, because either alone is weak: a root that resolves
+    elsewhere must give byte-identical audio (so `root` is a path prefix and
+    nothing more), and a root that resolves nowhere must fail loudly with the
+    file named (P-S1 -- a decode crash burns one of three daily submissions).
+    """
+    _, manifest, index = corpus
+    spec = _spec(manifest)
+    link = tmp_path / "elsewhere"
+    link.symlink_to(corpus_root, target_is_directory=True)
+    here = render(spec, index, RenderConfig(root=corpus_root))
+    there = render(spec, index, RenderConfig(root=link))
+    assert torch.equal(here.wav, there.wav)
+
+    with pytest.raises(DecodeError, match="file_id="):
+        render(spec, index, RenderConfig(root=tmp_path / "nothing_here"))
