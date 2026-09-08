@@ -143,6 +143,13 @@ def multitask_loss(
 
     ``targets`` needs the five keys in TARGET_FOR_COLUMN, each (B,) float/int.
     ``outputs`` is what DeepVoiceNet.forward returned.
+
+    ``parts`` carries one **loss** key per branch, plus ``total`` and, when a
+    teacher is supplied, ``distill``. Keys containing a ``/`` are **diagnostics,
+    not loss terms**: ``<branch>/p_c`` is the fraction of the batch carrying that
+    branch's component and ``<branch>/w_eff`` the `w_c / p_c` of docs/training/02
+    §4. Averaging them over a pass, as `training.loop._mean_parts` does, is the
+    intended reading.
     """
     missing = [k for k in TARGET_FOR_COLUMN.values() if k not in targets]
     if missing:
@@ -200,6 +207,16 @@ def multitask_loss(
         weight = loss_cfg.weights[WEIGHT_KEY_FOR_COLUMN[br_cfg.column]]
         contribution = weight * head_loss
         parts[branch] = float(head_loss.detach())
+        # 🔴 The standing diagnostic docs/training/02 §4 commits to. `_masked_mean`
+        # divides by the present-count, so the per-sample weight a masked head
+        # exerts on the shared trunk is `w_c / p_c`, not `w_c` -- and §4 says
+        # outright not to tune `w_c` without looking at it. It was recorded
+        # nowhere, which made T2 unreadable as specified. `p_c` is 1.0 for an
+        # unmasked head, and `w_eff` is 0 when the batch carries the component
+        # nowhere, because then the head contributes nothing at all.
+        p_c = 1.0 if sample_mask is None else float(sample_mask.float().mean())
+        parts[f"{branch}/p_c"] = p_c
+        parts[f"{branch}/w_eff"] = weight / p_c if p_c else 0.0
         total = contribution if total is None else total + contribution
 
     if teacher_emb is not None:

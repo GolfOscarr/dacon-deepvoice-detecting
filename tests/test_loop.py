@@ -256,7 +256,11 @@ _ROW_META = {"stage", "pass", "group", "n_batches", "total"}
 
 def _loss_terms(row):
     assert isinstance(row["total"], float) and row["total"] == row["total"], row
-    return {k: v for k, v in row.items() if k not in _ROW_META}
+    # `multitask_loss` also records per-head diagnostics -- `<branch>/p_c` and
+    # `<branch>/w_eff`, the effective weight of docs/training/02 §4. They ride in
+    # the same row and are not loss terms, so the `/` keeps them out of the sets
+    # asserted below. Their own coverage is in `tests/test_losses.py`.
+    return {k: v for k, v in row.items() if k not in _ROW_META and "/" not in k}
 
 
 def test_the_loss_history_records_one_row_per_pass_with_that_pass_group(

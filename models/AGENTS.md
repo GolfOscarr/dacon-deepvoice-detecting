@@ -168,7 +168,10 @@ training both presence heads at 20× the 0.05 the metric gives them. The fallbac
 indexes.
 
 ⚠️ The weight *in effect* is `w_c / p_c`, not `w_c` — `_masked_mean` divides by the present-count,
-so a masked head is amplified by how rare its component is. Log both before tuning.
+so a masked head is amplified by how rare its component is. **Both are logged**: `parts` carries
+`<branch>/p_c` and `<branch>/w_eff` beside each head's loss, and `training.loop` averages them into
+the pass row. Keys with a `/` are diagnostics, not loss terms. `docs/training/02 §4` says outright
+not to tune `w_c` without reading `w_eff`, and T2 cannot be read as specified without it.
 
 🔴 **The clip-vs-`frame_max` blend is not a loss knob.** It is `SEDHeadConfig.clip_weight`, in
 the *model* config, and the loss reads that same field — so training and inference cannot

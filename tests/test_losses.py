@@ -229,6 +229,50 @@ def test_each_head_is_trained_against_its_own_column_label():
             f"{key} reached the wrong presence head(s)"
 
 
+def test_the_effective_weight_per_head_is_logged():
+    """🔴 `w_c / p_c` is the weight in effect, and it was recorded nowhere.
+
+    docs/training/02 §4 commits to logging it per head as a standing diagnostic
+    and says outright not to tune `w_c` without looking at it -- `_masked_mean`
+    divides by the present-count, so a masked head's per-sample influence on the
+    shared trunk is amplified by how rare its component is. Without it T2 cannot
+    be read as specified.
+    """
+    model, cfg = _model()
+    out = model(torch.randn(4, SR * 4))
+    # voice present in 1 of 4, music in 2 of 4: three distinct p_c in one batch.
+    targets = _targets([1, 0, 0, 0], [1, 1, 0, 0],
+                       voice_fake=[1, 0, 0, 0], music_fake=[0, 1, 0, 0])
+    _, parts = multitask_loss(out, targets, cfg, LossConfig())
+
+    weights = LossConfig().weights
+    expected_p_c = {"voice": 0.25, "music": 0.5,
+                    "file": 1.0, "v_pres": 1.0, "m_pres": 1.0}
+    for name, br in cfg.branches.items():
+        p_c = parts[f"{name}/p_c"]
+        assert p_c == pytest.approx(expected_p_c[name]), name
+        assert parts[f"{name}/w_eff"] == pytest.approx(
+            weights[name] / expected_p_c[name]), name
+    # Non-vacuity: the masked heads must actually be amplified here, or the
+    # assertions above would hold for a `w_eff` that just echoed `w_c`.
+    assert parts["voice/w_eff"] == pytest.approx(4 * weights["voice"])
+    assert parts["music/w_eff"] == pytest.approx(2 * weights["music"])
+
+    # A component absent from the whole batch contributes nothing, so its
+    # effective weight is 0 rather than a division by zero.
+    absent = _targets([0, 0, 0, 0], [1, 1, 1, 1])
+    _, parts = multitask_loss(out, absent, cfg, LossConfig())
+    assert parts["voice/p_c"] == 0.0
+    assert parts["voice/w_eff"] == 0.0
+    assert parts["voice"] == 0.0
+
+    # The diagnostics are not loss terms: `total` is the weighted sum of the
+    # per-branch losses and nothing else.
+    total, parts = multitask_loss(out, targets, cfg, LossConfig())
+    assert float(total) == pytest.approx(
+        sum(weights[n] * parts[n] for n in cfg.branches), rel=1e-5)
+
+
 def test_loss_blend_comes_from_the_head_config_not_a_separate_knob():
     """🔴 Training and inference must use the same clip/frame_max blend.
 
