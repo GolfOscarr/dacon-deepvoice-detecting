@@ -38,18 +38,164 @@ from training.validate import aggregate_folds
 # 1. LoopConfig, and the stage result
 
 
-def test_no_loop_config_field_is_silently_ignored():
-    """The `models.model.CONSUMED_ELSEWHERE` guard, one layer up.
+#: The base every knob probe below varies exactly one field of.
+_KNOB_BASE = dict(n_buckets=1, ema_decay=0.9, grad_clip=5.0, checkpoint_every=0,
+                  max_steps=None)
 
-    A knob that validates and then does nothing is worse than a missing knob: it
-    makes an ablation report a difference it never tested. `eval_precision`,
-    `eval_batch_size` and `log_every` were exactly that here until this caught
-    them.
+#: `LoopConfig` field -> (value A, value B, the observable that must move).
+#:
+#: Critical: this **replaces** a grep. The guard here used to read
+#: `training/loop.py` and assert the string `loop_cfg.<name>` appeared in it,
+#: which is satisfied by a mention: `grad_clip` and `checkpoint_every` both
+#: passed it while deleting their behaviour entirely left the suite green. A
+#: knob that validates and then does nothing is worse than a missing knob -- it
+#: makes an ablation report a difference it never tested -- so what is asserted
+#: is that two values of the knob produce two different runs.
+_KNOB_PROBES: dict[str, tuple] = {
+    "n_buckets": (1, 4, "weights"),
+    "ema_decay": (0.0, 0.9, "ema"),
+    "grad_clip": (0.0, 1e-3, "weights"),
+    "checkpoint_every": (0, 1, "checkpoints"),
+    "max_steps": (None, 1, "steps"),
+}
+
+#: `out_dir` is where the probe writes rather than something it can vary against
+#: a fixed destination, so it has its own test below.
+_OUT_DIR = "out_dir"
+
+#: Fields no probe here can move, each with the reason. Caveat: an entry here is
+#: a hole, not an exemption -- keep it short and keep the reason true.
+_NOT_VARIABLE_ON_THIS_HARDWARE = {
+    "device": "the test hardware has one device; a cuda probe would skip rather "
+              "than check, which is the failure mode this table exists to avoid",
+}
+
+
+def _probe_run(model_cfg, corpus, out, **overrides):
+    """One short stage run, reduced to everything a `LoopConfig` knob can move."""
+    torch.manual_seed(0)
+    model = _model(model_cfg)
+    result = train_stage(
+        model, _dataset(corpus, n=6), train_cfg=_train_cfg(stage="joint", epochs=1),
+        loop_cfg=LoopConfig(out_dir=out, **{**_KNOB_BASE, **overrides}))
+    return {
+        "weights": _flat(model),
+        "ema": result.ema is not None,
+        "checkpoints": tuple(str(c.path) for c in result.checkpoints),
+        "steps": (result.steps, result.truncated),
+    }
+
+
+def _moved(a, b, key):
+    return not _same(a[key], b[key]) if key == "weights" else a[key] != b[key]
+
+
+def test_the_knob_table_names_every_loop_config_field():
+    """A new knob has to arrive with a probe or an admitted hole; there is no
+    third option, and adding the field alone turns this red."""
+    named = set(_KNOB_PROBES) | {_OUT_DIR} | set(_NOT_VARIABLE_ON_THIS_HARDWARE)
+    assert named == {f.name for f in dataclasses.fields(LoopConfig)}
+
+
+@pytest.mark.parametrize("field", sorted(_KNOB_PROBES))
+def test_every_loop_config_knob_changes_the_run(field, corpus, model_cfg, tmp_path):
+    """Each knob, at two values, against a run that is otherwise identical.
+
+    Both sides write to the same `out_dir` on purpose: the second overwrites the
+    first, so the only thing that can differ between the two observables is the
+    knob.
     """
-    source = Path("training/loop.py").read_text()
-    unread = [f.name for f in dataclasses.fields(LoopConfig)
-              if f"loop_cfg.{f.name}" not in source]
-    assert not unread, f"LoopConfig field(s) read nowhere: {unread}"
+    a_value, b_value, key = _KNOB_PROBES[field]
+    out = tmp_path / field
+    a = _probe_run(model_cfg, corpus, out, **{field: a_value})
+    b = _probe_run(model_cfg, corpus, out, **{field: b_value})
+    assert _moved(a, b, key), (
+        f"LoopConfig.{field} = {a_value!r} and {b_value!r} produced the same "
+        f"{key}: the knob validates and then does nothing")
+
+
+def test_out_dir_is_where_the_checkpoints_land(corpus, model_cfg, tmp_path):
+    """`out_dir`'s own probe: it is the destination, so it cannot be varied
+    against a fixed one the way the table's knobs are."""
+    a = _probe_run(model_cfg, corpus, tmp_path / "a", checkpoint_every=1)
+    b = _probe_run(model_cfg, corpus, tmp_path / "b", checkpoint_every=1)
+    assert a["checkpoints"] and b["checkpoints"]
+    assert all(p.startswith(str(tmp_path / "a")) for p in a["checkpoints"])
+    assert all(p.startswith(str(tmp_path / "b")) for p in b["checkpoints"])
+    assert _same(a["weights"], b["weights"]), "out_dir moved something it should not"
+
+
+#: Captured at import: `_clip_norms` patches `torch.nn.utils.clip_grad_norm_`,
+#: and a test that calls it twice would otherwise wrap its own spy.
+_CLIP_GRAD_NORM = torch.nn.utils.clip_grad_norm_
+
+
+def _clip_norms(monkeypatch, model_cfg, corpus, out, *, precision, grad_clip):
+    """Every `(pre-clip, post-clip)` gradient norm the run clipped at.
+
+    Spying on `clip_grad_norm_` rather than on the weights: the quantity the
+    threshold is compared against is the one both claims below are about, and it
+    is not recoverable from the weights afterwards.
+    """
+    seen: list[tuple[float, float]] = []
+
+    def spy(params, max_norm, *args, **kwargs):
+        params = list(params)
+        pre = _CLIP_GRAD_NORM(params, max_norm, *args, **kwargs)
+        grads = [p.grad.detach() for p in params if p.grad is not None]
+        post = torch.norm(torch.stack([g.double().norm() for g in grads]))
+        seen.append((float(pre), float(post)))
+        return pre
+
+    monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", spy)
+    torch.manual_seed(0)
+    train_stage(_model(model_cfg), _dataset(corpus, n=6),
+                train_cfg=_train_cfg(stage="joint", epochs=1, precision=precision),
+                loop_cfg=LoopConfig(out_dir=out, n_buckets=1, ema_decay=0.0,
+                                    grad_clip=grad_clip))
+    return seen
+
+
+def test_grad_clip_bounds_the_gradient_the_optimizer_sees(corpus, model_cfg,
+                                                          tmp_path, monkeypatch):
+    """The knob's actual effect, on the gradient rather than on the weights.
+
+    Threshold well below the run's own norms so the clip bites on every step:
+    a test whose gradients never reached the threshold would pass with the clip
+    removed.
+    """
+    seen = _clip_norms(monkeypatch, model_cfg, corpus, tmp_path, precision="bf16",
+                       grad_clip=1e-3)
+    assert seen, "the clip was never reached"
+    assert all(pre > 1e-3 for pre, _ in seen), (
+        f"the threshold never bit, so nothing here is a check: {seen}")
+    # 1e-4 relative, which is `clip_grad_norm_`'s own float32 rounding on a
+    # threshold this small. Unclipped these norms are ~2.4, so the slack is four
+    # orders of magnitude short of hiding a missing clip.
+    assert all(post <= 1e-3 * (1 + 1e-4) for _, post in seen), seen
+
+
+def test_the_gradient_is_unscaled_before_it_is_clipped(corpus, model_cfg,
+                                                       tmp_path, monkeypatch):
+    """Critical: `scaler.unscale_` comes first, and this is what says so.
+
+    Clipping a *scaled* gradient clips at a threshold that moves with the
+    scaler's own state -- at the initial scale of 65536 a `grad_clip` of 5.0
+    would really be 7.6e-05, and it would change again on every backoff. So the
+    norm fp16 clips at must be the same quantity bf16 clips at, up to fp16's own
+    rounding, rather than 65536 times it.
+    """
+    fp16 = _clip_norms(monkeypatch, model_cfg, corpus, tmp_path / "fp16",
+                       precision="fp16", grad_clip=1e9)
+    bf16 = _clip_norms(monkeypatch, model_cfg, corpus, tmp_path / "bf16",
+                       precision="bf16", grad_clip=1e9)
+    # `grad_clip` above every norm, so nothing is actually clipped and `pre` is
+    # the raw norm the threshold would have been compared against.
+    assert len(fp16) == len(bf16) and fp16
+    for (a, _), (b, _) in zip(fp16, bf16):
+        assert 0.5 < a / b < 2.0, (
+            f"fp16 clipped at {a:.4g} where bf16 clipped at {b:.4g}: a factor of "
+            "the loss scale means the gradient reached the clip still scaled")
 
 
 def test_loop_config_rejects_values_that_would_run_nothing():
