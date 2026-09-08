@@ -3,7 +3,7 @@
 **DACON 236749 — 딥보이스 범죄 대응을 위한 AI 탐지 모델 경진대회**
 Updated 2026-09-08 · **21 days to LB close** (2026-09-29 10:00 KST) · 2nd-stage materials 2026-10-05
 
-Docs: 87 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGENTS.md) + [`models/`](models/AGENTS.md) + [`training/`](training/AGENTS.md) — **749 tests green** on `feat/training-pipeline` (231 on `main`)
+Docs: 87 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGENTS.md) + [`models/`](models/AGENTS.md) + [`training/`](training/AGENTS.md) — **842 tests green** on `feat/training-pipeline` (231 on `main`)
 
 ---
 
@@ -131,6 +131,19 @@ Docs: 87 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGE
 - [ ] ⚠️ **Four shipped model configs say `runtime.precision: fp16` while `configs/train_joint.yaml` says `bf16`** — which precision a real run trains at is not currently obvious from the configs. Settle before T1
 - [ ] **VG3 reports SKIP by name.** Unguarded until a corpus exists: label-independent TRAIN/VAL domain drift, and a corpus edit silently breaking ledger comparability (only the VG2 half of the re-trigger is detectable). VG1 A1–A7, the tripwires and VG4's T3 gap cover part of the same ground
 
+**Acceptance check of the training pipeline** — five axes, audited against the code
+- [x] **Objectives** — metric-proportional weights reach the loss, masks mirror the masked EER pools, `ranking_weight` 0, `clip_weight` read from the same field inference blends with
+- [x] Critical: **the head-to-metric-weight mapping was untested.** Mapping both 0.05 presence heads to `file` (0.45) passed **749/749**. The File-Voice swap was caught only by an fp16 `GradScaler` backoff tripping an unrelated test's non-vacuity guard — so which mis-assignments the suite caught was decided by numerical overflow, not intent. Now asserted as the weight and target *in effect* per head
+- [x] A partial `loss.weights` dict silently defaulted missing heads to **1.0** — `weights: {file: 0.45}` loaded clean and trained both presence heads at 20x their metric weight. The fallback is gone, and the check sits on `LossConfig.__post_init__` so `dataclasses.replace` and checkpoint round-trips cannot route around it
+- [x] `p_c` and `w_eff` now logged per head — `docs/training/02 §4` forbids tuning `w_c` without them, and T2 could not be read as specified
+- [x] **Data pipeline / fixed format** — one batch shape, enforced; `validate_manifest` now checks all four labels, the domain key and the family key. Zeroing `label_voice_fake` corpus-wide was accepted and took the voice family count **24 → 0** while `build_folds` emitted a full table
+- [x] **YAML configuration** — `training/` had none; four run-shaping dataclasses (`SamplerConfig`, `RenderConfig`, `FoldConfig`, `LoopConfig`) now load from `configs/run_*.yaml` with exhaustive knob tables. `f8` is a config value at last, which is what "one knob, not a second code path" required
+- [x] Critical: **validation had to land before YAML, not after.** A legal-looking cell mix put three of five heads outside C1 (0.890 / 0.918 / 0.818 against `[0.2, 0.8]`) and opened a C3 gap of 0.232, with nothing to say so — `audit_specs` is the only thing that checks, and the training path never ran it. C1/C3 are now enforced at construction
+- [x] **Training algorithms** — clean, no caveats. S1 selects *modules* rather than zeroing loss terms, so weight decay and Adam momentum cannot move an untrained branch; `leak_tripwires` consumes the `MetricSet` rather than the frame so it cannot disagree with the number it guards; there is no EER implementation anywhere in `training/`
+- [x] **Code structure** — `pass_plan` gives the loop and the audit one batch plan (they had diverged for every pass but pass 0 at seed 0, and by a different *list* under S3); `MANIFEST_SLICES` / `FOLD_SLICES` no longer collide, and `folds.py` no longer imports one and shadows it with a redeclaration
+- [ ] ⚠️ Remaining: `training.loop` re-exports 28 names of which it owns 4, and `training/AGENTS.md` teaches 12 examples through it. `validate.py` at ~890 lines now carries three concerns — the shape `loop.py` had before it was split
+- [ ] Critical: **a green suite is not evidence a check can fail.** An adversarial pass left **28 of 85 mutants alive** under 101 passing tests. Of the defects above, several were found by an agent asking whether it had tested something — including one where the fix's own docstring claimed an assertion could not fail, written without checking, and wrong
+
 **🔴 What the pipeline sessions cost, and what actually found it** — none of the following was found by a passing test
 - [x] **A trapped spec stream passed the entire audit clean**: transform *parameters* scored AUC 1.000 while I1 counted only names, and the whole `normalize` draw was read by nothing. Three checks could not fail at all, and I7 printed PASS for size floors implemented nowhere
 - [x] **The pad *value* reached the submitted probability.** `frames_for` rounds up, so a row whose length is not a multiple of the 320-sample hop has a final frame that is part padding — and it is masked *in*. The real finding was the fixture convention: every padding test used `lengths = SR*4`, an exact multiple of the hop, so the four tests guarding this repo's most-repeated defect class had **never once exercised a partial boundary frame**
@@ -160,6 +173,7 @@ Docs: 87 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGE
 - [ ] 🔴 `pip download mamba-ssm causal-conv1d` against torch 2.7.1+cu128 / py3.11 / CUDA 12.8 — **one command**, and it decides whether the best published speech backbones (Fake-Mamba, 5.85% ITW EER) exist for us at all (V5)
 
 **First training experiment — ready, blocked only on the corpus**
+- [x] Pipeline is ready: `configs/run_default.yaml` (conditional, `f8=0`) and `configs/run_t1_strict.yaml` (strict, `f8=1`) ship, so the composedness policy is a config line rather than a code change
 - [ ] 🔴 `T1` **`clip_weight` 1.0 vs 0.5** at Medium speed (⚠️ never Replay — it systematically favours ideas that help early, and a loss-structure change is exactly that shape). One config value, the correct control, and we currently ship a value chosen by symmetry against evidence that it may cost up to 3.63 EER points. Read its **sign** before its size ([`training/04 §6`](docs/training/04-schedule.md))
 - [ ] ⚠️ Two pre-existing thin single-seed margins in `tests/test_aggregate.py` / `test_breakdown.py` would gate T1
 
