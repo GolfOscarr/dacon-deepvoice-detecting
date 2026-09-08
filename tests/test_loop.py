@@ -229,7 +229,7 @@ def test_s1_announces_the_freeze_override_when_the_config_disagrees(model_cfg):
     assert plan.caveats and "freeze: false" in plan.caveats[0]
     for name in model_cfg.frontends:
         assert name in plan.caveats[0]
-    assert "⚠️" in str(plan)
+    assert "caveat:" in str(plan)
 
 
 def test_s1_is_silent_when_the_config_already_agrees(model_cfg):
@@ -240,7 +240,7 @@ def test_s1_is_silent_when_the_config_already_agrees(model_cfg):
     """
     plan = stage_plan("independent", model_cfg)
     assert plan.freeze_overrides == () and plan.caveats == ()
-    assert "⚠️" not in str(plan)
+    assert "caveat:" not in str(plan)
 
 
 def test_only_s1_overrides_the_field_s2_and_s3_honour_it(model_cfg):
