@@ -55,9 +55,9 @@ from training.stages import autocast_for
 
 __all__ = [
     "FoldResult", "RunReport", "ValidationReport",
-    "aggregate_folds", "evaluate", "generator_key", "leak_tripwires",
-    "measured_split_kind", "output_sanity", "predict", "prediction_frame",
-    "run_gates", "validate_fold",
+    "aggregate_folds", "eval_file_id", "evaluate", "generator_key",
+    "leak_tripwires", "measured_split_kind", "output_sanity", "predict",
+    "prediction_frame", "run_gates", "validate_fold",
 ]
 
 
@@ -100,10 +100,29 @@ def _pair_id(spec: SampleSpec, index: ManifestIndex) -> Any:
     return None
 
 
+def eval_file_id(spec: SampleSpec) -> str:
+    """The eval row's identity, derived from the spec and from nothing else.
+
+    Critical: one function, called by `predict` and by `prediction_frame`, is what
+    makes the join between the two **checkable**. The frame pairs `preds[i]`
+    with `specs[i]` positionally, so without an identity travelling alongside
+    the probabilities a permutation of `predict`'s output is invisible: measured
+    on 64 rows, reversing each eval batch moved `score` 0.4650 -> 0.4919 and
+    `eer_file` 0.6103 -> 0.4868 with every gate still green.
+    """
+    return f"s{spec.sample_id:08d}"
+
+
 def predict(model: DeepVoiceNet, dataset: SpecDataset, *,
             batch_size: int = 8, device: str | torch.device = "cpu",
             precision: str = "fp32") -> dict[str, np.ndarray]:
     """The five submission columns over a frozen eval set, in dataset order.
+
+    Critical: the returned mapping also carries `file_id` -- `eval_file_id` of the
+    spec each row was rendered from, taken from the *same* list the batch was
+    built out of, so a reordering moves both. `prediction_frame` refuses a
+    mapping whose ids are not the eval set's own order, which is the only thing
+    standing between a silently permuted eval pass and a ledger row.
 
     Caveat: `eval_batches` -- in order, unbucketed, nothing dropped. Bucketing the
     eval set would destroy the duration-vs-score check on the REAL class that
@@ -130,17 +149,21 @@ def predict(model: DeepVoiceNet, dataset: SpecDataset, *,
     device = torch.device(device)
     model.to(device).eval()
     columns: dict[str, list[np.ndarray]] = {c: [] for c in PREDICTION_COLUMNS}
+    ids: list[str] = []
     with torch.no_grad():
         for indices in eval_batches(dataset, batch_size):
-            batch = collate([render(dataset.specs[i], dataset.index, dataset.cfg)
-                             for i in indices])
+            specs = [dataset.specs[i] for i in indices]
+            ids.extend(eval_file_id(s) for s in specs)
+            batch = collate([render(s, dataset.index, dataset.cfg) for s in specs])
             wav = prepare_waveform(batch["wav"].to(device), model.cfg.audio)
             with autocast_for(precision, device):
                 out = model(wav, batch["lengths"].to(device))
                 probs = model.submission_probs(out)
             for c in PREDICTION_COLUMNS:
                 columns[c].append(probs[c].detach().double().cpu().numpy())
-    return {c: np.concatenate(v) for c, v in columns.items()}
+    out_cols: dict[str, np.ndarray] = {c: np.concatenate(v) for c, v in columns.items()}
+    out_cols["file_id"] = np.asarray(ids, dtype=object)
+    return out_cols
 
 
 def prediction_frame(specs: Sequence[SampleSpec], preds: Mapping[str, np.ndarray],
@@ -152,12 +175,37 @@ def prediction_frame(specs: Sequence[SampleSpec], preds: Mapping[str, np.ndarray
     component's fake label is written as `0`, not `None`, per `training.spec`:
     `file_fake_label` survives `None` only incidentally, and the masked pools
     drop those rows anyway.
+
+    Critical: `preds` must carry `file_id`, and it is **checked against the specs
+    row by row** rather than trusted. The pairing is positional -- `preds[i]`
+    with `specs[i]` -- so a permuted prediction pass is otherwise a silent
+    relabelling of the whole eval set: it moves the score without moving a
+    single gate. `predict` emits the ids; a caller assembling `preds` by hand
+    supplies them the same way, because "I built this in order" is exactly the
+    claim that needs checking.
     """
+    expected = [eval_file_id(spec) for spec in specs]
+    if "file_id" not in preds:
+        raise ValueError(
+            "prediction_frame: preds carries no 'file_id', so the join to the "
+            "specs would be positional and unchecked -- `predict` emits it, and "
+            "`eval_file_id` builds it from a spec")
+    got = [str(x) for x in np.asarray(preds["file_id"]).tolist()]
+    if got != expected:
+        first = next((i for i, (a, b) in enumerate(zip(got, expected)) if a != b),
+                     min(len(got), len(expected)))
+        raise ValueError(
+            f"prediction_frame: preds are not in the eval set's order -- "
+            f"{len(got)} predicted id(s) against {len(expected)} spec(s), first "
+            f"disagreement at row {first}: {got[first:first + 1]} vs "
+            f"{expected[first:first + 1]}. The join is positional, so this would "
+            f"score every row against another row's truth")
+
     rows = []
-    for spec in specs:
+    for spec, file_id in zip(specs, expected):
         labels = spec.labels
         rows.append({
-            "file_id": f"s{spec.sample_id:08d}",
+            "file_id": file_id,
             "cell": spec.cell,
             "fold": fold,
             "artifact_family": generator_key(spec, index),

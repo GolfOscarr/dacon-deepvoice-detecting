@@ -178,11 +178,71 @@ def test_prediction_truth_columns_come_from_the_cell(scored):
         assert row.music_present == spec.music_present
 
 
+def _preds_of(report, ids=None):
+    """The mapping `predict` returns, rebuilt from a scored report's frame."""
+    preds = {c: report.predictions[c].to_numpy() for c in PREDICTION_COLUMNS}
+    preds["file_id"] = np.asarray(
+        list(report.predictions["file_id"]) if ids is None else list(ids),
+        dtype=object)
+    return preds
+
+
 def test_prediction_frame_refuses_a_mismatched_prediction_length(scored):
     _, ds, report = scored
     preds = {c: report.predictions[c].to_numpy()[:-1] for c in PREDICTION_COLUMNS}
-    with pytest.raises(ValueError, match="one row per spec"):
+    preds["file_id"] = report.predictions["file_id"].to_numpy()[:-1]
+    with pytest.raises(ValueError, match="not in the eval set's order"):
         prediction_frame(ds.specs, preds, ds.index)
+
+
+def test_a_permuted_prediction_pass_cannot_reach_the_frame(scored):
+    """The join is positional, so a permutation silently scores every row
+    against another row's truth. Measured on 64 rows before the ids travelled
+    with the probabilities: reversing each eval batch moved `score` 0.4650 ->
+    0.4919 and `eer_file` 0.6103 -> 0.4868, with every VG5 row green in both.
+
+    The identity is what makes it visible, so the assertion is on the *verdict*
+    of the join, not on any number the permutation happens to move.
+    """
+    _, ds, report = scored
+    order = list(report.predictions["file_id"])
+
+    # In order: accepted, and the frame it builds is the scored one.
+    frame = prediction_frame(ds.specs, _preds_of(report), ds.index)
+    assert list(frame["file_id"]) == order
+
+    with pytest.raises(ValueError, match="not in the eval set's order"):
+        prediction_frame(ds.specs, _preds_of(report, order[::-1]), ds.index)
+
+    swapped = list(order)
+    swapped[0], swapped[1] = swapped[1], swapped[0]
+    with pytest.raises(ValueError, match="first disagreement at row 0"):
+        prediction_frame(ds.specs, _preds_of(report, swapped), ds.index)
+
+    with pytest.raises(ValueError, match="no 'file_id'"):
+        prediction_frame(ds.specs,
+                         {c: report.predictions[c].to_numpy()
+                          for c in PREDICTION_COLUMNS}, ds.index)
+
+
+def test_evaluate_goes_red_when_the_eval_pass_reorders_its_batches(
+        scored, monkeypatch):
+    """The mutation the identity exists for: `predict` emitting its rows in
+    another order than `dataset.specs`. Reversing the indices *within* each eval
+    batch -- which `eval_batches` cannot do, but a rewrite of it could -- used to
+    survive the whole suite with every gate green."""
+    model, ds, _ = scored
+    import training.validate as validate
+
+    ordered = validate.eval_batches
+
+    def reversed_batches(dataset, batch_size):
+        for batch in ordered(dataset, batch_size):
+            yield list(batch)[::-1]
+
+    monkeypatch.setattr(validate, "eval_batches", reversed_batches)
+    with pytest.raises(ValueError, match="not in the eval set's order"):
+        evaluate(model, ds, batch_size=8, fold=0)
 
 
 def test_generator_key_never_invents_a_family_for_a_real_row(corpus):
