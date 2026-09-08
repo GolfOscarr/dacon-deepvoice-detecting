@@ -115,6 +115,13 @@ def synthetic_manifest(
     6 and 7 are deliberately absent from the whole-file rows: they cannot be
     scraped, which is the entire reason two fake heads exist.
 
+    Critical: reproducible **across processes**, not only within one. Every
+    column is a pure function of ``(seed, shape)``: the numeric draws come from
+    a seeded `np.random.default_rng` and ``sha256`` from blake2b, because
+    Python's `hash()` is salted per process and the column it produced differed
+    between runs. `tests/test_synthetic.py` runs two interpreters under
+    different ``PYTHONHASHSEED`` values and compares.
+
     ``n_families`` widens each fake pool beyond its default eight generators, and
     ``n_sources`` each real pool beyond its default three corpora.
     ``duration_range`` bounds the declared source durations -- shrink it before
@@ -134,7 +141,14 @@ def synthetic_manifest(
             # in the pipeline may rely on that: P-S1 says "never assume the
             # extension", and the eval server hands us mixed containers.
             "path": f"pools/{pool or 'whole'}/{file_id}.{container}",
-            "sha256": f"{abs(hash(file_id)) & 0xFFFFFFFFFFFF:012x}",
+            # Critical: blake2b, **not** Python's `hash()`. String hashing is
+            # salted per process, so a `hash()`-keyed digest is stable within a
+            # run and different across runs -- which contradicts
+            # `write_synthetic_corpus`'s "two runs produce byte-identical
+            # corpora" and would make any manifest a run diffed against another
+            # run's differ in a column nothing controls. Same hazard, same
+            # answer as `training.spec.spec_rng`.
+            "sha256": hashlib.blake2b(file_id.encode(), digest_size=6).hexdigest(),
             "row_kind": row_kind,
             "pool": pool,
             "cell": cell,
