@@ -9,7 +9,7 @@ Hosted by 행정안전부 and 한국지능정보사회진흥원, supervised by �
 > **Status: research, planning, the measurement pipeline, the model and the training pipeline are
 > complete. Nothing has been trained — there is no corpus yet.**
 > Code ships in **[`metrics/`](metrics/AGENTS.md)**, **[`models/`](models/AGENTS.md)** and
-> **[`training/`](training/AGENTS.md)** — 842 tests, every invariant paired with a mutation that
+> **[`training/`](training/AGENTS.md)** — 844 tests, every invariant paired with a mutation that
 > was observed to fail. Current state and next actions: **[PROGRESS.md](PROGRESS.md)**
 
 ---
@@ -90,7 +90,7 @@ it is not required to read the documentation.
 ## Verification
 
 ```bash
-.venv/bin/python -m pytest -o addopts=""    # 842 tests; -o addopts="" keeps pytest's summary line
+.venv/bin/python -m pytest -o addopts=""    # 844 tests; -o addopts="" keeps pytest's summary line
 .venv/bin/python scripts/check_links.py     # every cross-reference in 87 docs
 ```
 
