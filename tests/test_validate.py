@@ -12,6 +12,7 @@ has already shipped a padding defect that every test missed for exactly that
 reason: every fixture used `lengths = SR * 4`.
 """
 
+import inspect
 import json
 from pathlib import Path
 
@@ -23,8 +24,9 @@ import torch
 from loop_fixtures import (DRAW, _dataset, _fold_result, _metric_set, _model,
                            corpus, model_cfg)
 from metrics.aggregate import fold_mean
+from metrics.breakdown import t3_gap
 from metrics.dacon import PREDICTION_COLUMNS, eer
-from training.audit import AuditReport
+from training.audit import AuditReport, audit_specs
 from training.dataset import SpecDataset, fold_manifest, frozen_eval_specs
 from training.folds import FoldConfig, build_folds
 from training.loop import StageResult, stage_plan
@@ -34,8 +36,8 @@ from training.synthetic import synthetic_manifest
 from training.validate import (NOT_QUOTABLE, RESOLUTION_FLOOR, ValidationReport,
                                aggregate_folds, evaluate, generator_key,
                                leak_tripwires, measured_split_kind,
-                               output_sanity, prediction_frame, run_gates,
-                               validate_fold)
+                               output_sanity, predict, prediction_frame,
+                               run_gates, validate_fold)
 
 
 # --------------------------------------------------------------------------- #
@@ -93,6 +95,25 @@ def test_b2a_does_not_switch_b2_off_below_the_floor():
     report = output_sanity(df)
     assert not report.results["VG5_B2_ranking_resolution"][0]
     assert "VG5_B2a_resolution_is_resolvable" in report.skipped
+
+
+def test_the_fp32_eval_default_is_the_value_that_ships(scored):
+    """The *phenomenon* is tested below at 1,200 rows, on a column this test
+    file builds. The **default** was held by nothing: flipping `precision` to
+    "bf16" in `predict`, `evaluate` and `validate_fold` at once passed the whole
+    suite, because no test ever read what those three ship with.
+
+    Asserted on the shipped value rather than on a number bf16 happens to move
+    at fixture size, which would be a coincidence dressed up as a check.
+    """
+    for fn in (predict, evaluate, validate_fold):
+        assert inspect.signature(fn).parameters["precision"].default == "fp32", fn
+
+    model, ds, _ = scored
+    default = predict(model, ds, batch_size=8)
+    explicit = predict(model, ds, batch_size=8, precision="fp32")
+    for c in PREDICTION_COLUMNS:
+        assert np.array_equal(default[c], explicit[c]), c
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
@@ -380,6 +401,20 @@ def test_a_fold_below_the_pool_floor_is_excluded_and_recorded():
     assert report.aggregate.excluded_folds == (4,)
     assert any("min_pool" in c for c in report.caveats)
     assert abs(report.score_mean - aggregate_folds(big).score_mean) < 1e-12
+
+
+def test_a_run_with_a_fired_tripwire_is_not_quotable():
+    """The other half of `FoldResult.ok`, and the half nothing held: dropping
+    `tripwires.ok` from it survived the suite, because the red-gate test uses a
+    red *gate* and no test ever built a red tripwire."""
+    fired = AuditReport({
+        "L1_music_unseen_generator": (False, "music EER 0.0050 on an "
+                                             "unseen-generator split")})
+    report = aggregate_folds([_fold_result(0, _metric_set(0.10), tripwires=fired)])
+    assert not report.quotable
+    assert report.as_ledger_row()["quotable"] is False
+    assert "NOT QUOTABLE" in str(report)
+    assert any("tripwire" in c for c in report.caveats)
 
 
 def test_a_run_with_a_red_gate_is_not_quotable():
@@ -714,6 +749,97 @@ def test_vg5_b4_skips_rather_than_passes_without_a_reference():
                              ).results["VG5_B4_id_set_matches"][0]
 
 
+def test_vg5_b4_is_reachable_through_run_gates(scored):
+    """B4 was structurally unreachable where VG5 is actually wired: `run_gates`
+    called `output_sanity(report.predictions)` with no reference ids and had no
+    parameter to supply them, so the row was permanently SKIP.
+
+    A fold has no external reference -- `validate_fold` still passes none, and
+    `prediction_frame` is what holds the fold-level version of this -- but the
+    submission-time caller has `sample_submission.csv`, and now a way in.
+    """
+    _, _, report = scored
+    ids = list(report.predictions["file_id"])
+
+    assert "VG5_B4_id_set_matches" in run_gates(report).skipped
+    green = run_gates(report, reference_ids=ids)
+    assert green.results["VG5_B4_id_set_matches"][0]
+    assert "VG5_B4_id_set_matches" in green.ran
+    red = run_gates(report, reference_ids=ids[::-1])
+    assert not red.results["VG5_B4_id_set_matches"][0]
+    assert not red.ok
+
+
+def test_vg4_goes_red_on_a_real_t3_gap(scored):
+    """VG4 had never been shown to fail: its test asserted on a message string
+    and accepted the SKIP branch, so `t3_gap`'s verdict was never read.
+
+    Here the paired rows are scored backwards while the rest are scored
+    perfectly, which is exactly the finding VG4 exists for -- a pooled EER
+    carried by corpus identity rather than by artifact detection.
+    """
+    _, _, scored_report = scored
+    n = 200
+    truth = np.tile([0, 1], n // 2)
+    paired = np.arange(n) < 80
+
+    def report_with(prob):
+        frame = pd.DataFrame({
+            "file_id": [f"s{i:08d}" for i in range(n)],
+            "cell": np.where(truth == 1, 2, 1),
+            "fold": 0,
+            "artifact_family": np.where(truth == 1, "hifigan", "real:libritts"),
+            "pair_id": np.where(paired, "p", None),
+            "duration_s": 10.0,
+            "voice_present": 1, "music_present": 0,
+            "voice_fake": truth, "music_fake": 0, "file_fake": truth,
+        })
+        for c in PREDICTION_COLUMNS:
+            frame[c] = np.linspace(0.01, 0.99, n)
+        frame["VOICE_FAKE_PROB"] = prob
+        return ValidationReport(0, _metric_set(0.10), scored_report.per_cell,
+                                scored_report.per_generator, frame)
+
+    honest = truth * 0.9 + 0.05
+    gates = run_gates(report_with(honest))
+    passed, why = gates.results["VG4_corpus_identity"]
+    assert passed, why
+    assert not why.startswith(AuditReport.SKIP)
+
+    # The paired rows ranked backwards: T3 EER far above the pooled EER.
+    inverted = np.where(paired, (1 - truth) * 0.9 + 0.05, honest)
+    passed, why = run_gates(report_with(inverted)).results["VG4_corpus_identity"]
+    assert not passed, why
+    assert "gate <= 0.10" in why
+
+
+def test_vg1_a8a9_vg2_and_i5_are_the_audits_own_verdicts(scored, corpus):
+    """The wiring, not a restatement of it. Replacing any of these three with a
+    hardcoded `(True, "green")` passed the whole suite, because every test
+    asserted only that the key existed or that it skipped without inputs.
+
+    Compared tuple-for-tuple against `audit_specs` run directly, which is the
+    source of truth `run_gates` is supposed to be forwarding.
+    """
+    manifest, _, _ = corpus
+    _, ds, report = scored
+    gates = run_gates(report, eval_specs=ds.specs, manifest=manifest,
+                      slice_=ds.slice_, fold=ds.fold)
+    spec_report = audit_specs(list(ds.specs), manifest=manifest,
+                              slice_=ds.slice_, fold=ds.fold, eval_floors=True)
+
+    for gate_key, audit_key in (
+            ("VG1_A8A9_eval_size_floors", "I7_eval_size_floors"),
+            ("VG1_I5_split_safety", "I5_split_safety"),
+            ("VG2_shortcut_audit", "I1b_metadata_shortcut_auc")):
+        assert gates.results[gate_key] == spec_report.results[audit_key], gate_key
+
+    # And A8/A9 is *red* at fixture size: 40 specs against a 1,200-per-class
+    # floor. A gate that has never been seen red is not a gate.
+    passed, why = gates.results["VG1_A8A9_eval_size_floors"]
+    assert not passed and "VG1 A8/A9" in why
+
+
 def test_vg1_is_wired_to_check_split_integrity_and_goes_red_on_a_broken_split(scored):
     """Not a re-implementation: `training.folds.check_split_integrity` is the
     gate, and this proves the wiring by breaking the table it reads."""
@@ -784,12 +910,19 @@ def test_vg6_refuses_a_fourth_probe_opening(scored, tmp_path):
 
 
 def test_vg4_uses_the_shared_t3_gap_implementation(scored):
+    """Wired to `metrics.breakdown.t3_gap`, not to a second gap calculation.
+
+    Asserted against that function's own output. This test used to accept
+    either branch of `why.startswith(SKIP) or "gate <= 0.10" in why`, which is
+    a message string and passes whatever the verdict is."""
     _, _, report = scored
-    gates = run_gates(report)
-    key = "VG4_corpus_identity"
-    assert key in gates.results
-    passed, why = gates.results[key]
-    assert why.startswith(AuditReport.SKIP) or "gate <= 0.10" in why
+    passed, why = run_gates(report).results["VG4_corpus_identity"]
+    gap = t3_gap(report.predictions, head="voice")
+    if np.isfinite(gap["t3_gap"]):
+        assert passed == bool(gap["passes_vg4"])
+        assert f"{gap['t3_gap']:+.4f}" in why
+    else:
+        assert why.startswith(AuditReport.SKIP) and str(gap["n_pairs"]) in why
 
 
 # --------------------------------------------------------------------------- #

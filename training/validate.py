@@ -143,8 +143,11 @@ def predict(model: DeepVoiceNet, dataset: SpecDataset, *,
     | **1,200 (the VAL floor)** | **399 FAIL** | 996 PASS | 1,200 PASS |
 
     So a bf16 evaluation passes VG5 on any fixture small enough to be convenient
-    and fails at the size we actually validate on. `tests/test_validate.py` asserts
-    it at 1,200, not at the fixture size.
+    and fails at the size we actually validate on. `tests/test_validate.py`
+    asserts the *phenomenon* at 1,200 rather than at the fixture size, on a
+    column it builds itself -- and separately asserts the **default** of all
+    three entry points, which is the value that ships and which flipping to
+    "bf16" once passed the entire suite.
     """
     device = torch.device(device)
     model.to(device).eval()
@@ -539,7 +542,8 @@ def run_gates(report: ValidationReport, *,
               slice_: str | None = None, fold: int | None = None,
               scheme_version: str | None = None,
               probe_log: Path | str | None = None,
-              opened_probe: bool = False) -> AuditReport:
+              opened_probe: bool = False,
+              reference_ids: Sequence[str] | None = None) -> AuditReport:
     """VG1-VG6 for one experiment. No number is quotable without this.
 
     Wires the gates that **exist** and SKIPs the rest by name, so the run record
@@ -555,6 +559,15 @@ def run_gates(report: ValidationReport, *,
     | VG4 | `metrics.breakdown.t3_gap` |
     | VG5 | `output_sanity` |
     | VG6 | the `probe_openings.log` line count |
+
+    Caveat: `reference_ids` is VG5 **B4**'s only input, and without the parameter
+    B4 was permanently SKIP wherever VG5 is actually wired -- reachable in
+    `output_sanity` and unreachable through the function that runs it. It is the
+    id set the run must reproduce (`sample_submission.csv` at submission time).
+    A fold has no such external reference, so `validate_fold` passes none and B4
+    SKIPs there by construction: what the fold needs instead is that the
+    predictions line up with the specs, and `prediction_frame` refuses the frame
+    outright when they do not.
 
     Caveat: VG3 is the honest gap. It needs a TRAIN-vs-VAL classifier over the
     metadata features VG2 uses, which is real work and would land as a green
@@ -606,7 +619,7 @@ def run_gates(report: ValidationReport, *,
             f"{gap['pooled_eer']:.4f} = {gap['t3_gap']:+.4f}, gate <= 0.10 "
             f"over {gap['n_pairs']} paired rows")
 
-    r.update(output_sanity(report.predictions).results)
+    r.update(output_sanity(report.predictions, reference_ids).results)
 
     if not opened_probe:
         r["VG6_probe_budget"] = (
