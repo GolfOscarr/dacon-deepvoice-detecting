@@ -1,7 +1,7 @@
 # 05 — Talkboard Q&A
 
-Snapshot of https://dacon.io/competitions/official/236749/talkboard as of **2026-09-06**.
-7 posts total (1 pinned notice + 6 questions). Synced with the `dacon-talkboard-sync` skill. Questions marked `[DACON 답변 요청]` are the ones
+Snapshot of https://dacon.io/competitions/official/236749/talkboard as of **2026-09-08**.
+9 posts total (1 pinned notice + 8 questions). Synced with the `dacon-talkboard-sync` skill. Questions marked `[DACON 답변 요청]` are the ones
 DACON commits to answering.
 
 ---
@@ -55,25 +55,141 @@ guard added there.
 
 ---
 
-## ⏳ #417333 — [DACON 답변 요청] Real/Fake 라벨 정의와 학습데이터 사용·제출 기준
-*(느아, 2026-09-05 16:28) — **0 replies, awaiting official answer***
+## ✅ #417333 — [DACON 답변 요청] Real/Fake 라벨 정의와 학습데이터 사용·제출 기준
+*(느아, 2026-09-05 16:28) — **ANSWERED 2026-09-08, 7 of 7***
 
-🔴 **This post asks almost exactly the questions we had queued up.** We do not need to post them
-ourselves; we need to watch this thread. Seven questions:
+🔴 **The single most consequential thread so far.** Another participant asked almost exactly our
+queued questions, and DACON answered all seven in one reply. Two answers change work already
+planned; two settle open design bets in our favour.
 
-| # | Question | Why it matters to us |
-|---|---|---|
-| 1 | Do **neural-codec round-trips (EnCodec, DAC)**, **neural noise suppression / speech enhancement**, and **source separation** applied to real audio stay **REAL**? i.e. if a network reconstructs the waveform but generates no new component, is it REAL? Also: can the test set's **telephone-channel audio include neural-codec transforms**? | 🔴 Defines Pool B and the REAL-processed slice. Our [T3 resynthesis twins](../data/05-synthesis-plan.md) assume codec resynthesis = **FAKE**; our [REAL-processed slice](../data/05-synthesis-plan.md) assumes denoising = **REAL**. If answer 1 says codec round-trip is REAL, **S-S1 collapses** |
-| 2 | Is an AI song (vocals + backing both generated) labelled `FILE/VOICE/MUSIC_FAKE=1`, `VOICE/MUSIC_PRESENT=1`? Is AI a cappella `VOICE_PRESENT=1, MUSIC_PRESENT=0`? | Confirms our cell 8 and voice-only definitions ([02](../data/02-label-taxonomy.md)) |
-| 3 | Is `*_PRESENT=1` when the component occupies only **part** of the file? Any **minimum duration or ratio**? Can files exist with **both PRESENT = 0** (environmental sound / silence only)? If so, how is `FILE_FAKE` decided — is **AI-generated environmental sound** FAKE? | 🔴 Cell 9 currently exists in our taxonomy only as a robustness class. If AI environmental sound counts as FAKE, that is a **new detection target** we have not planned for |
-| 4 | Are Voice/Music EER computed over **ground-truth** `*_PRESENT=1` files, not our predictions? | Confirms the masked-EER reading in [03](03-evaluation.md) |
-| 5 | 🔴 Can **CC BY-NC-ND** data be used as-is, and may augmentation be applied? If derivative redistribution is barred, does submitting **original + augmentation code + config + seed** satisfy the requirement? | **Directly decides CtrSVDD** (307 h singing @16 kHz) — our open decision [V2](../survey/10-open-questions.md) |
-| 6 | 🔴 When public data is **mixed / resampled / format-converted** before training, which stage must be submitted — the generated files, or **originals + code + seed**? | 🔴 Our entire on-the-fly composition design ([06](../data/06-augmentation-spec.md)) rests on the answer being "originals + code + seed". #417280 said augmentation intermediates need not be shipped, but **did not cover mixing two public sources into a new training sample** |
-| 7 | Are **YouTube CC-licensed** datasets (e.g. YODAS) usable? | The gray area we identified and chose to avoid ([data/01](../data/01-rules-check.md)) |
+> **A (DACON):**
+> 1. 음성·음악 성분을 **새로 생성하지 않는 후처리만 적용된 경우 REAL로 간주**합니다. 대회 개요 ->
+>    설명을 확인하세요.
+> 2. 네 맞습니다.
+> 3. **일부 구간에만 존재하더라도 해당 성분이 있으면 PRESENT=1**입니다.
+> 4. Voice/Music EER은 **Ground Truth의 PRESENT 값 기준**으로 평가 대상을 선정합니다. 평가 ->
+>    리더보드 산식 설명을 확인하세요.
+> 5. **말씀하신 방식도 가능하며**, 이경우에는 **원본 파일과 코드로 재현될 수 있어야합니다.**
+> 6. 가공 데이터는 **원본 데이터와 재현 가능한 코드·설정값·seed 등을 제출**하면 됩니다.
+> 7. **참가자가 해당 데이터셋 및 원본 콘텐츠의 라이선스·이용조건을 직접 확인하여 판단해야 하며**,
+>    운영진에서는 개별 데이터셋의 라이선스 적합 여부를 **별도로 판단하거나 보증하지 않습니다.**
 
-**Action**: monitor. Q1, Q5 and Q6 each change work already planned. Q3 could add a detection
-target. Nothing here needs a duplicate post from us — the only question still unique to us is the
-**AI-Hub / NIA** one ([data/11 §1](../data/11-source-inventory.md)).
+### 🔴 A1 — codec round-trip, enhancement and separation are all REAL. **S-S1 collapses.**
+
+This is the answer we flagged as able to invalidate planned work, and it did. Anything that
+reconstructs a waveform **without generating a new voice or music component is REAL** — neural
+codec encode/decode (EnCodec, DAC), neural denoise / speech enhancement, and source separation
+included.
+
+**Takeaway (against us):** our cheapest planned Pool B multiplier is gone. [`04`](../data/04-sources.md)
+lists *"Self vocoder/codec resynthesis of Pool A — ⭐ Cheapest family multiplier; ⭐ gives perfectly
+matched real/fake pairs"*, and [`05`](../data/05-synthesis-plan.md)'s **T3 resynthesis twins**
+label exactly this as FAKE. Under A1 those files are **REAL**, so training on them as FAKE teaches
+the model the inverse of the target.
+
+**Takeaway (for us):** the same answer promotes the **REAL-processed slice** from optional to
+required. The evaluation set's REAL class contains codec-round-tripped, denoised and separated
+audio, so a detector that has never seen processed REAL will false-positive on it. This is
+ArtifactNet's codec-aware training idea applied to the REAL side.
+
+### ✅ A2 — the label taxonomy is confirmed
+
+AI song (vocal + backing generated) is `FILE/VOICE/MUSIC_FAKE=1` with both `PRESENT=1`; AI a
+cappella is `VOICE_PRESENT=1, MUSIC_PRESENT=0`. [`02`](../data/02-label-taxonomy.md) stands as
+written.
+
+### ✅ A3 — any duration counts, but cell 9 is still open
+
+`PRESENT=1` if the component is there at all, however briefly. No minimum duration or ratio.
+
+**Takeaway:** this is the strongest external support yet for the SED head and the
+`0.5·clip + 0.5·frame_max` pooling — a mean pool over a 60 s file cannot represent a 2 s voice
+segment, and the ground truth explicitly labels that file `VOICE_PRESENT=1`.
+
+⚠️ **Not settled:** DACON answered the duration half of Q3 and **did not address** whether files
+exist with both `PRESENT=0`, nor how `FILE_FAKE` is decided for AI-generated environmental sound.
+Cell 9 remains an open question, not a closed one. Do not read A3 as covering it.
+
+### ✅ A4 — masked EER on ground truth, as implemented
+
+Confirms [`03`](03-evaluation.md) and the [`metrics/`](../../metrics/AGENTS.md) implementation.
+
+### 🔴 A5 — **ND data is usable.** The blocker is lifted
+
+CC BY-NC-ND data may be used, augmentation included, provided the work is reproducible from
+**원본 파일 + 코드**.
+
+**Takeaway:** this unblocks a large, high-value set that was held out pending exactly this answer —
+**Codecfake** (inventory crown jewel #4, 32 GB, and the codec-LM family that vocoder-trained
+detectors are blind to), **ST-Codecfake**, **SceneFake**, **CtrSVDD** (260 h of sung fake already
+at 16 kHz), and roughly **63,000 ND-licensed tracks** across FMA and MTG-Jamendo. See
+[`data/12`](../data/12-acquisition-status.md).
+
+### 🔴 A6 — on-the-fly composition is legal. The design holds
+
+*가공 데이터는 원본 데이터와 재현 가능한 코드·설정값·seed 등을 제출하면 됩니다.*
+
+**Takeaway:** [`data/06`](../data/06-augmentation-spec.md) rested entirely on this answer, and
+[PROGRESS](../../PROGRESS.md) recorded it as the open bet. We do **not** ship composed or
+augmented output — originals plus code, config and seed suffice. Note how this sits beside
+#417280: *source* files cannot be replaced by URLs or checksums, but *derived* data can be
+replaced by reproducible code. The two answers are consistent and cover different stages.
+
+This also raises the stakes on `render(spec) == render(spec)`
+([`training/`](../../training/AGENTS.md)) — reproducibility stops being an internal nicety and
+becomes the thing the 2nd-stage submission is built on.
+
+### ⚠️ A7 — YouTube CC is our call, and nobody will underwrite it
+
+DACON will **not** adjudicate or guarantee any individual dataset's licence. That is neither a yes
+nor a no.
+
+**Takeaway:** [`data/01`](../data/01-rules-check.md)'s decision to avoid scraped YouTube audio
+stands on its own reasoning (ToS, and no component-level ground truth). More broadly this
+validates the **G2 gate** being ours to run: the verdict recorded in
+[`scripts/sources.yaml`](../../scripts/sources.yaml) is the only licence check anyone will do.
+
+---
+
+## ✅ #417344 — [규정 문의] 행 독립성 검증 시점 및 사후 규정 위반 판정 가능 여부
+*(participant, 2026-09-07) — **ANSWERED***
+
+**Q.** Is row independence actually verified at submission time? Does a surviving leaderboard
+score imply the submission is compliant? Can a score be invalidated later?
+
+> **A (DACON):** 행 독립성을 포함한 규칙 준수 여부는 운영진이 대회 기간 중 **불시에 점검**하고 있으며,
+> 해당 점검은 **자동으로 이루어지는 방식이 아닙니다.** 참가자는 대회 기간 전체에 걸쳐 규칙을 준수해야
+> 하며, 규칙 위반 정황이 확인될 경우 필요한 조치가 이루어질 수 있습니다. 또한 운영진이 규칙 준수 여부
+> 확인을 위해 소명을 요청하는 경우 참가자는 이에 응해야 합니다.
+> 대회 종료 후에는 **수상 후보 제출물 등을 대상으로 엄밀한 코드 및 규칙 검증**이 진행됩니다.
+
+🔴 **Takeaway:** checks are **spot checks, not automatic**, and a currently-valid leaderboard score
+is **not** evidence of compliance. Rigorous verification happens after the competition, on award
+candidates — i.e. exactly when a violation is most expensive.
+
+This is the strongest external justification yet for the rule-2.4 work already done: four separate
+batch-dependence defects were found and fixed in [`models/`](../../models/AGENTS.md), each of which
+would have scored normally on the leaderboard and failed the post-hoc review. "It scored fine" was
+never going to be the test.
+
+---
+
+## ✅ #417336 — 2차 평가 학습데이터 제출 방법 문의 (대용량)
+*(participant, 2026-09-07) — **ANSWERED***
+
+**Q.** ~20 GB of training data exceeds mail attachment limits. Cloud link acceptable? Is there a
+size cap? If so, can a reproducible manifest (filenames, source URLs, licences, md5) substitute?
+
+> **A (DACON):** **상한은 없으며**, **구글 드라이브 등의 방법으로 제출**하시면 되겠습니다.
+
+**Takeaway:** no size limit, and Google Drive delivery is confirmed — [`data/08`](../data/08-build-plan.md)
+already assumed this. ⚠️ The third sub-question (manifest instead of files) was **not** answered
+here, but #417280 already closed it for source data: URLs and checksums cannot substitute. A6 of
+#417333 covers the derived half.
+
+Practical consequence: our raw store is currently ~276 GB of *candidate* downloads. What ships is
+only what training actually consumed, and with A6 that is the **source pools plus code**, not the
+composed output.
 
 ---
 
@@ -193,30 +309,38 @@ browser if a definitive quote is needed.
 |---|---|
 | Non-Korean nationals? | Cannot be evaluated or win. |
 | CC-BY-NC / CC-BY-NC-SA data? | Usable, if license terms are complied with. |
+| **CC-BY-NC-ND data?** | 🔴 **Usable** (#417333 A5) — augmentation included, if reproducible from 원본 파일 + 코드. |
 | Redistribution-restricted data? | **Unusable** — cannot even be used for training. |
-| Substitute a manifest for data files? | **No.** Files must be submitted. |
-| Upstream pretraining corpus of a public checkpoint? | **Not required.** |
-| Augmentation intermediates? | **Not required** — originals + code + config + seed suffice. |
-| Huge data volume? | Deliver via Google Drive or similar. |
-| Does winning transfer rights in external OSS/data/weights? | **No** — only our own deliverable. |
+| **Codec round-trip / denoise / separation of real audio?** | 🔴 **REAL** (#417333 A1) — reconstruction is not generation. |
+| **Composed / augmented / resampled training data?** | 🔴 Ship **originals + code + config + seed** (#417333 A6). Derived files need not be stored. |
+| **Source** data files? | Cannot be replaced by URL/script/checksum (#417280). |
+| PRESENT label for a short component? | `=1` at any duration; no minimum (#417333 A3). |
+| Voice/Music EER population? | Ground-truth `PRESENT=1`, not our predictions (#417333 A4). |
+| AI song / AI a cappella labels? | As we had them (#417333 A2). |
+| Who checks a dataset's licence? | 🔴 **We do.** DACON neither judges nor guarantees it (#417333 A7). |
+| Row-independence enforcement? | 🔴 Spot checks, **not automatic**; rigorous review after the competition (#417344). A valid score is not proof of compliance. |
+| 2nd-stage data delivery? | Google Drive, **no size cap** (#417336). |
 
 ### Open questions — status
 
-⏳ **Items 1–3 below are now pending with DACON via #417333** (asked by another participant on
-2026-09-05, not yet answered). Watch that thread rather than duplicating it.
+✅ **Items 1–3 of the previous list were answered by #417333 on 2026-09-08** and have moved into
+the summary above. What remains:
 
-1. Ground-truth labeling of **vocoder-resynthesized real speech** and **voice conversion** —
-   the rules say "AI로 생성된" is FAKE and pure post-processing is REAL, but VC/resynthesis sits
-   between. Same for AI-**separated** or AI-**upsampled** real audio.
-2. Whether the 1,200 test files are **balanced** across the three audio types (voice / music /
-   mixed) and across real/fake, since Voice EER and Music EER are computed on different subsets.
-3. Whether `FILE` ground truth on a file with, say, real voice + fake music is FAKE (the rule
-   implies yes — "하나라도 FAKE이면") — worth confirming explicitly.
-4. Whether TTS/music-generation **commercial APIs** (which have terms restricting use of outputs
-   for building competing/detection models) are acceptable given the redistribution requirement.
-   ⬜ *still unasked*
-5. 🔴 Whether **AI-Hub** datasets may be used, given **NIA (한국지능정보사회진흥원) is a 주최기관**
-   and operates AI-Hub — and whether submission for 2차 평가 counts as 제3자 제공.
-   ⬜ **still unasked, and unique to us** ([data/11 §1](../data/11-source-inventory.md))
+1. ⚠️ **Cell 9 is still open.** #417333 A3 answered the *duration* half of its question and said
+   nothing about files with **both `PRESENT=0`**, nor how `FILE_FAKE` is decided for **AI-generated
+   environmental sound**. If AI environmental sound is FAKE, that is a detection target we have not
+   planned for ([data/02](../data/02-label-taxonomy.md)). ⬜ *worth a direct ask*
+2. Whether the 1,200 test files are **balanced** across audio types and across real/fake, since
+   Voice EER and Music EER are computed on different subsets. ⬜ *still unasked*
+3. Whether TTS/music-generation **commercial APIs** — whose terms restrict using outputs to build
+   detection models — are acceptable. ⚠️ #417333 A7 makes this **our** call: DACON will not
+   adjudicate. Treat as ❌ unless a specific vendor's terms clearly permit it.
+4. 🔴 Whether **AI-Hub** datasets may be used, given **NIA is a 주최기관** and operates AI-Hub — and
+   whether submission for 2차 평가 counts as 제3자 제공.
+   ⬜ **still unasked, and still unique to us** ([data/11 §1](../data/11-source-inventory.md))
+
+⚠️ Note on #417136: a participant's comment reporting **two different model weights scoring
+identically** (submissions 82980, 83555) is still unanswered. Worth watching — if the scorer is
+insensitive in some regime, that affects how much we trust small leaderboard deltas.
 
 Post as `[DACON 답변 요청] ...`. Re-check with the `dacon-talkboard-sync` skill.
