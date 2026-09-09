@@ -14,7 +14,7 @@ Docs: 87 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGE
 | **A** | Prior-art survey | ✅ done → [`docs/survey/`](docs/survey/README.md) |
 | **+** | Kaggle intelligence | ✅ done → [`docs/kaggle/`](docs/kaggle/README.md) |
 | **+** | Paper research | ✅ done → [`docs/papers/`](docs/papers/INDEX.md) — ~75 indexed, 12 deep-read |
-| **B** | Data strategy | ✅ planned, ⬜ **not executed** → [`docs/data/`](docs/data/README.md) |
+| **B** | Data strategy | ✅ planned · 🟡 **executing** — 7 sources / 122.6 GiB in S3, 22 more queued → [`docs/data/12`](docs/data/12-acquisition-status.md) |
 | **C** | Validation design | ✅ designed → [`docs/validation/`](docs/validation/README.md) · ✅ metric pipeline shipped → [`metrics/`](metrics/AGENTS.md) · ✅ fold builder + VG1–VG6 wired → [`training/`](training/AGENTS.md) |
 | **D** | Model architecture | ✅ designed → [`docs/architecture/`](docs/architecture/README.md) · ✅ implemented → [`models/`](models/AGENTS.md) · ⬜ **no real frontends, nothing trained** |
 | **D+** | Training & data pipeline | ✅ designed → [`docs/pipelines/`](docs/pipelines/README.md) + [`docs/training/`](docs/training/README.md) · ✅ implemented → [`training/`](training/AGENTS.md) · ⬜ **never run on real audio — no corpus** |
@@ -155,6 +155,110 @@ Docs: 87 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGE
 - [x] **`synthetic.py` built its digest from Python's salted `hash()`**, contradicting its own "byte-identical corpora" claim — the exact hazard `spec.py` documents and avoids two files away
 - [x] 🔴 **The lesson, stated once**: an adversarial mutation pass on `loop.py` left **28 of 85 mutants alive** under a green 101-test suite. Three of the defects above were found by an agent *asking itself whether it had tested something*, not by running anything. Budget a review pass per module; a green suite is not evidence that a check can fail
 
+
+---
+
+## 🔴 2026-09-08 — talkboard #417333 answered all seven questions
+
+The single most consequential external update so far. Full text and quotes:
+[`competition/05`](docs/competition/05-talkboard-qa.md).
+
+**Against us — one planned source is retired**
+- ❌ **S-S1 / T3 resynthesis twins are dead.** A1: *음성·음악 성분을 새로 생성하지 않는 후처리만
+  적용된 경우 REAL로 간주합니다.* A codec round-trip, neural denoise or source separation of real
+  audio **reconstructs** — it does not generate — so the output is **REAL**. We had this listed as
+  the "cheapest family multiplier" for Pool B, which is exactly what made it dangerous: labelling
+  it FAKE would have trained the model to invert the target on the slice the test set most likely
+  contains ([`data/04`](docs/data/04-sources.md), [`data/05`](docs/data/05-synthesis-plan.md))
+- ✅ The same answer **promotes the REAL-processed slice from optional to required** (S-S1R). The
+  REAL class contains codec-round-tripped, enhanced and separated audio; a detector that never saw
+  processed REAL will false-positive on it. ⚠️ This makes REAL the *harder* class — the naive
+  reading "neural artifact ⇒ FAKE" is now wrong
+
+**For us — two open bets settled**
+- 🔴 **A5: ND data is usable**, augmentation included, if reproducible from 원본 파일 + 코드.
+  Unblocks **Codecfake** (crown jewel #4, 32 GB), **ST-Codecfake** (39 GB), **CtrSVDD** (31.6 GB,
+  260 h sung fake at 16 kHz), **SceneFake**, and ~63,000 ND tracks in FMA/Jamendo. Closes
+  [`survey/10 V2`](docs/survey/10-open-questions.md)
+- 🔴 **A6: on-the-fly composition is legal.** *가공 데이터는 원본 데이터와 재현 가능한
+  코드·설정값·seed 등을 제출하면 됩니다.* The entire [`data/06`](docs/data/06-augmentation-spec.md)
+  design rested on this. Consequence: `render(spec) == render(spec)` stops being an internal
+  nicety and becomes what the 2nd-stage submission is built on
+- ✅ A2 confirms the label taxonomy; A3 confirms `PRESENT=1` at **any** duration (the strongest
+  external support yet for the SED head and `0.5·clip + 0.5·frame_max`); A4 confirms masked EER on
+  ground-truth PRESENT, as [`metrics/`](metrics/AGENTS.md) implements
+- ⚠️ **A7: DACON will not adjudicate any dataset's licence.** The G2 gate in
+  [`scripts/sources.yaml`](scripts/sources.yaml) is the only licence check anyone will run
+
+**Still open**
+- ⚠️ **Cell 9 was NOT settled.** A3 answered only the duration half. Whether files exist with both
+  `PRESENT=0`, and whether AI-generated environmental sound is `FILE_FAKE`, remain unanswered
+
+**#417344 — row independence is spot-checked, not automatic**
+- 🔴 *운영진이 대회 기간 중 불시에 점검... 자동으로 이루어지는 방식이 아닙니다*, with rigorous
+  verification after the competition on award candidates. **A valid leaderboard score is not
+  evidence of compliance.** This is the strongest justification yet for the four rule-2.4
+  batch-dependence fixes in [`models/`](models/AGENTS.md) — each would have scored normally and
+  failed the post-hoc review
+
+**#417336 — 2차 평가 delivery: no size cap, Google Drive confirmed**
+
+---
+
+## 🟡 2026-09-10 — corpus acquisition running
+
+**7 sources, 122.6 GiB in `s3://<bucket>/dacon-deepfake-detection/data/raw/`**, each with a
+provenance record carrying its licence verdict and a sha256 per artifact.
+Full state: [`data/12`](docs/data/12-acquisition-status.md).
+
+- ✅ **Pools A and E are covered** — Korean (Zeroth-Korean + Common Voice ko), English read
+  (LibriTTS-R, LJSpeech), English crowd-sourced (Common Voice en, 88.1 GB), plus MUSAN noise and
+  RIRS impulse responses. Enough for the presence heads and the augmentation chain
+- ⬜ **Pools B, C and D remain empty.** 22 sources / 367 GB are cleared and queued; MLAAD is
+  in flight
+- 🔴 **Pool D (fake music) has no acquisition path at all.** It carries **0.27** of the metric —
+  more than voice — and nothing in the queue fills it. That is ACE-Step generation on a GPU, and
+  it is now the largest gap in the plan
+
+**Tooling shipped** — [`scripts/fetch_to_s3.py`](scripts/fetch_to_s3.py) +
+[`scripts/sources.yaml`](scripts/sources.yaml) (the G2 gate as data: the fetcher refuses any source
+whose verdict is not `ok`, and refuses an `ok` verdict not marked `verified_at_origin`) +
+[`scripts/filter_track_licences.py`](scripts/filter_track_licences.py) (per-track allowlists for
+FMA and MTG-Jamendo). 42 tests in
+[`tests/test_fetch_sources.py`](tests/test_fetch_sources.py).
+
+**🔴 Five defects, none found by a test going red.** Every one surfaced from watching a transfer
+run — the same pattern [`pipelines/05`](docs/pipelines/05-invariants.md) records for the training
+loop:
+
+- `curl --retry` with `-C -` re-requests from the offset fixed at process start, so Common Voice
+  English went **backwards 74 GB → 45 GB** and could never converge
+- `pkill -f` matched only the Python parent, leaving an **orphaned curl at `PPID=1`** writing into
+  the same path as its replacement — two writers, different offsets
+- those two together produced **118.3 GB against an expected 94.6 GB (125%)**: corrupt, and
+  unresumable because `-C -` then asks past EOF. ⚠️ **Size was the only visible symptom** — which
+  is why publisher checksums are now verified where they exist, and CV-English's final
+  `sha256 6809228e…` matched MDC's published value
+- a `finally` block deleted staging on failure, restarting a 66%-complete 88 GB transfer four times
+- HF datasets resolved one URL at a time, flattening `fake/<lang>/<generator>/<file>` and
+  destroying the **generator-disjoint split axis**
+
+⚠️ **The HF API's `siblings` field undercounts by 5×** — 99,411 reported for MLAAD, 534,539 actual.
+The gap was 174 GB against an assumed 30.
+
+🔴 **MLAAD is capped at 30 files per generator directory ≈ 30.1 h**, matching the
+[`data/04`](docs/data/04-sources.md) budget. The first value shipped was 300/dir = **301 h**, 10×
+the budget and enough to make MLAAD ~80% of a 70 h Pool B — the exact imbalance DOSS argues
+against. Selection is seeded and recorded in `_meta/selection.json`, because
+[#417333 A6](docs/competition/05-talkboard-qa.md) makes reproducibility from originals + code +
+seed what the 2nd-stage submission rests on
+([`data/12 §4b`](docs/data/12-acquisition-status.md#4b--the-mlaad-cap-a-corpus-decision-not-a-download-setting)).
+
+⚠️ **Confirm the bucket's region matches the training machine's.** Ingress was free; every read
+back out is billed as egress, and training reads the corpus repeatedly. Retargeting is one env var
+(`DACON_S3_BUCKET` / `DACON_S3_PREFIX`) and is cheaper before the corpus grows further.
+
+ℹ️ Storage and compute are **personal resources** provisioned for this competition.
 
 ---
 
