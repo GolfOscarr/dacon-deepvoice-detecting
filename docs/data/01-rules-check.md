@@ -75,10 +75,10 @@ set. Three mitigations:
 | **Self-generated** with open-weight models | ✅ | We own the files. The backbone of the plan. |
 | **CC-BY / CC0 / public-domain** corpora | ✅ | Redistributable |
 | **CC-BY-NC / CC-BY-NC-SA** corpora | ✅ | Explicitly confirmed by DACON (#417212) |
-| **CC-\*-ND** corpora | ⚠️ | NoDerivatives may bar augmented copies — legal review ([V2](../survey/10-open-questions.md)) |
+| **CC-\*-ND** corpora | ✅ | 🔴 **Resolved 2026-09-08** by [#417333 A5](../competition/05-talkboard-qa.md): usable, augmentation included, provided the result is reproducible from **원본 파일 + 코드**. Train from originals and ship originals + code — never a redistributed derivative |
 | Research datasets with permissive terms | ✅ | Verify each ([06-datasets](../survey/06-datasets.md)) |
 | **Scraped web/YouTube audio** | ❌ | This document |
-| **Commercial generative API outputs** | ⚠️→❌ | ToS + redistribution; assume no until verified |
+| **Commercial generative API outputs** | ⚠️→❌ | ToS + redistribution; assume no until verified. [#417333 A7](../competition/05-talkboard-qa.md) confirms **DACON will not adjudicate** any licence — the call is ours alone |
 
 ## Verification duty
 

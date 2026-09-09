@@ -1,5 +1,12 @@
 # 06 — Augmentation Method Catalog (tiered)
 
+> 🔴 **Confirmed 2026-09-08.** This whole design rested on one unanswered question — whether
+> composed/augmented training data must be shipped as files. [#417333 A6](../competition/05-talkboard-qa.md)
+> answers it: *가공 데이터는 원본 데이터와 재현 가능한 코드·설정값·seed 등을 제출하면 됩니다.*
+> On-the-fly composition is legal and composed output need not be stored. Note the consequence:
+> `render(spec) == render(spec)` ([`training/`](../../training/AGENTS.md)) stops being an internal
+> nicety and becomes the thing the 2nd-stage submission is built on.
+
 Implemented as **on-the-fly, seeded transforms** over the four pools — never as a pre-rendered
 corpus. That is both a training win (unbounded variety from a small pool) and a compliance win:
 DACON confirmed (#417280) that augmentation intermediates need not be submitted if we provide
