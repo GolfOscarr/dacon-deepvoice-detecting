@@ -1,0 +1,826 @@
+# Acquisition registry -- the declarative half of scripts/fetch_to_s3.py.
+#
+# Critical: `redistribution` is the G2 gate (docs/data/10 section 5) expressed as
+# data. The fetcher refuses any source whose verdict is not `ok`, so adding a
+# download URL is not by itself enough to acquire something -- somebody has to
+# record a licence verdict first. That ordering is the whole point: DACON
+# requires shipping the actual training files (#417280), so a source we cannot
+# redistribute is a source we cannot train on, and finding that out after the
+# download means rebuilding the corpus.
+#
+# Fields per source:
+#   name          directory name under the raw prefix, and `source_name` in the
+#                 provenance ledger. Critical: this is the coarse key only --
+#                 the per-file ledger still needs track/speaker granularity,
+#                 which cannot be retrofitted (docs/data/08).
+#   version       immutable release identifier. Part of the S3 path, so a new
+#                 release lands beside the old one rather than overwriting it.
+#   pool          A-E per docs/data/02, or `mixed` when one archive spans pools.
+#   status        ready | needs_terms | needs_request | needs_review | blocked
+#   redistribution  ok | review | no    <- the gate the fetcher enforces
+#   verified_at_origin  whether somebody read the licence on the dataset's own
+#                 page. Reported-from-a-secondary-source is not verification;
+#                 docs/data/11 says every row starts unverified.
+#   fetch.kind    http | mdc | hf | kaggle
+#
+# Caveat: `bytes` is what the server advertised on the date below. It is a
+# planning figure for disk and cost, not a checksum -- the fetcher records the
+# real sha256 of what it actually received.
+
+schema_version: 1
+compiled: "2026-09-08"
+
+sources:
+
+  # -----------------------------------------------------------------------
+  # READY -- licence read at origin on the date shown, no human action left.
+  # -----------------------------------------------------------------------
+
+  - name: zeroth-korean
+    version: openslr-40
+    pool: A
+    status: ready
+    redistribution: ok
+    licence: CC BY 4.0
+    licence_url: https://www.openslr.org/40/
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: >-
+      openslr.org/40 states "License: Attribution 4.0 International (CC BY 4.0)".
+    why: >-
+      The Korean anchor. 51.6 h, 105 speakers, and the only clean Korean source
+      with an unambiguous redistribution licence. Common Voice Korean is 0.22 GB
+      and does not replace it.
+    fetch:
+      kind: http
+      urls:
+        - https://www.openslr.org/resources/40/zeroth_korean.tar.gz
+      bytes: 10339720618
+
+  - name: musan
+    version: openslr-17
+    pool: E
+    status: ready
+    redistribution: ok
+    licence: CC BY 4.0
+    licence_url: https://www.openslr.org/17/
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: >-
+      openslr.org/17 states "License: Attribution 4.0 International (CC BY 4.0)".
+    why: >-
+      Pool E noise for the augmentation chain.
+    caveat: >-
+      Critical: MUSAN ships a `music` partition. Never feed it in as noise --
+      docs/data/06 explains that it would put real music into the noise role and
+      corrupt the music-present labels.
+    fetch:
+      kind: http
+      urls:
+        - https://www.openslr.org/resources/17/musan.tar.gz
+      bytes: 11086114085
+
+  - name: rirs-noises
+    version: openslr-28
+    pool: E
+    status: ready
+    redistribution: ok
+    licence: Apache-2.0
+    licence_url: https://www.openslr.org/28/
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: 'openslr.org/28 states "License: Apache 2.0".'
+    why: Room impulse responses for the reverberation augmentation (A-S2).
+    fetch:
+      kind: http
+      urls:
+        - https://www.openslr.org/resources/28/rirs_noises.zip
+      bytes: 1311166223
+
+  - name: libritts-r
+    version: openslr-141
+    pool: A
+    status: ready
+    redistribution: ok
+    licence: CC BY 4.0
+    licence_url: https://www.openslr.org/141/
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: 'openslr.org/141 states "License: CC BY 4.0".'
+    why: >-
+      The largest permissive real-voice source, and it ships transcripts -- which
+      is what makes the T2/T3 paired-twin design in docs/data/05 possible at all.
+    caveat: >-
+      train_clean_360 alone is 29 GB against a ~25 h Pool A budget. Take
+      train_clean_100 first and subset by speaker; the fold builder needs
+      speaker-disjoint splits, so pulling more speakers matters more than more
+      hours from the same ones.
+    fetch:
+      kind: http
+      urls:
+        - https://www.openslr.org/resources/141/doc.tar.gz
+        - https://www.openslr.org/resources/141/dev_clean.tar.gz
+        - https://www.openslr.org/resources/141/test_clean.tar.gz
+        - https://www.openslr.org/resources/141/train_clean_100.tar.gz
+      bytes: 10500000000
+
+  # -----------------------------------------------------------------------
+  # NEEDS_TERMS -- one browser click by the account holder, then `ready`.
+  # The credential is already in .env; what is missing is the click.
+  # -----------------------------------------------------------------------
+
+  - name: common-voice-ko
+    version: cv-26.0
+    pool: A
+    status: ready
+    redistribution: ok
+    licence: CC0-1.0
+    licence_url: https://mozilladatacollective.com/datasets/cmqi922c5001pnq07dmj0oypw
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: >-
+      MDC API reports licenceAbbreviation "CC0-1.0" for this dataset id. CC0 is
+      the cleanest verdict available to us -- no attribution chain to maintain
+      and no NC clause to argue about.
+    terms_accepted: "2026-09-08"   # accepted by the MDC_API_KEY owner;
+                                   # POST /download now returns a presigned URL
+    why: A free Korean bonus on top of Zeroth-Korean. 0.22 GB, so a few hours at most.
+    fetch:
+      kind: mdc
+      dataset_id: cmqi922c5001pnq07dmj0oypw
+      bytes: 218377884
+      sha256: 169b269b86f0acd959d3f2fd1c098838ec458dbe0d4077a62b4bdb31ab2e8c4b   # published by MDC; verified after download
+
+  - name: common-voice-en
+    version: cv-26.0
+    pool: A
+    status: ready
+    redistribution: ok
+    licence: CC0-1.0
+    licence_url: https://mozilladatacollective.com/datasets
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: MDC API reports licenceAbbreviation "CC0-1.0".
+    terms_accepted: "2026-09-08"
+    why: >-
+      Speaker and channel diversity at scale -- crowd-recorded rather than
+      studio, which is the half of Pool A that LibriTTS-R does not cover.
+    caveat: >-
+      94.6 GB against a 20 h budget. Fetch it, then subset by client_id; do not
+      unpack the whole thing into training.
+    fetch:
+      kind: mdc
+      dataset_id: cmqim2hn800ssnr07gvmpcnwu
+      bytes: 94639372950
+      sha256: 6809228e6ab506d18f6a1ebc830056450f8266c8f513d6038bdb0fc88a49e6cb   # published by MDC; verified after download
+
+  - name: ljspeech
+    version: mdc-1.1
+    pool: A
+    status: ready
+    redistribution: ok
+    licence: CC0-1.0
+    licence_url: https://mozilladatacollective.com/datasets
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: MDC API reports licenceAbbreviation "CC0-1.0".
+    terms_accepted: "2026-09-08"
+    why: >-
+      The reference real corpus for WaveFake and several vocoder sets -- holding
+      it makes those fakes into matched T3 pairs rather than unpaired fakes.
+    fetch:
+      kind: mdc
+      dataset_id: cmonjhxee01ako007kohpbg34
+      bytes: 3220000000
+
+  - name: mlaad
+    version: v9
+    pool: B
+    status: ready
+    redistribution: ok
+    licence: CC BY-NC 4.0
+    licence_url: https://huggingface.co/datasets/mueller91/MLAAD
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: >-
+      Repo metadata declares license: cc-by-nc-4.0 (cardData and the
+      license:cc-by-nc-4.0 tag). Usable per #417212.
+    terms_accepted: "2026-09-08"   # HF gate cleared; resolve returns HTTP 200
+    why: >-
+      175 TTS models, 1002.9 h, 54 languages. Generalisation to unseen
+      generators is the binding constraint and nothing else comes close.
+    caveat: >-
+      Critical: capped, not taken whole. The repo holds 534,539 files (~174 GB,
+      1002.9 h) and docs/data/04 budgets 30 h from it. An uncapped pull measured
+      at ~32 h of wall clock for 33x the audio the plan asks for -- and DOSS says
+      a domain-balanced 0.2k h beats a naive 6.4k h, so it is also the worse
+      corpus. cap_per_dir caps the LEAF directory, which in MLAAD's
+      fake/<language>/<generator>/ layout is the generator: all 175 families are
+      kept, none is taken whole. Selection is seeded and written to
+      _meta/selection.json so the subset is reproducible.
+      Caveat: the HF API's `siblings` field reports 99,411 for this repo -- a 5x
+      undercount. list_repo_files is the number that matches reality.
+    caveat_compliance: >-
+      Critical: #417212 permits NC data only 해당 라이선스 조건을 준수하는 경우.
+      Attribute MLAAD in the 2nd-stage 데이터 구성 보고서 and keep it out of any
+      commercial use. Its 175 generator families are also our main
+      generator-disjoint split axis, so record the generator per file at
+      ingest -- that assignment must be decided before training, not after.
+    fetch:
+      kind: hf
+      repo_id: mueller91/MLAAD
+      repo_type: dataset
+      cap_per_dir: 30       # ~30.1 h of audio -- the docs/data/04 budget
+      seed: 0
+
+  - name: compspoof-v2
+    version: ESDD2
+    pool: mixed
+    status: ready
+    redistribution: ok
+    licence: CC BY-NC 4.0
+    licence_url: https://huggingface.co/datasets/XuepingZhang/ESDD2-CompSpoof-V2
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: >-
+      Repo metadata declares license: cc-by-nc-4.0. Its own gate text
+      itemises the components: MLAAD and VCapAV under CC BY-NC 4.0, LibriTTS /
+      EnvSDD / VGGSound under CC BY 4.0, Common Voice under CC0. Usable per #417212.
+    requirement: Same HF gated=auto click. Current token gets HTTP 403 (checked 2026-09-08).
+    why: >-
+      The only public dataset with our exact label structure -- every
+      combination of bona fide / spoofed speech x environmental sound. This is
+      cells 6/7 of docs/data/02 handed to us.
+    caveat_compliance: >-
+      Critical: NC applies here too, and the corpus is itself a mix -- MLAAD
+      and VCapAV are CC BY-NC 4.0, LibriTTS / EnvSDD / VGGSound CC BY 4.0,
+      Common Voice CC0. Attribute all of them. Caveat: it shares MLAAD and
+      LibriTTS upstream with our own Pool A/B, so the fold builder must treat
+      those as the SAME source, or a speaker will land on both sides of a split.
+    fetch:
+      kind: hf
+      repo_id: XuepingZhang/ESDD2-CompSpoof-V2
+      repo_type: dataset
+
+  # -----------------------------------------------------------------------
+  # NEEDS_REVIEW -- reachable right now, but the licence verdict is not one
+  # verdict. Per-track licensing means the archive is a mix of redistributable
+  # and not, so it cannot be waved through as a whole.
+  # -----------------------------------------------------------------------
+
+  - name: mtg-jamendo
+    version: raw_30s
+    pool: C
+    status: ready
+    redistribution: ok
+    licence: dataset code Apache-2.0; audio per-track CC (mixed)
+    licence_url: https://mtg.github.io/mtg-jamendo-dataset/
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    why: >-
+      Real instrumental at scale, and the 195 genre tags double as TTM prompts
+      for the paired Pool D generation (docs/data/05 S-A4).
+    caveat: >-
+      raw_30s is 100 shards of ~5.4 GB. Against a ~25 h Pool C budget, one or
+      two shards is the right order, not the set.
+    verified_note: >-
+      Partitioned from the dataset's own audio_licenses.txt by
+      scripts/filter_track_licences.py on 2026-09-08. 55,701 tracks: 36,728
+      allow (65.9%), 18,887 NoDerivatives (33.9%), 86 deny (0.2%).
+      Critical: the licence is NOT in raw.tsv -- that carries only
+      TRACK_ID / ARTIST_ID / ALBUM_ID / PATH / DURATION / TAGS. A filter built
+      from the TSV would silently pass every track. audio_licenses.txt lives at
+      the repo ROOT, not under data/ where the TSVs are.
+    caveat_compliance: >-
+      Only track ids in jamendo_allow.csv may enter the corpus; the ND third is
+      held out. Most of the allow bucket is BY-NC-SA, so honour attribution and
+      non-commercial terms, and note docs/competition/05's warning about SA
+      propagating into the model deliverable.
+    fetch:
+      kind: http
+      urls:
+        - https://cdn.freesound.org/mtg-jamendo/raw_30s/audio/raw_30s_audio-00.tar
+      bytes: 5449502720
+
+  - name: fma
+    version: fma_small
+    pool: C
+    status: ready
+    redistribution: ok
+    licence: per-track CC (mixed, incl. ND variants)
+    licence_url: https://github.com/mdeff/fma
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    why: Second real-instrumental source, useful for source-disjoint folds.
+    caveat: fma_full is 943 GB. Never fetch it; fma_small is 7.7 GB.
+    verified_note: >-
+      Partitioned from the dataset's own raw_tracks.csv license_title field by
+      scripts/filter_track_licences.py on 2026-09-08. 109,727 tracks: 62,121
+      allow (56.6%), 44,652 NoDerivatives (40.7%), 2,954 deny (2.7%, almost all
+      "FMA-Limited: Download Only").
+    caveat_compliance: >-
+      Critical: the archive is cleared, individual tracks are NOT. Only track
+      ids in fma_allow.csv may enter the corpus. The ND bucket is held out
+      pending the same legal read CtrSVDD is waiting on -- ND permits provision
+      of the unmodified file but plausibly bars the augmented derivative we
+      would actually train on (docs/data/06). Caveat: fma_small is an 8,000-track
+      subset, so intersect the allow list with whatever subset is downloaded.
+      The deny bucket is deliberately conservative -- 86 Art Libre tracks are
+      almost certainly redistributable and are excluded anyway, because an
+      unrecognised licence string is not evidence of permission.
+    fetch:
+      kind: http
+      urls:
+        - https://os.unil.cloud.switch.ch/fma/fma_metadata.zip
+        - https://os.unil.cloud.switch.ch/fma/fma_small.zip
+      bytes: 7679594875
+
+  # -----------------------------------------------------------------------
+  # NEEDS_REQUEST -- a human approves, with multi-day latency. Start early.
+  # -----------------------------------------------------------------------
+
+  - name: musdb18-hq
+    version: zenodo-3338373
+    pool: mixed
+    status: ready
+    redistribution: ok
+    licence: >-
+      "educational purposes only", non-commercial, and FOUR different upstream
+      licences in one archive
+    licence_url: https://zenodo.org/records/3338373
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: >-
+      Read from the Zenodo record itself. Zenodo tags it `other-nc`, and the
+      description breaks the 150 tracks down as: 100 from DSD100 (itself derived
+      from the 'Mixing Secrets' Free Multitrack Download Library, with rights
+      questions deferred to that original resource), 46 from MedleyDB under
+      CC BY-NC-SA 4.0, 2 supplied by Native Instruments with no licence stated,
+      and 2 from The Easton Ellises under CC BY-NC-SA 3.0.
+    verdict_reasoning: >-
+      Cleared against the rule text rather than against the shape of the
+      licence, which is what an earlier reading of this row got wrong.
+      #417280 answer 1 opens with the sentence that decides it: "운영진 검증
+      목적의 제출은 일반적인 공개 혹은 재배포와는 구분됩니다" -- submitting to
+      DACON for verification is NOT redistribution. The single bar it then sets
+      is data "라이선스상 제3자 제공 자체가 제한되는" -- where the licence
+      restricts third-party provision *itself*.
+      MUSDB18-HQ does not. It carries no anti-redistribution clause; it is
+      served anonymously to anyone, DACON included; what it restricts is
+      *commercial use*, which is a different thing. And #417212 settles that
+      shape directly: CC-BY-NC and even CC-BY-NC-SA are usable when the licence
+      terms are complied with. #417310 adds that external public data keeps its
+      own licence and is not swallowed by the winning-work exclusivity clause.
+      The four-way upstream split is therefore a compliance duty, not a bar --
+      the two components with no stated licence are published by the dataset's
+      own authors as part of a public corpus, and nothing in them restricts
+      provision.
+    caveat_compliance: >-
+      Critical: #417212's answer turns on "해당 라이선스 조건을 준수하는 경우",
+      so the non-commercial and attribution terms are ours to honour. Cite
+      MUSDB18-HQ in the 2nd-stage 데이터 구성 보고서, and keep it out of
+      anything sold. Note also that 46 of the tracks are MedleyDB under
+      CC-BY-NC-**SA**: docs/competition/05 flags SA propagation into the model
+      deliverable as a genuine tension, so prefer these tracks as *training
+      input* rather than shipping derived stems.
+    why: >-
+      150 tracks with isolated stems -- the keystone for building the 4-way
+      voice x music grid ourselves rather than hoping to find it.
+    caveat: >-
+      If the verdict goes against us, the fallback for isolated stems is
+      MedleyDB directly (CC BY-NC-SA 4.0, and already the source of 46 of these
+      tracks), MoisesDB, or Slakh2100 -- which is synthesised from MIDI and so
+      has the cleanest provenance of the three.
+    fetch:
+      kind: http
+      urls:
+        - https://zenodo.org/records/3338373/files/musdb18hq.zip?download=1
+      bytes: 22656664047
+
+  - name: vctk
+    version: "0.92"
+    pool: A
+    status: ready
+    defer: true
+    caveat: >-
+      Deferred on throughput, not on rights. Edinburgh DataShare throttled this
+      transfer from ~1.1 MB/s to 73 KB/s partway through -- a 14-hour tail that
+      was holding up MLAAD, MUSDB18-HQ and CompSpoof V2 behind it. The licence
+      is clean and the partial download is preserved; `fetch_to_s3.py vctk`
+      resumes from where it stopped via HTTP Range. Nice-to-have Pool A speaker
+      diversity should not block Pool B crown jewels.
+    redistribution: ok
+    licence: CC BY 4.0
+    licence_url: https://datashare.ed.ac.uk/handle/10283/3443
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: >-
+      The record's own license_text.txt is the full CC BY 4.0 legalcode.
+      Correction to an earlier reading: the bulk URL /download/DS_10283_3443.zip
+      serves anonymously (HTTP 200, 11.7 GB). The 4 KB HTML page seen earlier
+      was a wrong bitstream path, not a click-through wall -- there is no
+      interstitial to clear.
+    why: 109 English accents, clean studio -- speaker diversity for Pool A.
+    fetch:
+      kind: http
+      urls:
+        - https://datashare.ed.ac.uk/download/DS_10283_3443.zip
+      bytes: 11749118645
+
+  - name: asvspoof2019
+    version: DS_10283_3336
+    pool: B
+    status: needs_review
+    redistribution: review
+    licence: ODC-BY (reported)
+    licence_url: https://datashare.ed.ac.uk/handle/10283/3336
+    verified_at_origin: false
+    requirement: >-
+      The archive serves anonymously (HTTP 200, 25.3 GB, checked 2026-09-08),
+      but the licence file is not exposed as a bitstream -- probing LICENSE.txt,
+      license.txt, LICENCE.txt and README.txt all return the DSpace SPA shell.
+      It ships inside the zip, so the honest order is: download, read the
+      LICENSE, then record the verdict. Reading a licence is not using the data.
+    why: >-
+      The classic TTS/VC baseline, and its bona fide half is channel-degraded
+      real speech we would otherwise have to simulate.
+    fetch:
+      kind: http
+      urls:
+        - https://datashare.ed.ac.uk/download/DS_10283_3336.zip
+      bytes: 25314663021
+
+
+  - name: partialspoof
+    version: zenodo-4817532
+    pool: B
+    status: ready
+    redistribution: ok
+    licence: CC BY 4.0
+    licence_url: https://zenodo.org/records/4817532
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: >-
+      Zenodo's own record metadata reports license id
+      "cc-by-4.0". Read via the Zenodo API, not a secondary source.
+    why: >-
+      Segment-level labels at 20-640 ms -- the only public source that trains the frame_max head directly (models/heads).
+    fetch:
+      kind: http
+      urls:
+        - https://zenodo.org/records/4817532/files/database_protocols.tar.gz?download=1
+        - https://zenodo.org/records/4817532/files/database_dev.tar.gz?download=1
+        - https://zenodo.org/records/4817532/files/database_eval.tar.gz.aa?download=1
+        - https://zenodo.org/records/4817532/files/database_eval.tar.gz.ab?download=1
+        - https://zenodo.org/records/4817532/files/README?download=1
+        - https://zenodo.org/records/4817532/files/database_eval.tar.gz.ac?download=1
+        - https://zenodo.org/records/4817532/files/database_train.tar.gz?download=1
+      bytes: 9892504538
+
+  - name: wavefake
+    version: zenodo-5642694
+    pool: B
+    status: ready
+    redistribution: ok
+    licence: CC BY-SA 4.0
+    licence_url: https://zenodo.org/records/5642694
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: >-
+      Zenodo's own record metadata reports license id
+      "cc-by-sa-4.0". Read via the Zenodo API, not a secondary source.
+    why: >-
+      7 vocoder networks over LJSpeech and JSUT. We hold LJSpeech, so these are matched T3 twins rather than unpaired fakes.
+    caveat_compliance: >-
+      ShareAlike. docs/competition/05 flags SA propagating into the model
+      deliverable as a genuine tension -- use as training input, and do not
+      ship derived artefacts under a conflicting licence.
+    fetch:
+      kind: http
+      urls:
+        - https://zenodo.org/records/5642694/files/LICENSE?download=1
+        - https://zenodo.org/records/5642694/files/datasheet.pdf?download=1
+        - https://zenodo.org/records/5642694/files/generated_audio.zip?download=1
+      bytes: 28918807591
+
+  - name: asvspoof2021-la
+    version: zenodo-4837263
+    pool: B
+    status: ready
+    redistribution: ok
+    licence: ODC-BY
+    licence_url: https://zenodo.org/records/4837263
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: >-
+      Zenodo's own record metadata reports license id
+      "odc-by". Read via the Zenodo API, not a secondary source.
+    why: >-
+      The telephony/codec asset. The test set explicitly contains 전화채널 audio and this is the best public source of genuine transmission degradation.
+    fetch:
+      kind: http
+      urls:
+        - https://zenodo.org/records/4837263/files/ASVspoof2021_LA_eval.tar.gz?download=1
+      bytes: 7763666128
+
+  - name: asvspoof5
+    version: zenodo-14498691
+    pool: B
+    status: ready
+    redistribution: ok
+    defer: true
+    caveat: >-
+      142 GB against a ~70 h Pool B budget -- deliberately left out of --all.
+      Critical: DOSS measured 0.2k h domain-balanced beating 6.4k h naive
+      (2.77% vs 3.29% EER), so taking one generator family whole is the failure
+      mode, not the win. Fetch by name only after deciding which subset earns
+      its place, and cap per domain the way docs/data/08 specifies.
+    licence: ODC-BY
+    licence_url: https://zenodo.org/records/14498691
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: >-
+      Zenodo's own record metadata reports license id
+      "odc-by". Read via the Zenodo API, not a secondary source.
+    why: >-
+      Crowdsourced, adversarial attacks; the current generation of the ASVspoof line.
+    fetch:
+      kind: http
+      urls:
+        - https://zenodo.org/records/14498691/files/flac_D_aa.tar?download=1
+        - https://zenodo.org/records/14498691/files/flac_D_ab.tar?download=1
+        - https://zenodo.org/records/14498691/files/flac_D_ac.tar?download=1
+        - https://zenodo.org/records/14498691/files/flac_E_aa.tar?download=1
+        - https://zenodo.org/records/14498691/files/flac_E_ae.tar?download=1
+        - https://zenodo.org/records/14498691/files/README.txt?download=1
+        - https://zenodo.org/records/14498691/files/flac_E_ah.tar?download=1
+        - https://zenodo.org/records/14498691/files/flac_E_ai.tar?download=1
+        - https://zenodo.org/records/14498691/files/flac_E_aj.tar?download=1
+        - https://zenodo.org/records/14498691/files/flac_E_ab.tar?download=1
+        - https://zenodo.org/records/14498691/files/flac_E_af.tar?download=1
+        - https://zenodo.org/records/14498691/files/flac_E_ag.tar?download=1
+        - https://zenodo.org/records/14498691/files/flac_E_ac.tar?download=1
+        - https://zenodo.org/records/14498691/files/flac_E_ad.tar?download=1
+        - https://zenodo.org/records/14498691/files/LICENSE.txt?download=1
+        - https://zenodo.org/records/14498691/files/flac_T_aa.tar?download=1
+        - https://zenodo.org/records/14498691/files/flac_T_ab.tar?download=1
+        - https://zenodo.org/records/14498691/files/flac_T_ac.tar?download=1
+        - https://zenodo.org/records/14498691/files/flac_T_ad.tar?download=1
+        - https://zenodo.org/records/14498691/files/flac_T_ae.tar?download=1
+        - https://zenodo.org/records/14498691/files/ASVspoof5_protocols.tar.gz?download=1
+      bytes: 142339866903
+
+  - name: cfad
+    version: zenodo-8122764
+    pool: B
+    status: ready
+    redistribution: ok
+    licence: CC BY 4.0
+    licence_url: https://zenodo.org/records/8122764
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: >-
+      Zenodo's own record metadata reports license id
+      "cc-by-4.0". Read via the Zenodo API, not a secondary source.
+    why: >-
+      Chinese fake audio -- language breadth beyond en/ko, and CC BY 4.0 is a clean verdict.
+    fetch:
+      kind: http
+      urls:
+        - https://zenodo.org/records/8122764/files/CFAD.z03?download=1
+        - https://zenodo.org/records/8122764/files/CFAD.z02?download=1
+        - https://zenodo.org/records/8122764/files/CFAD.z01?download=1
+        - https://zenodo.org/records/8122764/files/CFAD.zip?download=1
+      bytes: 35615159333
+
+  - name: timit-tts
+    version: zenodo-6560159
+    pool: B
+    status: ready
+    redistribution: ok
+    licence: CC BY 4.0
+    licence_url: https://zenodo.org/records/6560159
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: >-
+      Zenodo's own record metadata reports license id
+      "cc-by-4.0". Read via the Zenodo API, not a secondary source.
+    why: >-
+      TTS over TIMIT prompts. Note the TIMIT *audio* is LDC-licensed and unusable; this synthetic set is separately licensed.
+    fetch:
+      kind: http
+      urls:
+        - https://zenodo.org/records/6560159/files/TIMIT-TTS.zip?download=1
+      bytes: 7190314958
+
+  - name: rfp
+    version: zenodo-10202142
+    pool: B
+    status: ready
+    redistribution: ok
+    licence: CC BY-NC 4.0
+    licence_url: https://zenodo.org/records/10202142
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: >-
+      Zenodo's own record metadata reports license id
+      "cc-by-nc-4.0". Read via the Zenodo API, not a secondary source.
+    why: >-
+      Real, fake and partially-fake audio in one set.
+    caveat_compliance: >-
+      #417212 permits NC only 해당 라이선스 조건을 준수하는 경우 -- attribute in
+      the 2nd-stage 데이터 구성 보고서 and keep out of commercial use.
+    fetch:
+      kind: http
+      urls:
+        - https://zenodo.org/records/10202142/files/RFP_original.zx01?download=1
+        - https://zenodo.org/records/10202142/files/RFP_original.zx02?download=1
+        - https://zenodo.org/records/10202142/files/RFP_Norm.zipx?download=1
+        - https://zenodo.org/records/10202142/files/RFP_Norm.zx02?download=1
+        - https://zenodo.org/records/10202142/files/RFP_Norm.zx01?download=1
+        - https://zenodo.org/records/10202142/files/RFP_original.zipx?download=1
+      bytes: 40350878094
+
+  # ------------------------------------------------------------------
+  # ND -- provision of the unmodified file is fine, the *derivative* is
+  # the question, and our whole pipeline is derivatives (docs/data/06).
+  # One legal read unblocks every row here plus ~63k music tracks.
+  # ------------------------------------------------------------------
+
+  - name: codecfake
+    version: zenodo-13838106
+    pool: B
+    status: ready
+    redistribution: ok
+    licence: CC BY-NC-ND 4.0
+    licence_url: https://zenodo.org/records/13838106
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: >-
+      Zenodo record metadata reports license id "cc-by-nc-nd-4.0". 32.1 GB
+      across 7 files.
+    why: >-
+      Inventory crown jewel #4. Modern TTS generates directly from neural codecs,
+      skipping the vocoder, and vocoder-trained detectors are structurally blind
+      to that family (survey/01).
+    caveat_compliance: >-
+      Critical: ND is usable only in the form #417333 A5 grants. Train from the
+      ORIGINAL files, apply augmentation at training time, and ship 원본 파일 +
+      코드 -- never a redistributed derivative. That is what our pipeline
+      already does: sampling is separate from rendering and composed output is
+      never stored (training/AGENTS.md), so the grant matches the design rather
+      than constraining it. NC still applies: attribute in the 데이터 구성 보고서.
+    fetch:
+      kind: http
+      urls:
+        - https://zenodo.org/records/13838106/files/train_split.z05?download=1
+        - https://zenodo.org/records/13838106/files/train_split.z03?download=1
+        - https://zenodo.org/records/13838106/files/label.zip?download=1
+        - https://zenodo.org/records/13838106/files/train_split.z02?download=1
+        - https://zenodo.org/records/13838106/files/train_split.z04?download=1
+        - https://zenodo.org/records/13838106/files/train_split.z01?download=1
+        - https://zenodo.org/records/13838106/files/train_split.zip?download=1
+      bytes: 32065561685
+
+  - name: st-codecfake
+    version: zenodo-14631091
+    pool: B
+    status: ready
+    redistribution: ok
+    licence: CC BY-NC-ND 4.0
+    licence_url: https://zenodo.org/records/14631091
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: Zenodo record metadata reports license id "cc-by-nc-nd-4.0".
+    blocker: Same ND read as codecfake.
+    why: >-
+      Source-tracing companion to codecfake.
+    caveat_compliance: >-
+      Critical: ND is usable only in the form #417333 A5 grants. Train from the
+      ORIGINAL files, apply augmentation at training time, and ship 원본 파일 +
+      코드 -- never a redistributed derivative. That is what our pipeline
+      already does: sampling is separate from rendering and composed output is
+      never stored (training/AGENTS.md), so the grant matches the design rather
+      than constraining it. NC still applies: attribute in the 데이터 구성 보고서.
+    fetch:
+      kind: http
+      urls:
+        - https://zenodo.org/records/14631091/files/train.zip?download=1
+        - https://zenodo.org/records/14631091/files/eval_ood.zip?download=1
+        - https://zenodo.org/records/14631091/files/label.zip?download=1
+        - https://zenodo.org/records/14631091/files/dev.zip?download=1
+        - https://zenodo.org/records/14631091/files/eval_id.zip?download=1
+      bytes: 39276870876
+
+  - name: scenefake
+    version: zenodo-7663324
+    pool: B
+    status: ready
+    redistribution: ok
+    licence: CC BY-NC-ND 4.0
+    licence_url: https://zenodo.org/records/7663324
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: Zenodo record metadata reports license id "cc-by-nc-nd-4.0".
+    why: >-
+      Tampers the acoustic *scene* while leaving the speech genuine -- the one
+      public analogue of our real-voice + fake-background cells.
+    caveat_compliance: >-
+      Critical: ND is usable only in the form #417333 A5 grants. Train from the
+      ORIGINAL files, apply augmentation at training time, and ship 원본 파일 +
+      코드 -- never a redistributed derivative. That is what our pipeline
+      already does: sampling is separate from rendering and composed output is
+      never stored (training/AGENTS.md), so the grant matches the design rather
+      than constraining it. NC still applies: attribute in the 데이터 구성 보고서.
+    fetch:
+      kind: http
+      urls:
+        - https://zenodo.org/records/7663324/files/SceneFake.zip?download=1
+      bytes: 5767572234
+
+  - name: odss
+    version: zenodo-8370669
+    pool: B
+    status: blocked
+    redistribution: "no"
+    licence: none stated
+    licence_url: https://zenodo.org/records/8370669
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    verified_note: >-
+      Zenodo record carries no license field at all.
+    blocker: >-
+      No stated licence is not a permissive licence. Unknown defaults to deny,
+      the same rule the per-track filter uses -- an absent grant is not
+      evidence of permission. Reopen only if the authors state terms.
+    fetch: {kind: http, urls: []}
+
+  # -----------------------------------------------------------------------
+  # BLOCKED -- do not fetch. Recorded so nobody rediscovers them as ideas.
+  # -----------------------------------------------------------------------
+
+  - name: ctrsvdd
+    version: "2024"
+    pool: B
+    status: ready
+    redistribution: ok
+    licence: CC BY-NC-ND
+    licence_url: https://zenodo.org/records/10467648
+    verified_at_origin: true
+    verified_date: "2026-09-08"
+    why: >-
+      260 h of sung fake voice already AT 16 kHz, from 14 SVS and SVC methods.
+      Without sung fake coverage the model has no basis to separate a real
+      vocal from a synthesised one, and every song's vocal reads the same way.
+    caveat_compliance: >-
+      Critical: ND is usable only in the form #417333 A5 grants. Train from the
+      ORIGINAL files, apply augmentation at training time, and ship 원본 파일 +
+      코드 -- never a redistributed derivative. That is what our pipeline
+      already does: sampling is separate from rendering and composed output is
+      never stored (training/AGENTS.md), so the grant matches the design rather
+      than constraining it. NC still applies: attribute in the 데이터 구성 보고서.
+    fetch:
+      kind: http
+      urls:
+        - https://zenodo.org/records/10467648/files/train.txt?download=1
+        - https://zenodo.org/records/10467648/files/dev.txt?download=1
+        - https://zenodo.org/records/10467648/files/train_set.zip?download=1
+        - https://zenodo.org/records/10467648/files/dev_set.zip?download=1
+        - https://zenodo.org/records/10742049/files/test_set.zip?download=1
+      bytes: 20271305223
+
+  - name: ai-hub
+    version: n/a
+    pool: A
+    status: blocked
+    redistribution: "no"
+    licence: AI-Hub terms -- third-party provision prohibited without approval
+    licence_url: https://www.aihub.or.kr/intrcn/guid/usagepolicy.do?currMenu=151&topMenu=105
+    verified_at_origin: true
+    verified_date: "2026-09-05"
+    verified_note: >-
+      Usage policy states data may not be provided to third parties without the
+      provider's approval; only trained models may be shared freely.
+    blocker: >-
+      We cannot ship the files, so by DACON #417280 we cannot train on them.
+      Unblocks only if the NIA inquiry succeeds -- NIA operates AI-Hub and is a
+      co-host of this competition, so "third party" may not apply. Until an
+      answer arrives this is a hard no, not a maybe.
+    fetch: {kind: http, urls: []}
+
+  - name: scraped-audio
+    version: n/a
+    pool: mixed
+    status: blocked
+    redistribution: "no"
+    licence: none
+    licence_url: https://dacon.io/competitions/official/236749/talkboard/417280
+    verified_at_origin: true
+    verified_date: "2026-09-05"
+    blocker: >-
+      YouTube and open-web audio carry no licence permitting provision to DACON,
+      and #417280 closes the URL/script/checksum substitute explicitly. Beyond
+      the rule: scraped clips have no component-level ground truth, so they
+      cannot produce VOICE_FAKE vs MUSIC_FAKE labels even in principle -- which
+      is half the metric. This row exists so the idea stays retired.
+    fetch: {kind: http, urls: []}
