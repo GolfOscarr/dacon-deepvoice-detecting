@@ -5,7 +5,7 @@
 | # | Item | Why it matters |
 |---|---|---|
 | V1 | **Every dataset license** in [06](06-datasets.md) | A wrong call means retraining from scratch, or disqualification |
-| V2 | **CtrSVDD's CC BY-NC-ND** — does ND bar augmented copies / trained models? | It's the best singing-deepfake asset; ND may make it unusable |
+| ~~V2~~ | ✅ **CLOSED 2026-09-08.** ND does **not** bar us. [#417333 A5](../competition/05-talkboard-qa.md): ND data may be used and augmented, provided the result is reproducible from **원본 파일 + 코드** | CtrSVDD is unblocked — 260 h of sung fake at 16 kHz, plus Codecfake, ST-Codecfake, SceneFake and ~63k ND music tracks |
 | V3 | **W2V-BERT 2.0 license** (Seamless components vary; some CC-BY-NC) | It's the AT-ADD Track 1 winner's frontend |
 | V4 | **MERT license** (likely CC-BY-NC) and its behaviour at **16 kHz** (trained at 24 kHz) | Our only dedicated music encoder option |
 | V5 | **Mamba prebuilt wheels** for torch 2.7.1+cu128 / py3.11 / CUDA 12.8 | 10-min pip budget; source compilation will fail |

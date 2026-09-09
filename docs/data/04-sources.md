@@ -29,7 +29,7 @@ commitments.
 | **Self-generated TTS** | 8–12 open models → [05](05-synthesis-plan.md) | 15 | ours | ⭐ Paired-script design; Korean coverage |
 | **Self-generated VC / SVC** | RVC, Soft-VITS-SVC variants, SeedVC, kNN-VC | 3 | ours | Conversion ≠ synthesis; distinct artifact family |
 | **Self-generated SVS** (sung) | DiffSinger, VISinger2, NNSVS | 2 | ours | Sung fake voice |
-| **Self vocoder/codec resynthesis** of Pool A | HiFi-GAN, BigVGAN, Vocos, EnCodec, DAC | – | ours | ⭐ Cheapest family multiplier; ⭐ gives **perfectly matched** real/fake pairs |
+| ❌ ~~**Self vocoder/codec resynthesis** of Pool A~~ | HiFi-GAN, BigVGAN, Vocos, EnCodec, DAC | – | ours | 🔴 **RETIRED 2026-09-08.** [#417333 A1](../competition/05-talkboard-qa.md) rules that reconstruction without new component generation is **REAL**, so these are not Pool B at all. The same code now builds the REAL-processed slice ([05 S-S1R](05-synthesis-plan.md)) |
 | ⚠️ **CtrSVDD** | 14 SVS+SVC methods, 260 h fake singing @16 kHz | (up to 20) | ★ **CC BY-NC-ND** | Best sung-fake asset, but **ND blocks it pending legal review** ([V2](../survey/10-open-questions.md)) |
 
 ## POOL C — Real instrumental (target ~45 h)

@@ -7,7 +7,9 @@ Hosted by 행정안전부 and 한국지능정보사회진흥원, supervised by �
 ₩42,000,000 prize pool · leaderboard closes **2026-09-29**.
 
 > **Status: research, planning, the measurement pipeline, the model and the training pipeline are
-> complete. Nothing has been trained — there is no corpus yet.**
+> complete. Nothing has been trained. The corpus is now being acquired — 7 sources / 122.6 GiB in
+> S3, 22 queued; Pools A and E covered, B/C/D still empty
+> ([`docs/data/12`](docs/data/12-acquisition-status.md)).**
 > Code ships in **[`metrics/`](metrics/AGENTS.md)**, **[`models/`](models/AGENTS.md)** and
 > **[`training/`](training/AGENTS.md)** — 844 tests, every invariant paired with a mutation that
 > was observed to fail. Current state and next actions: **[PROGRESS.md](PROGRESS.md)**
@@ -46,6 +48,7 @@ offline on one L4 GPU within 60 minutes.
 | **[metrics/](metrics/AGENTS.md)** | Scoring, fold aggregation, diagnostics, submissions |
 | **[models/](models/AGENTS.md)** | The architecture — trunk, SED heads, frontends, losses, outputs |
 | **[training/](training/AGENTS.md)** | The training pipeline — specs, sampler, folds, render, collate, stages, checkpoints, loop, gates |
+| **[scripts/](scripts/fetch_to_s3.py)** | Corpus acquisition — the licence gate as data, the S3 raw store, per-track allowlists |
 | **[docs/papers/](docs/papers/INDEX.md)** | ~75 papers indexed with links; 12 read in depth |
 
 Start at **[docs/README.md](docs/README.md)** for a reading order.

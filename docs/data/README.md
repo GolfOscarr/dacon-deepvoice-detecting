@@ -14,6 +14,7 @@
 | [09-risks-and-checks.md](09-risks-and-checks.md) | Adversarial self-review with pre-committed checks |
 | [10-preprocessing-and-filtering.md](10-preprocessing-and-filtering.md) | ⭐ Preprocessing / filtering / salvage catalog + **the human review gates (G1–G8)** |
 | [11-source-inventory.md](11-source-inventory.md) | ⭐ **Dataset inventory** — ~70 candidate sources with links, sizes and license verdicts |
+| [12-acquisition-status.md](12-acquisition-status.md) | ⭐ **What is actually in S3**, and what each missing source still needs. Machine twin: [`scripts/sources.yaml`](../../scripts/sources.yaml) |
 
 ## The plan in six lines
 
