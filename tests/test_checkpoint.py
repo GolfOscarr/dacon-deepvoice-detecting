@@ -299,3 +299,34 @@ def test_souping_across_training_checkpoints_of_one_run(corpus, model_cfg, tmp_p
     paths = [c.path for c in result.checkpoints]
     assert len(paths) >= 2
     _model(model_cfg).load_state_dict(checkpoint_soup(paths), strict=True)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_rng_state_restores_after_a_cuda_map_location_round_trip(tmp_path):
+    """🔴 Resume was broken on GPU and only on GPU.
+
+    `train_stage` loads with `map_location=device`, so on cuda `torch.load` moves
+    every tensor in the blob -- the RNG ByteTensors included -- onto the device,
+    and `torch.set_rng_state` rejects a non-CPU tensor. The suite could not see it
+    because `LoopConfig.device` defaults to "cpu", so `map_location` was always
+    "cpu" and nothing ever moved.
+
+    MUTATION: drop the `.cpu()` calls in `_set_rng_state` and this raises
+    `TypeError: RNG state must be a torch.ByteTensor`.
+    """
+    from training.checkpoint import _rng_state, _set_rng_state
+
+    torch.manual_seed(0)
+    blob = {"rng": _rng_state()}
+    path = tmp_path / "rng.pt"
+    torch.save(blob, path)
+
+    # exactly what train_stage does on a GPU run
+    loaded = torch.load(path, map_location="cuda", weights_only=False)
+    assert loaded["rng"]["cpu"].device.type == "cuda", (
+        "map_location did not move the RNG tensor; this test would be vacuous")
+
+    _set_rng_state(loaded["rng"])                      # must not raise
+    after = torch.rand(4)
+    _set_rng_state(loaded["rng"])
+    assert torch.equal(after, torch.rand(4)), "restoring the state did not rewind it"
