@@ -10,7 +10,7 @@ frontends:
     layers: 9              # ⚠️ truncation depth is UNMEASURED — 09 B3
     freeze: true
     output_dim: 768
-    fps: 50.0
+    fps: 6.25            # 100 fps mel / patch stride 16 -- NOT 50; BEATsFrontend refuses a wrong value
     adapter: {kind: lora, rank: 16, alpha: 32.0, targets: [q_proj, v_proj]}
     n_freq: 8              # BEATs tokenises mel into a (F', T') patch grid
     freq_pool: {kind: gem, p_init: 3.0, learnable: true}   # BEATs is a patch grid
