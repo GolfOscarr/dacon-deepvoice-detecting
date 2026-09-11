@@ -106,6 +106,30 @@ whether it is fast enough, and it is answerable today — it does not need the m
 
 This is the actionable part of this file. Run it before committing to any configuration.
 
+### 4a — First partial measurement, 2026-09-11 ★
+
+**TRAINING only, and on one H200 rather than the L4** — so it does not touch the inference budget in
+§2, which is still an extrapolation. What it does settle is the *binding constraint* question, and
+the answer is **stage-dependent**:
+
+| Stage | render | GPU | throughput | bound by |
+|---|---|---|---|---|
+| S2 `joint` (1-way codec) | 24.0% | 76.0% | 47.7 samp/s | **GPU** |
+| S3 `codec_aware` (4-way, incl. mp3) | 75.5% | 24.5% | 14.4 samp/s | **decode** |
+
+So this file's prediction — "the binding constraint is the 6 vCPU decode path, not the GPU" — is
+**right for S3 and wrong for S2**. GPU time per sample is essentially equal across the two (0.38 s vs
+0.41 s per 24 samples); the entire 3.3× gap is rendering, in `ffmpeg` subprocesses, and S3 also
+expands 48 specs to 192 by design.
+
+Rendering is inline and single-threaded on purpose (`training/loop.py:193`, which names
+`DataLoader(dataset, batch_sampler=plan, collate_fn=collate)` as the alternative). 🔷 A worker pool
+should recover most of S3's gap — **an inference from this measurement, not a measured speedup**, and
+bounded by CPU count and process-spawn cost.
+
+⚠️ Measured at 4–10 s only. The smoke corpus cannot compose longer samples (pool D is fixed 4.00 s
+clips), so the 60 s end — where `whole_file` costs most — is still unmeasured.
+
 **Build a proxy test set that matches the stated contract**, not our training data: 1,200 files,
 durations sampled across 4–60 s, mixed MP3 / WAV / FLAC, mono **and** stereo, 16 kHz, with a
 telephone-band subset. The dummy-file forensics in [data/07](../data/07-eda-plan.md) should
