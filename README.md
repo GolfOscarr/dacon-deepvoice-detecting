@@ -14,8 +14,8 @@ Hosted by 행정안전부 and 한국지능정보사회진흥원, supervised by �
 > and E real, **D still has no acquisition path**.**
 > Code ships in **[`metrics/`](metrics/AGENTS.md)**, **[`models/`](models/AGENTS.md)** and
 > **[`training/`](training/AGENTS.md)** — 927 tests, every invariant paired with a mutation that
-> was observed to fail. ⬜ **There is still no training entrypoint**: `training/` is a library and
-> `run_schedule()` has no caller. Current state and next actions: **[PROGRESS.md](PROGRESS.md)**
+> was observed to fail. Runs are launched by **[`scripts/train.py`](scripts/train.py)**, one GPU per
+> invocation. Current state and next actions: **[PROGRESS.md](PROGRESS.md)**
 
 ---
 
@@ -101,6 +101,22 @@ python3 -m venv .venv && .venv/bin/pip install kaggle
 
 `.env` is gitignored. The Kaggle API is used for dataset discovery and pulling public notebooks;
 it is not required to read the documentation.
+
+## Running
+
+```bash
+# one fold, the full S1 -> S2 -> S3 schedule, scored on the souped weights
+.venv/bin/python scripts/train.py --corpus /data/corpus/test-v1 --out runs/t1 \
+    --weights /data/weights/beats --folds all --select soup
+
+.venv/bin/python scripts/train.py --corpus /data/corpus/test-v1 --out runs/t1 --dry-run
+```
+
+`--select raw|ema|soup` is the weight-selection step, and it is explicit because
+`LoopConfig.ema_decay` defaults to 0.999: before this existed every run maintained an EMA every step
+and then scored the raw weights anyway. The choice is recorded in the ledger row, since two runs that
+scored different weights are two runs. Exit status is 0 only when the run is **quotable** — a
+truncated stage or a red gate returns 1, so a job array cannot bank an unquotable number by accident.
 
 ## Verification
 

@@ -347,11 +347,31 @@ to end on pretrained weights and the chain from manifest to submission CSV has b
   reproduced here** — both folds landed on near-identical score scales, so raw concatenation cost
   0.0005. The correct path is provably used; this corpus cannot validate that particular rule.
 
-**Still missing, and blocking real use**
-- [ ] ⬜ **There is no training entrypoint.** `training/` is a library, `run_schedule()` has no caller,
-  and every run in this pass came from a script under `/data/project/private/dacon-scripts/`.
-- [ ] ⬜ No Slurm array / multi-fold launcher. One GPU per job is sufficient (1 GPU = 8 independent
-  jobs maps onto folds, candidates and teachers); DDP would need the seeded sampler reworked.
+**The entrypoint — [`scripts/train.py`](scripts/train.py)**
+- [x] 🔴 **`run_schedule()` has a caller.** Folds -> schedule -> weight selection -> frozen eval ->
+  gates -> tripwires -> `aggregate_folds` -> `ledger_row.json`, from one command. Every run before it
+  came from a script outside the repo, which made the thing this project measures most carefully the
+  one thing it could not reproduce.
+- [x] 🔴 **The weight-selection step now exists, and it was missing rather than unused.**
+  `EMA.state_dict_for()` and `checkpoint_soup()` were implemented and unit-tested with **no caller
+  outside `tests/`**, while `LoopConfig.ema_decay` defaults to 0.999 — so every run in this pass
+  maintained an EMA every step, discarded it, and scored raw weights, with
+  [`architecture/05`](docs/architecture/05-multi-model.md) meanwhile calling the soup "⭐ free, do it
+  by default". `--select raw|ema|soup` is that choice, recorded in the ledger row. Measured on one
+  smoke fold: raw 0.7136 · ema 0.7096 · soup 0.7137.
+- [x] **The caveat union is the caller's job and is now done.** `aggregate_folds`' docstring says
+  caveats "do not travel on their own"; this collects them across every stage of every fold, so
+  `--max-steps` reaches the `quotable` column instead of only the prose beside it.
+- [x] **Exit status is the gate.** 0 only when the run is quotable; a truncated stage or a red gate
+  returns 1, so a job array cannot bank an unquotable number.
+- [x] 🔴 **VG1 A10 was reporting SKIP on every run.** `run_default.yaml` leaves
+  `folds.scheme_version` null, so "the run's scheme_version matches folds.parquet's" compared nothing.
+  The entrypoint defaults it from the manifest, which carries exactly one by construction.
+- [x] **Verified end to end**: all three selections, the VG tri-state (`vg1=fail` on a deliberately
+  undersized eval set, `vg2=pass`, `vg3..vg6=na` — the documented `fail > na > pass` ordering), and
+  `--dry-run`.
+- [ ] ⬜ No Slurm array wrapper yet. One GPU per invocation is the design (folds are independent, so
+  N folds is an array rather than a distributed run); DDP would need the seeded sampler reworked.
 - [ ] ⚠️ Cluster note: `/tmp` is **node-local**; `/data/project/private` is wekafs and shared. A job
   that reads a script from `/tmp` fails on any node but the one that wrote it.
 
