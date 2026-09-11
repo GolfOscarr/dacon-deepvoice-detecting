@@ -150,9 +150,24 @@ def _rng_state() -> dict[str, Any]:
 
 
 def _set_rng_state(state: Mapping[str, Any]) -> None:
-    torch.set_rng_state(state["cpu"])
+    """Restore the generators.
+
+    🔴 `.cpu()` on both, and it is load-bearing. `train_stage` loads the
+    checkpoint with `map_location=device`, so on a GPU run `torch.load` moves
+    *every* tensor in the blob to CUDA -- including these RNG ByteTensors, which
+    `torch.set_rng_state` and `torch.cuda.set_rng_state_all` both require on the
+    CPU. Without the cast, resuming raises `TypeError: RNG state must be a
+    torch.ByteTensor` and the bitwise-resume guarantee is unreachable on the only
+    device a real run uses.
+
+    It went unseen because `LoopConfig.device` defaults to "cpu" and the suite
+    never probes cuda, so `map_location` was always "cpu" and the tensors never
+    moved. Found by running the resume test on an allocated H200 rather than on
+    the test hardware.
+    """
+    torch.set_rng_state(state["cpu"].cpu())
     if "cuda" in state and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state["cuda"])
+        torch.cuda.set_rng_state_all([s.cpu() for s in state["cuda"]])
 
 
 def save_train_checkpoint(path: Path | str, *, model: DeepVoiceNet,

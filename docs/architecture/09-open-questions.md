@@ -135,12 +135,13 @@ they are now **A6** and **A7** below.
 
 | # | Item | Risk if wrong |
 |---|---|---|
-| **C1** | ⚠️ **V3** — W2V-BERT 2.0 licence (Seamless components vary; some CC-BY-NC) | It is the AT-ADD Track 1 winner's frontend. An ND-style term makes it unusable *at all*, not merely unshippable |
+| **C1** | ⚠️ **V3** — W2V-BERT 2.0 licence (Seamless components vary; some CC-BY-NC) | It is the AT-ADD Track 1 winner's frontend. An ND-style term makes it unusable *at all*, not merely unshippable. **Still unanswered, and no longer blocking: candidate A now runs on BEATs** |
 | **C2** | ⚠️ **V4** — MERT licence, and its behaviour at 16 kHz | Our only dedicated music encoder |
-| **C3** | ⚠️ SSLAM / EAT licences | Both are our preferred music frontends. **BEATs (MIT) is the floor if either fails** |
+| **C3** | ⚠️ SSLAM / EAT licences | Both are our preferred music frontends. **BEATs (MIT) is the floor if either fails** — and the floor is now wired and trained against (MIT read at origin), so C1–C3 gate the *upside*, not the ability to train |
 | **C4** | ⚠️ **ArtifactNet patents (KR + PCT)** on bounded-mask residual extraction and codec-invariant training | 🔴 Reimplementing that specific formulation in a Korean government competition whose rules assign winning-work copyright to the host may warrant a legal look — or we avoid that exact formulation |
-| **C5** | ⚠️ Version skew: local 3.12 / numpy 2.5.3 / pandas 3.0.5 vs server 3.11.15 / 1.26.4 / 2.0.3 | Discovered at packaging time, it costs days |
-| **C6** | 🔴 **Music-family shortfall** — ≥8 families needed, 5 planned | No music-branch result is trustworthy until resolved. Blocks fold construction ([validation/01](../validation/01-split-scheme.md)) |
+| **C5** | ⚠️ Version skew: local 3.12 / numpy 2.5.3 / pandas 3.0.5 vs server 3.11.15 / 1.26.4 / 2.0.3 | Discovered at packaging time, it costs days. **Narrowed**: the training venv is now CPython **3.11.15**, the server's exact version, with torch 2.7.1+cu128 |
+| **C6** | 🔴 **Music-family shortfall** — ≥8 families needed, 5 planned | No music-branch result is trustworthy until resolved. Blocks fold construction ([validation/01](../validation/01-split-scheme.md)). **Confirmed empirically, then half-resolved**: the smoke corpus first had 4 music families and `I21` FAILed on the VAL side; widening the placeholder extraction to 8 generators makes `I21` pass on both folds' eval streams. ⚠️ That satisfies the *count* and not the *domain* — they are spoofed environmental generators (C7), so a passing `I21` here is not evidence for the music head. `build_folds` still refuses 5/4/3 folds, on real-voice and real-noise coverage |
+| **C7** | 🔴 **Pool D has no acquisition path at all** — fake *music* exists in no acquired or queued source | The 0.27 music head has nothing real to learn from. CompSpoof V2 is **not** the answer: its second component is environmental sound, not music. The smoke corpus substitutes spoofed environmental audio as an explicit placeholder, and the leak tripwire fires on it unaided (music EER 0.0201 vs a 0.03 floor) |
 
 ---
 

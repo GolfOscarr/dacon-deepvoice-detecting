@@ -31,3 +31,8 @@ venv/
 
 # omc
 .omc/
+
+# Slurm job logs. `scripts/train.sbatch` defaults --output to the submit
+# directory, which is the checkout, so these land here rather than in the run
+# directory -- a job's log has to exist before the job knows where --out is.
+slurm-*.out

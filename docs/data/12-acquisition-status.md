@@ -6,7 +6,48 @@ Machine-readable twin: [`scripts/sources.yaml`](../../scripts/sources.yaml), whi
 [`scripts/fetch_to_s3.py`](../../scripts/fetch_to_s3.py) actually enforces. This page is the
 human view of the same table — if the two disagree, the YAML is right and this page is stale.
 
-**Updated 2026-09-10.** 7 sources acquired, 122.6 GiB in S3; MLAAD in flight.
+**Updated 2026-09-11.** 9 sources acquired, ~239 GiB in S3. MLAAD (pool B) and CompSpoof V2 both
+landed; every source now carries a `DONE` marker.
+
+🔴 **Pool D still has no acquisition path, and CompSpoof V2 is not one.** Its second component is
+*environmental sound* — EnvSDD / VGGSound / AudioCaps / UrbanSound — not music, which
+[11](11-source-inventory.md) states plainly and the one-line summary in §3 below did not. So
+CompSpoof gives the label *structure* (two separately-labelled components) without the *domain*.
+Fake instrumental music exists in no acquired or queued source; CtrSVDD is fake *singing* and is ND-
+blocked. This is tracked as **C7** in [architecture/09](../architecture/09-open-questions.md).
+
+⚠️ **The smoke corpus substitutes a placeholder for D**, built by
+[`scripts/build_test_corpus.py`](../../scripts/build_test_corpus.py): spoofed environmental
+components from CompSpoof's `eval_source`, every row carrying `PLACEHOLDER` in `source_name`. The
+sampler cannot run without pool D at all — `check_mix` refuses a cell mix whose fake-music share
+leaves [0.2, 0.8] because "the loss is unsound without it". The placeholder is enough to exercise the
+composition path and nothing more: the leak tripwire fires on it unaided, music EER 0.0201 against a
+0.03 floor, with "suspect the split, not the model".
+
+🔴 **RIRS_NOISES redistributes MUSAN's noise, and a manifest cannot see it.**
+`RIRS_NOISES/pointsource_noises/` is MUSAN's `noise/free-sound/` set under the same basenames: 88 of
+90 files taken from it were **byte-identical** to rows already taken from MUSAN. They carry different
+`file_id` and different `source_name`, so `folds.grouping_atoms`' transitive closure cannot link them
+and the same recording lands in TRAIN on the fold where its twin is in VAL. `validate_manifest` never
+looks at `sha256`, only at `file_id.duplicated()`, so nothing in the pipeline reports it.
+[`scripts/build_test_corpus.py`](../../scripts/build_test_corpus.py) now populates `dup_group` from
+the hashes it already computes, which is what makes the overlap safe rather than a leak.
+
+⚠️ **Two of RIRS's three subdirectories are not noise at all.** `simulated_rirs` was never taken;
+`real_rirs_isotropic_noises` was, and is predominantly *real* impulse responses — measured median
+2.00 s, with **79 of 90 rows below `duration_range[0]` = 4 s**, so `sampler.py` filtered them out and
+the group contributed nothing while still counting toward the file tally. Dropped.
+
+ℹ️ **Pool E's independent sources are scarcer than they look.** MUSAN supplies only `free-sound` and
+`sound-bible`; with RIRS correctly linked as a duplicate of the first, that is **two** groups, and
+`build_folds` refuses a rotation where a fold's TRAIN or VAL side has no real noise to draw from. The
+third and fourth come from CompSpoof's `env_sources/*/bonafide/` — real ambient audio from EnvSDD and
+VGGSound, genuinely independent of MUSAN. Worth knowing before the next corpus is built: an apparent
+new noise source may be a redistribution of one already held.
+
+⚠️ **CompSpoof clips are a fixed 4.00 s**, and `sampler.py` filters components to
+`duration_s >= duration_range[0]`, so the smoke corpus cannot compose beyond ~10 s: 0 of 400 pool-D
+rows and 4 of 600 pool-A rows reach 20 s. The competition test set is 4–60 s.
 
 ```
 s3://<bucket>/dacon-deepfake-detection/data/raw/<source>/<version>/
@@ -101,13 +142,13 @@ against an assumed 30.
 
 ## 3 — Queued, cleared, not yet fetched
 
-**22 sources scheduled, 367 GB.** All licence-verified at origin; the fetcher runs them in
+**20 sources scheduled, ~362 GB** (MLAAD and CompSpoof V2 have since landed; struck through below). All licence-verified at origin; the fetcher runs them in
 registry order and writes a `DONE` marker per source, so an interrupted run resumes for free.
 
 | Source | Pool | Size | Licence |
 |---|---|---|---|
-| **mlaad** v9 | B | ~5 GB capped | CC BY-NC 4.0 — 175 TTS families, the generator-diversity asset |
-| **compspoof-v2** | mixed | — | CC BY-NC 4.0 — our exact label structure, cells 6/7 |
+| ~~**mlaad** v9~~ | B | 5.1 GiB | **ACQUIRED**, cap=30/dir, 16,026 files, structure intact. CC BY-NC 4.0 — 175 TTS families, the generator-diversity asset |
+| ~~**compspoof-v2**~~ | mixed | 111.8 GiB | **ACQUIRED.** CC BY-NC 4.0 — our exact label *structure*, cells 6/7, but its non-speech component is **environmental sound, not music** (see above). Arrives as a 5-part split archive plus separate eval/test; metadata columns are redacted in the challenge splits, so the `env_sources/<corpus>/spoofed/<generator>/` layout is the only label source |
 | **musdb18-hq** | mixed | 21.1 GB | educational/NC — isolated stems, cells 5–8 |
 | **partialspoof** | B | 9.2 GB | CC BY 4.0 — segment labels, trains `frame_max` |
 | **asvspoof2021-la** | B | 7.2 GB | ODC-BY — the telephony asset |

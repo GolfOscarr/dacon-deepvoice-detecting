@@ -1,9 +1,9 @@
 # PROGRESS
 
 **DACON 236749 — 딥보이스 범죄 대응을 위한 AI 탐지 모델 경진대회**
-Updated 2026-09-08 · **21 days to LB close** (2026-09-29 10:00 KST) · 2nd-stage materials 2026-10-05
+Updated 2026-09-11 · **18 days to LB close** (2026-09-29 10:00 KST) · 2nd-stage materials 2026-10-05
 
-Docs: 87 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGENTS.md) + [`models/`](models/AGENTS.md) + [`training/`](training/AGENTS.md) — **844 tests green** on `feat/training-pipeline` (231 on `main`)
+Docs: 87 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGENTS.md) + [`models/`](models/AGENTS.md) + [`training/`](training/AGENTS.md) — **927 tests green** on `feat/smoke-training-verification` (898 on `main`)
 
 ---
 
@@ -14,10 +14,10 @@ Docs: 87 files under [`docs/`](docs/README.md) · Code: [`metrics/`](metrics/AGE
 | **A** | Prior-art survey | ✅ done → [`docs/survey/`](docs/survey/README.md) |
 | **+** | Kaggle intelligence | ✅ done → [`docs/kaggle/`](docs/kaggle/README.md) |
 | **+** | Paper research | ✅ done → [`docs/papers/`](docs/papers/INDEX.md) — ~75 indexed, 12 deep-read |
-| **B** | Data strategy | ✅ planned · 🟡 **executing** — 7 sources / 122.6 GiB in S3, 22 more queued → [`docs/data/12`](docs/data/12-acquisition-status.md) |
+| **B** | Data strategy | ✅ planned · 🟡 **executing** — 9 sources / ~239 GiB in S3, 20 more queued → [`docs/data/12`](docs/data/12-acquisition-status.md) · 🔴 **pool D (fake music) has no acquisition path** |
 | **C** | Validation design | ✅ designed → [`docs/validation/`](docs/validation/README.md) · ✅ metric pipeline shipped → [`metrics/`](metrics/AGENTS.md) · ✅ fold builder + VG1–VG6 wired → [`training/`](training/AGENTS.md) |
-| **D** | Model architecture | ✅ designed → [`docs/architecture/`](docs/architecture/README.md) · ✅ implemented → [`models/`](models/AGENTS.md) · ⬜ **no real frontends, nothing trained** |
-| **D+** | Training & data pipeline | ✅ designed → [`docs/pipelines/`](docs/pipelines/README.md) + [`docs/training/`](docs/training/README.md) · ✅ implemented → [`training/`](training/AGENTS.md) · ⬜ **never run on real audio — no corpus** |
+| **D** | Model architecture | ✅ designed → [`docs/architecture/`](docs/architecture/README.md) · ✅ implemented → [`models/`](models/AGENTS.md) · ✅ **candidate A trains on real BEATs weights** · ⬜ candidate B unbuilt (C1 licence), truncation depth unmeasured |
+| **D+** | Training & data pipeline | ✅ designed → [`docs/pipelines/`](docs/pipelines/README.md) + [`docs/training/`](docs/training/README.md) · ✅ implemented → [`training/`](training/AGENTS.md) · ✅ **S1→S2→S3 run on real audio, measurement chain verified** · ⬜ no entrypoint; corpus is a placeholder |
 | **E** | Score fusion & calibration | ⬜ |
 | **F** | Engineering / submission | ⬜ |
 | **G** | Report & compliance | ⬜ runs throughout |
@@ -259,6 +259,142 @@ back out is billed as egress, and training reads the corpus repeatedly. Retarget
 (`DACON_S3_BUCKET` / `DACON_S3_PREFIX`) and is cheaper before the corpus grows further.
 
 ℹ️ Storage and compute are **personal resources** provisioned for this competition.
+
+---
+
+## ✅ 2026-09-11 — first real-audio training, and the measurement chain verified
+
+Branch `feat/smoke-training-verification`, 6 atomic commits, 927 tests. The pipeline now trains end
+to end on pretrained weights and the chain from manifest to submission CSV has been exercised.
+**No competition-relevant model exists**: see the limits below before reading any number.
+
+**What became possible**
+- [x] 🔴 **BEATs wired** → candidate A trains. 71.5M params, 2.4M trainable (3.4%) via LoRA on 9
+  truncated layers. `build_frontend` accepted only `stub` before this, so nothing in this repo had
+  ever trained on a pretrained encoder. BEATs needed no licence answer — MIT, read at origin — which
+  is exactly why [`architecture/02`](docs/architecture/02-pretrained-catalog.md) calls it the
+  licence-safe floor. `LoRALinear` is new; `AdapterConfig` had said "nothing implements adapters yet"
+  while a shipped config asked for `kind: lora`.
+- [x] **A 2,177-row smoke corpus**, reproducible via [`scripts/build_test_corpus.py`](scripts/build_test_corpus.py):
+  8 real sources across pools A/B/C/E, placeholder D, 28 grouping atoms, 17 artifact
+  families, 64 speakers, 2 folds. All 13 audit checks and both folds' eval-side
+  `I21`/`I7` pass.
+- [x] **S1 → S2 → S3 all run on real audio** (S3 only after the codec fix below).
+- [x] **Cross-fold aggregation, gates, tripwires and a submission CSV** all executed for the first time.
+
+**Defects found — none by a test going red**
+- [x] 🔴 **S3 was unrunnable on real audio.** `_codec_roundtrip` required exact length equality, and
+  LAME leaves trailing padding on ~8% of real sample counts, so `codec_aware` raised on its first mp3
+  draw (7.5% of samples). **The docstring's diagnosis was wrong** — it blamed a lost gapless header
+  and a shifted waveform; cross-correlation peaks at lag **+0** and the header is present. Measured:
+  header present 0–42 extra samples, header absent (pipe-encoded) 1169–1708. `_PAD_TOL = 576` sits in
+  that gap.
+- [x] 🔴 **`fps` was wrong by 8×** — configs said 50.0, copied from the wav2vec2 family; BEATs emits
+  6.25. Nothing would have failed: the file branch would have concatenated misaligned evidence.
+- [x] 🔴 **The obvious batched BEATs encode is a rule-2.4 violation** — it flattens the patch grid to
+  one `T'·F'` sequence, so valid tokens are strided runs, not a prefix. One padded pass moves a 4 s
+  file's features by **0.398**. Encoding per row is exact.
+- [x] 🔴 **Upstream layerdrop is a generator outside our seeding** (`np.random.random()` per layer),
+  which would have silently falsified the bitwise-resume claim. Forced to 0.
+- [x] 🔴 **Bitwise resume had never worked on a GPU.** `train_stage` loads with
+  `map_location=device`, so `torch.load` moved the RNG ByteTensors onto CUDA and `set_rng_state`
+  rejected them. Invisible because `LoopConfig.device` defaults to `"cpu"` and the suite never probes
+  cuda. Now verified bitwise on an H200, interrupted mid-pass.
+- [x] 🔴 **The corpus had a split leak, and no check in the pipeline could see it.**
+  `RIRS_NOISES/pointsource_noises/` is MUSAN's `free-sound` noise set **redistributed**: 88
+  byte-identical pairs, same basename, different `file_id` and different `source_name` — so
+  `grouping_atoms`' union-find could not link them and the same recording sat in TRAIN on the fold
+  where its twin was in VAL. `validate_manifest` only tests `file_id.duplicated()`, never the hash,
+  and the builder was computing every sha256 already while hardcoding `dup_group = None`. Now
+  populated from those hashes; verified **0 shared hashes across TRAIN/VAL in either fold**.
+  ⚠️ **The cascade is the lesson**: linking them correctly collapsed pool E from 4 groups to 2 and
+  `build_folds` immediately refused — revealing that the *earlier* 2-fold table had been feasible
+  **only because of the leak**. Fixed with genuinely independent audio already in the store
+  (CompSpoof `env_sources/*/bonafide/`: EnvSDD, VGGSoundEnv), and `rirs_isotropic` was dropped
+  outright: 79 of its 90 rows fell below the 4 s sampler floor, and real RIRs are convolution
+  kernels, which is the same reason `simulated_rirs` was never taken.
+- [x] 🔴 **A manifest missing a whole pool passes `validate_manifest`** — 1687 rows with no real music
+  validated clean. And `source_name` at corpus granularity collapses every generator family into one
+  fold group (9 → 1), which also validates and then makes `build_folds` infeasible at every fold
+  count. Both now guarded in the builder.
+- [ ] 🔴 **The pattern worth carrying forward: synthetic corpora, stub models and CPU are three axes
+  of one blind spot.** Four of the above were unreachable by an 898-test suite *because* of what it
+  runs on, not because of what it asserts.
+
+**Measured, where the docs had extrapolations**
+- [x] 🔴 **Throughput is stage-dependent, and [`architecture/07 §4`](docs/architecture/07-runtime-budget.md)
+  is half right.** S2 `joint` is **GPU-bound** (47.7 samp/s; render 24%). S3 `codec_aware` is
+  **decode-bound** (14.4 samp/s; render 75%, in `ffmpeg` subprocesses). Rendering is inline and
+  single-threaded by design (`training/loop.py:193` names the `DataLoader` alternative). 🔷 A worker
+  pool should recover most of the 3.3× on S3 — an estimate from this measurement, not a measurement.
+- [x] **`I7` eval size floors PASS** at 6000 drawn val specs (1200/class/head; 600 specs gave ~200).
+  First time that gate has returned anything but FAIL.
+- [x] **`quotable` discriminates.** The run came out **NOT QUOTABLE** for a correct reason: a leak
+  tripwire fired on fold 1. Injecting a `NOT_QUOTABLE` caveat voids a run regardless of gates, and a
+  single fold reports `score_sd = 0.0` with `sd_is_a_measurement = False`.
+- [x] **Rule 2.4 holds on the uploaded CSV.** Different neighbour content at fixed batch size moves a
+  prediction by **0.0**, bitwise. ⚠️ But **batch size 8 → 32 moves it 6.8e-04** with identical
+  neighbours — cuBLAS reduction choice, not a leak, and larger than the ranking resolution protected
+  elsewhere. The submission must be written at a pinned batch size.
+- [x] **Pass digests are distinct** across every pass of every stage (6/6, 10/10, 2/2); `set_epoch(0)`
+  collapses them to 1.
+- [x] **Version skew narrowed** (C5): the training venv is CPython **3.11.15**, the server's exact
+  version, torch 2.7.1+cu128.
+
+**Why no number here is a result**
+- [ ] 🔴 **Every score measured before 2026-09-11's review pass came from the leaking corpus** — the
+  split where 88 recordings could straddle TRAIN and VAL. They were already NOT QUOTABLE, so nothing
+  claimed is retracted, but the 0.7776 two-fold figure should be discarded rather than carried
+  forward; it was measured against a compromised split.
+- [ ] ⚠️ **Pool D is a placeholder.** Nothing acquired contains fake *music*. CompSpoof V2 is not the
+  answer — its second component is environmental sound, which [`data/11`](docs/data/11-source-inventory.md)
+  states and [`data/12`](docs/data/12-acquisition-status.md)'s summary did not. The smoke corpus
+  substitutes spoofed environmental audio, explicitly labelled; the leak tripwire caught it unaided
+  (music EER 0.0201 vs a 0.03 floor). This is now **C7** in [`architecture/09`](docs/architecture/09-open-questions.md).
+- [ ] ⚠️ **Durations reach 4–10 s, not 4–60 s.** CompSpoof ships fixed 4.00 s clips and the sampler
+  filters components to `duration_s >= duration_range[0]`, so a 20 s draw has no fake music: 0/400
+  pool-D and 4/600 pool-A rows reach 20 s. **`segmentation: whole_file` at 60 s is still untested on
+  real audio** — which is the setting the `fps` work, the frame arithmetic and the duration-bias
+  analysis all exist for.
+- [ ] ⚠️ **TRAIN and VAL share one compositor.** Family-disjointness does not touch this: the model
+  can key on our mixer's fingerprint, present in both halves and in none of DACON's 1200 test files.
+  `shadow_of` / `shadow_b` are the repo's instrument for it and have never been built.
+- [ ] ⚠️ **`build_folds` still refuses 5/4/3 folds** on real-voice and real-noise coverage, so the
+  table is 2 folds and carries a 1-family-EER variance caveat on the music head. Pool D now has 8
+  spoofed generators, which meets C6's floor in *count* — but they are environmental, so the count is
+  satisfied and the domain is not.
+- [ ] ⚠️ A 2-fold `score_sd` is a 2-sample standard deviation. Reported; not a confidence interval.
+- [ ] 🔷 The repo's *"never pool raw OOF scores"* rule (0.1705 vs a true 0.100) **could not be
+  reproduced here** — both folds landed on near-identical score scales, so raw concatenation cost
+  0.0005. The correct path is provably used; this corpus cannot validate that particular rule.
+
+**The entrypoint — [`scripts/train.py`](scripts/train.py)**
+- [x] 🔴 **`run_schedule()` has a caller.** Folds -> schedule -> weight selection -> frozen eval ->
+  gates -> tripwires -> `aggregate_folds` -> `ledger_row.json`, from one command. Every run before it
+  came from a script outside the repo, which made the thing this project measures most carefully the
+  one thing it could not reproduce.
+- [x] 🔴 **The weight-selection step now exists, and it was missing rather than unused.**
+  `EMA.state_dict_for()` and `checkpoint_soup()` were implemented and unit-tested with **no caller
+  outside `tests/`**, while `LoopConfig.ema_decay` defaults to 0.999 — so every run in this pass
+  maintained an EMA every step, discarded it, and scored raw weights, with
+  [`architecture/05`](docs/architecture/05-multi-model.md) meanwhile calling the soup "⭐ free, do it
+  by default". `--select raw|ema|soup` is that choice, recorded in the ledger row. Measured on one
+  smoke fold: raw 0.7136 · ema 0.7096 · soup 0.7137.
+- [x] **The caveat union is the caller's job and is now done.** `aggregate_folds`' docstring says
+  caveats "do not travel on their own"; this collects them across every stage of every fold, so
+  `--max-steps` reaches the `quotable` column instead of only the prose beside it.
+- [x] **Exit status is the gate.** 0 only when the run is quotable; a truncated stage or a red gate
+  returns 1, so a job array cannot bank an unquotable number.
+- [x] 🔴 **VG1 A10 was reporting SKIP on every run.** `run_default.yaml` leaves
+  `folds.scheme_version` null, so "the run's scheme_version matches folds.parquet's" compared nothing.
+  The entrypoint defaults it from the manifest, which carries exactly one by construction.
+- [x] **Verified end to end**: all three selections, the VG tri-state (`vg1=fail` on a deliberately
+  undersized eval set, `vg2=pass`, `vg3..vg6=na` — the documented `fail > na > pass` ordering), and
+  `--dry-run`.
+- [ ] ⬜ No Slurm array wrapper yet. One GPU per invocation is the design (folds are independent, so
+  N folds is an array rather than a distributed run); DDP would need the seeded sampler reworked.
+- [ ] ⚠️ Cluster note: `/tmp` is **node-local**; `/data/project/private` is wekafs and shared. A job
+  that reads a script from `/tmp` fails on any node but the one that wrote it.
 
 ---
 

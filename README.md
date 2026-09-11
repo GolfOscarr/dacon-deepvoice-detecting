@@ -6,13 +6,16 @@ Research and strategy for **딥보이스 범죄 대응을 위한 AI 탐지 모�
 Hosted by 행정안전부 and 한국지능정보사회진흥원, supervised by 국립과학수사연구원, run by DACON.
 ₩42,000,000 prize pool · leaderboard closes **2026-09-29**.
 
-> **Status: research, planning, the measurement pipeline, the model and the training pipeline are
-> complete. Nothing has been trained. The corpus is now being acquired — 7 sources / 122.6 GiB in
-> S3, 22 queued; Pools A and E covered, B/C/D still empty
-> ([`docs/data/12`](docs/data/12-acquisition-status.md)).**
+> **Status: the pipeline now trains end to end on real audio with pretrained BEATs weights, and
+> the measurement chain has been verified from manifest to submission CSV. No competition-relevant
+> model exists yet: the only corpus that runs is a 2,177-row smoke corpus whose fake-music pool is a
+> placeholder, so every number it produces is a pipeline check rather than a result
+> ([`docs/data/12`](docs/data/12-acquisition-status.md)). 9 sources / ~239 GiB in S3; pools A, B, C
+> and E real, **D still has no acquisition path**.**
 > Code ships in **[`metrics/`](metrics/AGENTS.md)**, **[`models/`](models/AGENTS.md)** and
-> **[`training/`](training/AGENTS.md)** — 844 tests, every invariant paired with a mutation that
-> was observed to fail. Current state and next actions: **[PROGRESS.md](PROGRESS.md)**
+> **[`training/`](training/AGENTS.md)** — 927 tests, every invariant paired with a mutation that
+> was observed to fail. Runs are launched by **[`scripts/train.py`](scripts/train.py)**, one GPU per
+> invocation. Current state and next actions: **[PROGRESS.md](PROGRESS.md)**
 
 ---
 
@@ -79,6 +82,15 @@ The Python sources under [`training/`](training/AGENTS.md) spell these out as wo
   pass, a hand-run mutation, or someone asking whether a property was actually tested — none by a
   test going red on its own. Invariants here are paired with the mutation that was observed to
   break them; see [docs/pipelines/05](docs/pipelines/05-invariants.md).
+- 🔴 **Three axes of the same blind spot: synthetic audio, stub models, CPU.** The first
+  real-audio, real-weights, real-device run found four defects the 898-test suite could not reach —
+  an mp3 round-trip that refused 7.5% of real sample counts, a frontend `fps` wrong by 8×, an
+  upstream layerdrop generator outside our seeding, and bitwise resume broken on every GPU. Each
+  was invisible *because* the suite ran on synthetic corpora, stub frontends and one CPU device.
+- 🔴 **A manifest can be schema-valid and unusable.** `validate_manifest` checks column semantics,
+  not coverage or grouping viability: a manifest missing an entire pool passes it, and so does one
+  whose `source_name` granularity collapses every generator family into one inseparable fold group.
+  Both failed two layers later, in `build_folds`.
 
 ## Setup
 
@@ -90,10 +102,26 @@ python3 -m venv .venv && .venv/bin/pip install kaggle
 `.env` is gitignored. The Kaggle API is used for dataset discovery and pulling public notebooks;
 it is not required to read the documentation.
 
+## Running
+
+```bash
+# one fold, the full S1 -> S2 -> S3 schedule, scored on the souped weights
+.venv/bin/python scripts/train.py --corpus /data/corpus/test-v1 --out runs/t1 \
+    --weights /data/weights/beats --folds all --select soup
+
+.venv/bin/python scripts/train.py --corpus /data/corpus/test-v1 --out runs/t1 --dry-run
+```
+
+`--select raw|ema|soup` is the weight-selection step, and it is explicit because
+`LoopConfig.ema_decay` defaults to 0.999: before this existed every run maintained an EMA every step
+and then scored the raw weights anyway. The choice is recorded in the ledger row, since two runs that
+scored different weights are two runs. Exit status is 0 only when the run is **quotable** — a
+truncated stage or a red gate returns 1, so a job array cannot bank an unquotable number by accident.
+
 ## Verification
 
 ```bash
-.venv/bin/python -m pytest -o addopts=""    # 844 tests; -o addopts="" keeps pytest's summary line
+.venv/bin/python -m pytest -o addopts=""    # 927 tests; -o addopts="" keeps pytest's summary line
 .venv/bin/python scripts/check_links.py     # every cross-reference in 87 docs
 ```
 

@@ -386,6 +386,15 @@ def _a_law(x: np.ndarray, a: float = 87.6) -> np.ndarray:
     return (np.sign(q) * np.where(aq < 1.0 / (1.0 + np.log(a)), ilo, ihi)).astype(np.float32)
 
 
+#: LAME's algorithmic delay: what a lost gapless header costs, and the floor
+#: of the "audio has moved" population (measured 1169-1708 extra samples).
+_ENCODER_DELAY = 1105
+#: One MPEG-2 Layer III granule. Sits inside the measured gap (42, 1169)
+#: between trailing-padding residue and a lost delay cancellation, so it
+#: separates the two without needing to be tuned per ffmpeg build.
+_PAD_TOL = 576
+
+
 def _codec_roundtrip(wav: np.ndarray, sample_rate: int, container: str,
                      bitrate: int | None) -> np.ndarray:
     """A-S3 -- encode and decode again, at the drawn container and bitrate.
@@ -405,6 +414,21 @@ def _codec_roundtrip(wav: np.ndarray, sample_rate: int, container: str,
     Caveat: the length is therefore checked rather than trusted. If the header
     is ever lost, the decoded frame count stops matching and this raises
     instead of shifting.
+
+    🔴 **A longer decode is not the same event as a shifted one, and the check
+    used to conflate them.** With the gapless header present the start delay is
+    cancelled exactly -- measured by cross-correlation, the peak sits at lag
+    **+0** -- but LAME still leaves a few samples of *trailing* padding on about
+    8% of lengths (measured 0-42 extra over 60 random 4-60 s draws at 16 kHz).
+    Those samples are at the END, so nothing has moved and trimming to `n` is
+    exact. Requiring strict equality made A-S3 unrunnable on real audio: stage
+    `codec_aware` raised on the first mp3 draw, which is 7.5% of samples.
+
+    The failure the check exists for looks completely different. Encoding to a
+    pipe -- where ffmpeg cannot seek back to write the header -- gives **1169 to
+    1708** extra samples, i.e. at least the 1105-sample delay. So `_PAD_TOL`
+    sits in the measured gap between the two populations: padding residue is
+    trimmed, a lost delay cancellation still raises.
     """
     if container not in CODEC_CONTAINERS:
         raise ValueError(f"container must be one of {CODEC_CONTAINERS}, "
@@ -430,11 +454,16 @@ def _codec_roundtrip(wav: np.ndarray, sample_rate: int, container: str,
     if int(sr) != sample_rate:                                # pragma: no cover
         raise DecodeError(f"{container} round-trip returned {sr} Hz, "
                           f"expected {sample_rate}")
-    if out.shape[0] != n:
+    extra = out.shape[0] - n
+    if extra < 0 or extra >= _PAD_TOL:
         raise DecodeError(
-            f"{container} round-trip returned {out.shape[0]} samples for {n}: "
-            f"the encoder delay is no longer being cancelled, so the audio has "
-            f"moved relative to frame_intervals")
+            f"{container} round-trip returned {out.shape[0]} samples for {n} "
+            f"({extra:+d}): beyond the {_PAD_TOL}-sample gapless-padding "
+            f"tolerance, so this is the encoder delay ({_ENCODER_DELAY} samples) "
+            f"no longer being cancelled rather than trailing padding -- the "
+            f"audio has moved relative to frame_intervals")
+    if extra:
+        out = out[:n]                    # trailing padding only; lag is +0
     return np.ascontiguousarray(out.T, dtype=np.float32)
 
 
