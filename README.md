@@ -8,7 +8,7 @@ Hosted by 행정안전부 and 한국지능정보사회진흥원, supervised by �
 
 > **Status: the pipeline now trains end to end on real audio with pretrained BEATs weights, and
 > the measurement chain has been verified from manifest to submission CSV. No competition-relevant
-> model exists yet: the only corpus that runs is a ~2k-file smoke corpus whose fake-music pool is a
+> model exists yet: the only corpus that runs is a 2,177-row smoke corpus whose fake-music pool is a
 > placeholder, so every number it produces is a pipeline check rather than a result
 > ([`docs/data/12`](docs/data/12-acquisition-status.md)). 9 sources / ~239 GiB in S3; pools A, B, C
 > and E real, **D still has no acquisition path**.**

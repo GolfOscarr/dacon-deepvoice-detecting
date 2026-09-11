@@ -24,6 +24,27 @@ leaves [0.2, 0.8] because "the loss is unsound without it". The placeholder is e
 composition path and nothing more: the leak tripwire fires on it unaided, music EER 0.0201 against a
 0.03 floor, with "suspect the split, not the model".
 
+🔴 **RIRS_NOISES redistributes MUSAN's noise, and a manifest cannot see it.**
+`RIRS_NOISES/pointsource_noises/` is MUSAN's `noise/free-sound/` set under the same basenames: 88 of
+90 files taken from it were **byte-identical** to rows already taken from MUSAN. They carry different
+`file_id` and different `source_name`, so `folds.grouping_atoms`' transitive closure cannot link them
+and the same recording lands in TRAIN on the fold where its twin is in VAL. `validate_manifest` never
+looks at `sha256`, only at `file_id.duplicated()`, so nothing in the pipeline reports it.
+[`scripts/build_test_corpus.py`](../../scripts/build_test_corpus.py) now populates `dup_group` from
+the hashes it already computes, which is what makes the overlap safe rather than a leak.
+
+⚠️ **Two of RIRS's three subdirectories are not noise at all.** `simulated_rirs` was never taken;
+`real_rirs_isotropic_noises` was, and is predominantly *real* impulse responses — measured median
+2.00 s, with **79 of 90 rows below `duration_range[0]` = 4 s**, so `sampler.py` filtered them out and
+the group contributed nothing while still counting toward the file tally. Dropped.
+
+ℹ️ **Pool E's independent sources are scarcer than they look.** MUSAN supplies only `free-sound` and
+`sound-bible`; with RIRS correctly linked as a duplicate of the first, that is **two** groups, and
+`build_folds` refuses a rotation where a fold's TRAIN or VAL side has no real noise to draw from. The
+third and fourth come from CompSpoof's `env_sources/*/bonafide/` — real ambient audio from EnvSDD and
+VGGSound, genuinely independent of MUSAN. Worth knowing before the next corpus is built: an apparent
+new noise source may be a redistribution of one already held.
+
 ⚠️ **CompSpoof clips are a fixed 4.00 s**, and `sampler.py` filters components to
 `duration_s >= duration_range[0]`, so the smoke corpus cannot compose beyond ~10 s: 0 of 400 pool-D
 rows and 4 of 600 pool-A rows reach 20 s. The competition test set is 4–60 s.

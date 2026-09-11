@@ -275,8 +275,10 @@ to end on pretrained weights and the chain from manifest to submission CSV has b
   is exactly why [`architecture/02`](docs/architecture/02-pretrained-catalog.md) calls it the
   licence-safe floor. `LoRALinear` is new; `AdapterConfig` had said "nothing implements adapters yet"
   while a shipped config asked for `kind: lora`.
-- [x] **A ~2k-file smoke corpus**, reproducible via [`scripts/build_test_corpus.py`](scripts/build_test_corpus.py):
-  6 real sources across pools A/B/C/E, placeholder D, 13 families, 2 folds.
+- [x] **A 2,177-row smoke corpus**, reproducible via [`scripts/build_test_corpus.py`](scripts/build_test_corpus.py):
+  8 real sources across pools A/B/C/E, placeholder D, 28 grouping atoms, 17 artifact
+  families, 64 speakers, 2 folds. All 13 audit checks and both folds' eval-side
+  `I21`/`I7` pass.
 - [x] **S1 → S2 → S3 all run on real audio** (S3 only after the codec fix below).
 - [x] **Cross-fold aggregation, gates, tripwires and a submission CSV** all executed for the first time.
 
@@ -298,6 +300,19 @@ to end on pretrained weights and the chain from manifest to submission CSV has b
   `map_location=device`, so `torch.load` moved the RNG ByteTensors onto CUDA and `set_rng_state`
   rejected them. Invisible because `LoopConfig.device` defaults to `"cpu"` and the suite never probes
   cuda. Now verified bitwise on an H200, interrupted mid-pass.
+- [x] 🔴 **The corpus had a split leak, and no check in the pipeline could see it.**
+  `RIRS_NOISES/pointsource_noises/` is MUSAN's `free-sound` noise set **redistributed**: 88
+  byte-identical pairs, same basename, different `file_id` and different `source_name` — so
+  `grouping_atoms`' union-find could not link them and the same recording sat in TRAIN on the fold
+  where its twin was in VAL. `validate_manifest` only tests `file_id.duplicated()`, never the hash,
+  and the builder was computing every sha256 already while hardcoding `dup_group = None`. Now
+  populated from those hashes; verified **0 shared hashes across TRAIN/VAL in either fold**.
+  ⚠️ **The cascade is the lesson**: linking them correctly collapsed pool E from 4 groups to 2 and
+  `build_folds` immediately refused — revealing that the *earlier* 2-fold table had been feasible
+  **only because of the leak**. Fixed with genuinely independent audio already in the store
+  (CompSpoof `env_sources/*/bonafide/`: EnvSDD, VGGSoundEnv), and `rirs_isotropic` was dropped
+  outright: 79 of its 90 rows fell below the 4 s sampler floor, and real RIRs are convolution
+  kernels, which is the same reason `simulated_rirs` was never taken.
 - [x] 🔴 **A manifest missing a whole pool passes `validate_manifest`** — 1687 rows with no real music
   validated clean. And `source_name` at corpus granularity collapses every generator family into one
   fold group (9 → 1), which also validates and then makes `build_folds` infeasible at every fold
@@ -327,6 +342,10 @@ to end on pretrained weights and the chain from manifest to submission CSV has b
   version, torch 2.7.1+cu128.
 
 **Why no number here is a result**
+- [ ] 🔴 **Every score measured before 2026-09-11's review pass came from the leaking corpus** — the
+  split where 88 recordings could straddle TRAIN and VAL. They were already NOT QUOTABLE, so nothing
+  claimed is retracted, but the 0.7776 two-fold figure should be discarded rather than carried
+  forward; it was measured against a compromised split.
 - [ ] ⚠️ **Pool D is a placeholder.** Nothing acquired contains fake *music*. CompSpoof V2 is not the
   answer — its second component is environmental sound, which [`data/11`](docs/data/11-source-inventory.md)
   states and [`data/12`](docs/data/12-acquisition-status.md)'s summary did not. The smoke corpus
@@ -340,8 +359,10 @@ to end on pretrained weights and the chain from manifest to submission CSV has b
 - [ ] ⚠️ **TRAIN and VAL share one compositor.** Family-disjointness does not touch this: the model
   can key on our mixer's fingerprint, present in both halves and in none of DACON's 1200 test files.
   `shadow_of` / `shadow_b` are the repo's instrument for it and have never been built.
-- [ ] ⚠️ **4 music families against C6's floor of 8**, and `build_folds` refused 5/4/3 folds outright.
-  At 2 folds the fold table still carries a 1-family-EER variance caveat.
+- [ ] ⚠️ **`build_folds` still refuses 5/4/3 folds** on real-voice and real-noise coverage, so the
+  table is 2 folds and carries a 1-family-EER variance caveat on the music head. Pool D now has 8
+  spoofed generators, which meets C6's floor in *count* — but they are environmental, so the count is
+  satisfied and the domain is not.
 - [ ] ⚠️ A 2-fold `score_sd` is a 2-sample standard deviation. Reported; not a confidence interval.
 - [ ] 🔷 The repo's *"never pool raw OOF scores"* rule (0.1705 vs a true 0.100) **could not be
   reproduced here** — both folds landed on near-identical score scales, so raw concatenation cost
