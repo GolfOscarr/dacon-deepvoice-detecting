@@ -199,6 +199,11 @@ def main() -> int:
                    help="override LoopConfig.checkpoint_every (soup needs >= 2)")
     p.add_argument("--min-pool", type=int,
                    help="drop folds whose masked pool is below this, and record it")
+    p.add_argument("--allow-unquotable", action="store_true",
+                   help="exit 0 even when the run is not quotable. For a deliberate "
+                        "smoke run (--max-steps, a small --eval-n): without it Slurm "
+                        "reports the task FAILED, which is right for a real run and "
+                        "noise for a test")
     p.add_argument("--dry-run", action="store_true", help="print the plan and exit")
     args = p.parse_args()
 
@@ -264,10 +269,23 @@ def main() -> int:
 
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "ledger_row.json").write_text(
-        json.dumps(report.as_ledger_row(), indent=2, default=str), encoding="utf-8")
-    print(f"\nledger row -> {out / 'ledger_row.json'}")
-    return 0 if report.quotable else 1
+    # 🔴 Per-fold when a single fold was asked for, because two array tasks share
+    # one --out: `sbatch --array=0-1` had both tasks write `ledger_row.json` and
+    # fold 1 silently overwrote fold 0's row. Only a run that actually aggregated
+    # several folds owns the unqualified name.
+    row_path = (out / "ledger_row.json" if len(results) > 1
+                else out / f"fold{results[0].fold}" / "ledger_row.json")
+    row_path.parent.mkdir(parents=True, exist_ok=True)
+    row_path.write_text(json.dumps(report.as_ledger_row(), indent=2, default=str),
+                        encoding="utf-8")
+    print(f"\nledger row -> {row_path}")
+    if len(results) == 1 and args.folds not in ("all",):
+        print("NOTE: one fold per invocation aggregates one fold. Score_sd is 0.0 "
+              "because nothing varied. For a cross-fold number use --folds all in a "
+              "single job; an array gives per-fold rows that nothing combines yet.")
+    if report.quotable or args.allow_unquotable:
+        return 0
+    return 1
 
 
 if __name__ == "__main__":
