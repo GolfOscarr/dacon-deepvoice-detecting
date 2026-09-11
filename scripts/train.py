@@ -55,14 +55,14 @@ import torch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from models.config import load_model_config, load_train_config        # noqa: E402
-from models.model import DeepVoiceNet                                 # noqa: E402
+from models.model import DeepVoiceNet, save_checkpoint                  # noqa: E402
 from training.checkpoint import checkpoint_soup                       # noqa: E402
 from training.config import load_run_config                           # noqa: E402
 from training.dataset import SpecDataset, frozen_eval_specs           # noqa: E402
 from training.folds import apply_folds                                # noqa: E402
-from training.loop import LoopConfig, run_schedule                    # noqa: E402
+from training.loop import run_schedule                                # noqa: E402
 from training.manifest import load_manifest                           # noqa: E402
-from training.render import ManifestIndex, RenderConfig               # noqa: E402
+from training.render import ManifestIndex                             # noqa: E402
 from training.sampler import Sampler                                  # noqa: E402
 from training.stages import STAGES                                    # noqa: E402
 from training.validate import (FoldResult, aggregate_folds, evaluate,  # noqa: E402
@@ -101,13 +101,24 @@ def select_weights(model: DeepVoiceNet, results, how: str) -> str:
                 "Scoring an unmaterialised EMA would score the initialisation.")
         model.load_state_dict(ema.state_dict_for(model), strict=True)
         return f"ema (decay {ema.decay}, {ema.steps} updates, bias-corrected)"
-    paths = [c.path for r in results for c in r.checkpoints]
+    # 🔴 The LAST stage's checkpoints, not every stage's.
+    # docs/architecture/05 §3: weight averaging only works between checkpoints in
+    # the same loss basin, and is "for epochs and same-init runs". S1 trains one
+    # branch at a time behind a frozen frontend, so its checkpoints sit far closer
+    # to the initialisation than S3's; pooling all three stages averages the final
+    # weights back toward an earlier regime. `--soup-all-stages` is there for
+    # someone who wants to measure that rather than inherit it.
+    stages_used = results if how == "soup-all" else results[-1:]
+    paths = [c.path for r in stages_used for c in r.checkpoints]
     if len(paths) < 2:
         raise SystemExit(
-            f"--select soup needs at least two checkpoints, found {len(paths)}. "
-            "Set LoopConfig.checkpoint_every, or raise --epochs so passes checkpoint.")
+            f"--select soup needs at least two checkpoints from stage "
+            f"{stages_used[-1].stage!r}, found {len(paths)}. Set "
+            f"LoopConfig.checkpoint_every, raise --epochs so more passes "
+            f"checkpoint, or pass --soup-all-stages.")
     model.load_state_dict(checkpoint_soup(paths), strict=True)
-    return f"soup ({len(paths)} checkpoints, uniform average)"
+    scope = "all stages" if how == "soup-all" else f"stage {stages_used[-1].stage!r}"
+    return f"soup ({len(paths)} checkpoints from {scope}, uniform average)"
 
 
 def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
@@ -123,11 +134,18 @@ def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
     train_sampler = Sampler(view, run_cfg.sampler, slice_="train")
     ds = SpecDataset.from_sampler(train_sampler, args.draws, index, rcfg,
                                   seed=train_cfg.seed)
+    # 🔴 Both overrides guard for None. `max_steps` did not, so invoking without
+    # `--max-steps` overwrote a run config's `loop.max_steps: 200` with None: the
+    # stage stopped being truncated, `StageResult.truncated` stayed False, the
+    # NOT_QUOTABLE caveat never fired, and `quotable` came out True for a run the
+    # config had asked to truncate. The line directly below always had the guard,
+    # which is what made the omission easy to miss.
     loop_cfg = dataclasses.replace(
         run_cfg.loop, out_dir=out, device=args.device,
-        max_steps=args.max_steps,
-        checkpoint_every=args.checkpoint_every
-        if args.checkpoint_every is not None else run_cfg.loop.checkpoint_every)
+        max_steps=(args.max_steps if args.max_steps is not None
+                   else run_cfg.loop.max_steps),
+        checkpoint_every=(args.checkpoint_every if args.checkpoint_every is not None
+                          else run_cfg.loop.checkpoint_every))
 
     model = build_model(args.model, args.weights)
     t0 = time.time()
@@ -139,7 +157,8 @@ def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
         print(f"    {r.stage:<13} steps={r.steps:<5} passes={r.passes_done} "
               f"ckpts={len(r.checkpoints)} truncated={r.truncated}", flush=True)
 
-    selection = select_weights(model, results, args.select)
+    how = "soup-all" if (args.select == "soup" and args.soup_all_stages) else args.select
+    selection = select_weights(model, results, how)
     print(f"  weights scored: {selection}", flush=True)
 
     val_specs = frozen_eval_specs(Sampler(view, run_cfg.sampler, slice_="val"),
@@ -160,7 +179,16 @@ def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
     print(f"  split={kind}  gates.ok={gates.ok}  tripwires.ok={tripwires.ok}", flush=True)
 
     out.mkdir(parents=True, exist_ok=True)
-    torch.save({"model": model.state_dict(), "selection": selection}, out / "scored.pt")
+    # 🔴 `save_checkpoint`, not a bespoke dict. The weights that produced the
+    # numbers are the one artifact that has to be reloadable, and every reader in
+    # this repo wants `config` + `state_dict`: `models.model.load_checkpoint`,
+    # `training.checkpoint.load_train_checkpoint` and `checkpoint_soup` each raise
+    # without them. An earlier version wrote {"model", "selection"}, which no
+    # loader accepts -- so the across-run soup docs/architecture/05 describes was
+    # impossible from a finished run. `selection` rides alongside rather than
+    # replacing the contract.
+    save_checkpoint(model, out / "scored.pt")
+    (out / "selection.txt").write_text(selection + "\n", encoding="utf-8")
     report.predictions.to_parquet(out / "val_predictions.parquet", index=False)
 
     caveats = [c for r in results for c in r.caveats]
@@ -183,6 +211,10 @@ def main() -> int:
                    help=f"comma-separated subset of {STAGES}, in order")
     p.add_argument("--select", choices=SELECTIONS, default="raw",
                    help="which weights to score: raw | ema | soup")
+    p.add_argument("--soup-all-stages", action="store_true",
+                   help="soup across every stage rather than the last one. Off by "
+                        "default: S1's checkpoints sit far closer to the init than "
+                        "S3's, so pooling them averages the result backwards")
     p.add_argument("--draws", type=int, default=2400, help="specs drawn per pass")
     p.add_argument("--eval-n", type=int, default=6000,
                    help="frozen eval specs; VG1 A8/A9 needs ~6000 to clear its floors")

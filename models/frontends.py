@@ -427,6 +427,15 @@ class BEATsFrontend(Frontend):
 
     def _fbank(self, wav_1d: Tensor) -> Tensor:
         import torchaudio.compliance.kaldi as ta_kaldi
+        # 🔴 Shorter than one analysis window and kaldi's fbank asserts rather
+        # than returning an empty tensor ("choose a window size 400 that is
+        # [2, 399]"), so `_frames_for`'s promise of at least one frame was a lie
+        # below 400 samples -- 25 ms. Zero-pad up to one window: the row owns
+        # every sample involved, so this is within-row and rule 2.4 is untouched.
+        # `test_audio_shorter_than_one_patch_still_yields_a_frame` used n=1000,
+        # which still has 4 mel frames, so it never reached this path.
+        if wav_1d.shape[-1] < self._FRAME_LENGTH:
+            wav_1d = F.pad(wav_1d, (0, self._FRAME_LENGTH - wav_1d.shape[-1]))
         # Upstream scales to int16 range before fbank; the checkpoint's
         # normalisation constants are defined against that scale.
         src = wav_1d.unsqueeze(0).to(torch.float32) * (2 ** 15)

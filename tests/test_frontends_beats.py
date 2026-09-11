@@ -18,7 +18,7 @@ import pytest
 import torch
 
 from models.config import AudioConfig, load_model_config
-from models.frontends import BEATsFrontend, LoRALinear, build_frontend
+from models.frontends import LoRALinear, build_frontend
 
 WEIGHTS = os.environ.get("DACON_BEATS_WEIGHTS", "/data/project/private/dacon-weights/beats")
 _HAVE = os.path.exists(os.path.join(WEIGHTS, "BEATs_iter3_plus_AS2M.pt"))
@@ -113,8 +113,16 @@ def test_mask_marks_exactly_each_row_s_own_frames(beats):
     assert mask.sum(1).tolist() == [beats._frames_for(int(n)) for n in lengths]
 
 
-def test_audio_shorter_than_one_patch_still_yields_a_frame(beats):
-    feats, mask = beats(torch.randn(1, 1000) * 0.1, torch.tensor([1000]))
+@pytest.mark.parametrize("n", [1, 100, 399, 400, 1000, 2799])
+def test_audio_shorter_than_one_patch_still_yields_a_frame(beats, n):
+    """🔴 `n=1000` alone did not reach the interesting path.
+
+    1000 samples still produce 4 mel frames; below 400 -- one 25 ms analysis
+    window -- kaldi's fbank ASSERTS ("choose a window size 400 that is [2, 399]")
+    rather than returning an empty tensor, so `_frames_for`'s promise of at least
+    one frame was false and `_encode` raised. MUTATION: remove the zero-pad in
+    `_fbank` and every n < 400 case here fails."""
+    feats, mask = beats(torch.randn(1, n) * 0.1, torch.tensor([n]))
     assert feats.shape[1] == 1 and int(mask.sum()) == 1
 
 
