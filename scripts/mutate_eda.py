@@ -167,6 +167,54 @@ MUTANTS = [
      "        if sub.empty:",
      "        if False:",
      "empty allowlist check is na", "test_an_allowlist_over_zero_rows_is_na_not_a_vacuous_pass"),
+
+    # ---------------------------------------------------------------- S tier
+    # These live in tests/test_eda_signal.py, so they carry the file with them.
+    ("eda/planes.py",
+     "    if declared is not None and int(declared) != rate:",
+     "    if False:",
+     "native rate cross-check",
+     "tests/test_eda_signal.py::test_a_declared_rate_that_disagrees_with_the_file_is_refused"),
+    ("eda/planes.py",
+     "    resampled = resample_poly_to(wav, rate, chain_sr)",
+     "    resampled = wav[:, ::max(1, rate // chain_sr)]",
+     "chain plane uses the training resampler",
+     "tests/test_eda_signal.py::test_the_chain_plane_is_identical_to_what_the_training_path_produces"),
+    ("eda/planes.py",
+     "    mono = prepare_waveform(torch.from_numpy(resampled)[None], audio)[0]",
+     "    mono = torch.from_numpy(resampled).mean(dim=0)",
+     "chain plane uses the model's channel policy",
+     "tests/test_eda_signal.py::test_the_channel_policy_comes_from_the_config_not_from_a_local_downmix"),
+    ("eda/extract/__init__.py",
+     '            suffixed = {f"{k}_{plane_name}": v for k, v in out.items()}',
+     "            suffixed = dict(out)",
+     "signal columns suffixed per plane",
+     "tests/test_eda_signal.py::test_every_signal_column_is_emitted_once_per_plane"),
+    ("eda/extract/level.py",
+     "    return DB_FLOOR if x <= 0 else max(DB_FLOOR, float(20.0 * np.log10(x)))",
+     "    return float(20.0 * np.log10(x)) if x > 0 else float('-inf')",
+     "dBFS floor instead of -inf",
+     "tests/test_eda_signal.py::test_silence_reports_the_floor_and_not_negative_infinity"),
+    ("eda/extract/timing.py",
+     "    loud = db > SILENCE_DBFS",
+     "    loud = db > db.max() + SILENCE_DBFS",
+     "silence threshold is absolute",
+     "tests/test_eda_signal.py::test_the_silence_threshold_is_absolute_not_relative"),
+    ("eda/extract/spectral.py",
+     "    flatness = float(np.exp(np.mean(np.log(np.maximum(psd, floor)))) / np.mean(psd))",
+     "    _pos = psd[psd > 0]\n    flatness = float(np.exp(np.mean(np.log(_pos))) / np.mean(psd)) if _pos.size == psd.size else 0.0",
+     "zero PSD bins floored, not dropped",
+     "tests/test_eda_signal.py::test_zero_bins_are_floored_so_flatness_is_computed_not_abandoned"),
+    ("eda/extract/spectral.py",
+     '        row[f"band_energy_{i}"] = _band(lo, hi, closed=(i == top)) / total',
+     '        row[f"band_energy_{i}"] = _band(lo, hi) / total',
+     "top band includes the Nyquist bin",
+     "tests/test_eda_signal.py::test_band_energies_are_fractions_that_sum_to_one_at_16k"),
+    ("eda/extract/spectral.py",
+     '        "hf_ratio_8k": _band(CHAIN_NYQUIST_HZ, nyquist, closed=True) / total,',
+     '        "hf_ratio_8k": near / total,',
+     "hf_ratio_8k is an absolute band",
+     "tests/test_eda_signal.py::test_bandwidth_finds_a_low_pass_edge"),
 ]
 
 py = sys.argv[1]
@@ -176,12 +224,16 @@ for path, old, new, label, test in MUTANTS:
     assert old in orig, f"pattern not found for {label}"
     p.write_text(orig.replace(old, new, 1))
     try:
-        r = subprocess.run([py, "-m", "pytest", f"tests/test_eda.py::{test}",
-                            "-o", "addopts=", "-q"], capture_output=True, text=True)
+        # A bare test name means `tests/test_eda.py`; the S tier carries its own
+        # file. Written this way rather than with a sixth tuple field so the 37
+        # entries above did not all have to be touched to add the 38th.
+        node = test if "::" in test else f"tests/test_eda.py::{test}"
+        r = subprocess.run([py, "-m", "pytest", node, "-o", "addopts=", "-q"],
+                           capture_output=True, text=True)
         killed = r.returncode != 0
     finally:
         p.write_text(orig)
-    print(f"{'KILLED ' if killed else 'ALIVE  '} {label:38s} <- {test}")
+    print(f"{'KILLED ' if killed else 'ALIVE  '} {label:40s} <- {test.rsplit('::', 1)[-1]}")
     if not killed:
         alive.append(label)
 print(f"\n{len(MUTANTS) - len(alive)}/{len(MUTANTS)} mutants killed")

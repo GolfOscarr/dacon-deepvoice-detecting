@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 __all__ = ["Extractor", "ExtractorError", "METADATA", "SIGNAL", "Registry",
-           "register_metadata", "register_signal", "run_metadata"]
+           "register_metadata", "register_signal", "run_metadata", "run_signal"]
 
 
 class ExtractorError(ValueError):
@@ -142,4 +142,42 @@ def run_metadata(path: Path, probe: Any, names: tuple[str, ...] | None = None
                 f"extractor {ex.name!r} emits column(s) {sorted(clash)} already "
                 f"written by an earlier extractor")
         row.update(out)
+    return row
+
+
+def run_signal(planes: Mapping[str, Any], names: tuple[str, ...] | None = None
+               ) -> dict[str, Any]:
+    """Every registered S-tier extractor over every plane, suffixed by plane.
+
+    `planes` is `eda.planes.load_planes`' output, `{"native": Plane, ...}`.
+    A column `rms_dbfs` emitted by the `level` extractor lands as `rms_dbfs_native`
+    and `rms_dbfs_chain`, which is what makes the difference columns of R1 a
+    subtraction rather than a join.
+
+    Critical: the extractor is handed `(plane.wav, plane.sample_rate)` and
+    nothing else -- not the plane, not its name. `SIGNAL`'s arity check refuses
+    a function that could accept a third argument, so an extractor that wanted
+    to behave differently on the chain plane could not be registered, let alone
+    run. R1 asks for the same statistic computed twice; an extractor that knew
+    which time it was would quietly make it two statistics.
+
+    Caveat: a failure on one plane does not fail the other. A file whose native
+    plane is 8-channel and whose chain plane is mono can legitimately break one
+    and not the other, and collapsing both to a single `*_ok` would hide which.
+    """
+    chosen = SIGNAL.values() if names is None else [SIGNAL[n] for n in names]
+    row: dict[str, Any] = {}
+    for plane_name, plane in planes.items():
+        for ex in chosen:
+            try:
+                out = ex(plane.wav, plane.sample_rate)
+            except Exception as exc:                 # noqa: BLE001 -- a row, not a raise
+                out = ex.failed(f"{type(exc).__name__}: {exc}")
+            suffixed = {f"{k}_{plane_name}": v for k, v in out.items()}
+            clash = set(suffixed) & set(row)
+            if clash:
+                raise ExtractorError(
+                    f"extractor {ex.name!r} emits column(s) {sorted(clash)} on "
+                    f"plane {plane_name!r} already written by an earlier extractor")
+            row.update(suffixed)
     return row
