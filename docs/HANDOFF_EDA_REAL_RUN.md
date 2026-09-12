@@ -16,7 +16,7 @@ found while running it. This document adds the *measured results* and the open p
 |---|---|
 | Repository | `/home/hyeonseop.shin/workspace/dacon-deepvoice-detecting` — **one worktree, no others** |
 | Branch | `main`, tracking `origin/main` |
-| HEAD at handoff time | `dd5c71d` *Merge PR #7: BEATs wired, and the pipeline verified on real audio* |
+| HEAD at handoff time | `8fcc942` *docs: settle the whole-repo suite count in the handoff* — the five commits above `dd5c71d` (the PR #7 merge) are this session's |
 | Interpreter | `/data/project/private/dacon-venvs/dacon311/bin/python` — CPython **3.11.15**, the eval server's exact version |
 | Credentials | **None on disk.** `~/.aws` does not exist and no `AWS_*` env var is set; `aws` authenticates through the **EC2 instance role** `EC2-Slurm-GPU-Node-Role`. Nothing to pass, nothing to protect |
 | Corpus | `/data/project/private/dacon-corpus/{raw,interim}` — **50 G + 55 G**, on weka (80 T free). **Not** on `/`, which has ~456 G |
