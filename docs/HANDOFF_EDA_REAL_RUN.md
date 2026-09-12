@@ -15,8 +15,8 @@ found while running it. This document adds the *measured results* and the open p
 | | |
 |---|---|
 | Repository | `/home/hyeonseop.shin/workspace/dacon-deepvoice-detecting` — **one worktree, no others** |
-| Branch | **`eda`** — every commit of this work lives here. `main` is left at `origin/main` (`dd5c71d`, the PR #7 merge) and is not to be committed to; the EDA lands on it as a PR, the way PRs #2-#7 did |
-| HEAD | `git log --oneline main..eda` — 10 commits above `dd5c71d` (the PR #7 merge). The row below was the state at first drafting; §3's status block says what has landed since |
+| Branch | **`feat/eda`** — every commit of this work lives here. `main` is left at `origin/main` (`dd5c71d`, the PR #7 merge) and is not to be committed to; the EDA lands on it as a PR, the way PRs #2-#7 did |
+| HEAD | `git log --oneline main..feat/eda` — 10 commits above `dd5c71d` (the PR #7 merge). The row below was the state at first drafting; §3's status block says what has landed since |
 | Interpreter | `/data/project/private/dacon-venvs/dacon311/bin/python` — CPython **3.11.15**, the eval server's exact version |
 | Credentials | **None on disk.** `~/.aws` does not exist and no `AWS_*` env var is set; `aws` authenticates through the **EC2 instance role** `EC2-Slurm-GPU-Node-Role`. Nothing to pass, nothing to protect |
 | Corpus | `/data/project/private/dacon-corpus/{raw,interim}` — **50 G + 55 G**, on weka (80 T free). **Not** on `/`, which has ~456 G |
@@ -28,8 +28,8 @@ Verify you are in the right place:
 cd /home/hyeonseop.shin/workspace/dacon-deepvoice-detecting
 V=/data/project/private/dacon-venvs/dacon311/bin/python
 
-git status --short --branch                     # expect: ## eda
-git log --oneline main..eda | wc -l             # the EDA commits, 10 at handoff
+git status --short --branch                     # expect: ## feat/eda
+git log --oneline main..feat/eda | wc -l             # the EDA commits, 10 at handoff
 $V -c "import sys; sys.path.insert(0,'.'); import eda; print(eda.__file__)"
 # -> /home/hyeonseop.shin/workspace/dacon-deepvoice-detecting/eda/__init__.py
 ls /data/project/private/dacon-corpus/interim   # 7 source dirs + _licences
@@ -259,8 +259,8 @@ a lowercase `area: what changed` subject, then prose explaining *why*, no bullet
 
 Repository specifics learned this session:
 
-- **Branch is `eda`**, and `main` stays where `origin/main` is. There is one worktree; do not
-  create others. Commit the EDA to `eda`; open a PR when a phase closes.
+- **Branch is `feat/eda`**, and `main` stays where `origin/main` is. There is one worktree; do not
+  create others. Commit the EDA to `feat/eda`; open a PR when a phase closes.
 - **Never `git add -A`** — `eda/out/` is gitignored but the corpus paths are not in the repo at all,
   and `configs/eda.yaml` is under active edit.
 - **`scripts/check_links.py` validates heading anchors**, computed with GitHub's algorithm. A
