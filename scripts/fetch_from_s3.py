@@ -268,7 +268,18 @@ def _looks_like_archive(p: pathlib.Path) -> bool:
     name = p.name.lower()
     if ".part_" in name or re.search(r"\.z\d{2}$|\.\d{3}$", name):
         return True
-    return any(name.endswith(s) for s in _ARCHIVE_HINTS)
+    if any(name.endswith(s) for s in _ARCHIVE_HINTS):
+        return True
+    # 🔴 `split -b` names its pieces `.aa`, `.ab`, ... with no digits and no
+    # hint of their own, so the checks above miss them entirely. PartialSpoof
+    # ships `database_eval.tar.gz.aa/.ab/.ac` -- 5.4 GB, the whole eval set --
+    # and it was skipped silently, which is the SONICS defect wearing different
+    # letters. Only treat a two-letter tail as a split piece when what precedes
+    # it is itself archive-shaped, so an `.srt.en` or a `.model.pt` is not
+    # mistaken for one.
+    stem, _, tail = name.rpartition(".")
+    return (len(tail) == 2 and tail.isalpha()
+            and any(stem.endswith(s) for s in _ARCHIVE_HINTS))
 
 
 def _inside(root: pathlib.Path, target: pathlib.Path) -> bool:

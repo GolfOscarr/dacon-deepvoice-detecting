@@ -263,3 +263,19 @@ def test_a_partial_fetch_verifies_only_what_it_asked_for(tmp_path):
     # and without the trim it is a false failure
     ok, bad = pull.verify_dir(d, want)
     assert bad == [("development.tar.gz.part_aa", "missing")]
+
+
+def test_split_pieces_named_by_letters_are_reported_too():
+    """🔴 `split -b` names its pieces `.aa`, `.ab`, ... -- no digits, no
+    extension of their own -- so the digit-based checks miss them completely.
+    PartialSpoof ships `database_eval.tar.gz.aa/.ab/.ac`, 5.4 GB and the whole
+    eval set, and it was skipped with nothing said. Same defect as SONICS,
+    different letters.
+
+    Mutation: drop the two-letter branch and the first three assertions fail."""
+    for name in ("database_eval.tar.gz.aa", "database_eval.tar.gz.ab",
+                 "CFAD.z01", "train_split.zip", "database_dev.tar.gz"):
+        assert pull._looks_like_archive(pathlib.Path(name)), name
+    # and things that merely end in two letters are not archives
+    for name in ("notes.md", "readme.txt", "model.pt", "subtitles.srt.en"):
+        assert not pull._looks_like_archive(pathlib.Path(name)), name
