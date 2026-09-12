@@ -821,6 +821,31 @@ def test_the_shipped_config_blocks_ctrsvdd_with_a_reason():
         assert not cfg.source(name).blocked, name
 
 
+def test_the_shipped_config_keeps_generated_environmental_audio_out_of_pool_e():
+    """🔴 CompSpoof's `env_sources/<corpus>/spoofed/` is *generated*
+    environmental sound -- 12,273 of it AudioLDM. It is not pool E (which is
+    real) and not pool D (which is fake **music**), and it has no cell of its
+    own. The source is rooted at the whole ESDD2 tree because that is where the
+    bonafide halves live, so the exclusion is the only thing standing between
+    12,273 AudioLDM clips and the label `real noise`."""
+    from eda.config import load_eda_config
+
+    cfg = load_eda_config("configs/eda.yaml")
+    src = cfg.source("compspoof-env-bonafide")
+    assert src.pool == "E" and src.exclude_reason
+    for tree in ("spoofed", "speech_sources", "mixed_audio", "original_audio"):
+        assert tree in src.exclude, tree
+
+    # and it excludes on the real path shape, at the depth it really occurs
+    assert src.excludes_path(
+        "eval_source/env_sources/EnvSDD/spoofed/TTA/audioldm1/x.wav")
+    assert not src.excludes_path(
+        "eval_source/env_sources/EnvSDD/bonafide/x.wav")
+    # substring, not component, would have matched this and dropped it
+    assert not src.excludes_path(
+        "eval_source/env_sources/EnvSDD/bonafide/spoofed_like_name.wav")
+
+
 def test_the_shipped_config_drops_both_rirs_sources_and_says_what_was_measured():
     """🔴 Both were registered in pool E and both are out, for reasons the run
     measured rather than assumed. `rirs-pointsource` is 843 of 843 byte-identical
@@ -839,11 +864,12 @@ def test_the_shipped_config_drops_both_rirs_sources_and_says_what_was_measured()
     assert "843 of 843" in cfg.source("rirs-pointsource").blocked
     assert "1.365" in cfg.source("rirs-isotropic").blocked
 
-    # And the consequence: pool E is down to one independent source, which
-    # `min_groups_per_role` cannot be met by and `build_folds` cannot rotate.
-    runnable = [s.name for s in cfg.sources_in("E") if not s.blocked]
-    assert runnable == ["musan-noise"]
-    assert cfg.gates.min_groups_per_role > len(runnable)
+    # And the consequence: dropping them left `musan-noise` alone in pool E,
+    # which `build_folds` cannot rotate. `compspoof-env-bonafide` is the answer
+    # to that and was fetched for it -- so the invariant is that pool E never
+    # goes back to a single runnable source, not that it has a particular one.
+    runnable = {s.name for s in cfg.sources_in("E") if not s.blocked}
+    assert runnable == {"musan-noise", "compspoof-env-bonafide"}
 
 
 def test_the_grouping_gate_says_when_it_truncated_the_name_list(tmp_path):

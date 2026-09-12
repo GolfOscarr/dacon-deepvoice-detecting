@@ -269,15 +269,12 @@ sources:
   # -------------------------------------------------------------------------
   # POOL E -- non-musical sound
   # -------------------------------------------------------------------------
-  # 🔴 CONSEQUENCE OF THE TWO BLOCKS BELOW, stated here so it cannot be missed:
-  # pool E is now **one independent source**, `musan-noise` -- 930 files, 6.23 h.
-  # `gates.min_groups_per_role` is 6 and `folds.build_folds` cannot rotate a
-  # single source, so the noise role has no honest validation until a second,
-  # genuinely independent source lands. The candidate is CompSpoof's
-  # `env_sources/<corpus>/bonafide/` halves, already registered below as
-  # `compspoof-v2`. Blocking the two RIRS sources did not cause this; it
-  # revealed it. They were never two sources -- one was a byte-identical copy
-  # of MUSAN and the other was not noise at all.
+  # Blocking the two RIRS sources below left pool E with `musan-noise` alone --
+  # 930 files, 6.23 h, and `folds.build_folds` cannot rotate a single source.
+  # That is why `compspoof-env-bonafide` was fetched and registered here: the
+  # blocks did not cause the gap, they revealed it. One of the two was a
+  # byte-identical copy of MUSAN and the other was not noise at all, so pool E
+  # has had one independent source all along (docs/EDA/05 E0).
   - name: musan-noise
     pool: E
     root: musan/openslr-17/musan/noise
@@ -317,6 +314,36 @@ sources:
       impulse responses, not noise: 417 files, 1.365 s median, 314 of 417
       below the 4 s floor, 1-30 channels. Material for the reverb transform,
       not a member of pool E (docs/EDA/05 E2)
+
+  # CompSpoof's environmental halves, and the answer to pool E having one
+  # source. Fetched 2026-09-12 with `fetch_from_s3.py --only '*_source.tar.gz'`
+  # -- 21.8 GB of the 111.8 GB in the store, because the rest is speech and
+  # mixtures we hold better sources for.
+  #
+  # ⚠️ Root is the whole `ESDD2` tree and the four excluded names carry the
+  # decision. 122,303 wav files live under it; **13,172** are bonafide
+  # environmental audio and the rest are either generated (`spoofed`), speech
+  # (`speech_sources`), or compositions of the two (`mixed_audio`,
+  # `original_audio`). `spoofed` is the one that matters: it is *generated
+  # environmental sound*, which is neither pool E nor pool D -- pool D is fake
+  # **music** -- and it has no cell of its own. Letting it in would label
+  # 12,273 AudioLDM clips as real noise.
+  #
+  # ⚠️ The independent-group count here is **3, not 5**: AudioCapsEnv, EnvSDD
+  # and VGGSoundEnv are the only corpora with a bonafide half, and each appears
+  # in both `eval_source` and `test_source`, which are splits of the same
+  # corpus rather than two of them. Path depth will say 6 and be wrong in the
+  # optimistic direction -- the LJSpeech caveat in G-EDA3, one pool over.
+  - name: compspoof-env-bonafide
+    pool: E
+    root: compspoof-v2/ESDD2
+    suffixes: [.wav]
+    exclude: [spoofed, speech_sources, mixed_audio, original_audio]
+    exclude_reason: >-
+      only `env_sources/<corpus>/bonafide/` is real environmental audio;
+      `spoofed` is generated environmental sound (12,273 of it AudioLDM),
+      which is not pool E and not pool D, and the other three trees are
+      speech or speech+env compositions
 
   # -------------------------------------------------------------------------
   # MIXED -- per-component pools, assigned once the layout is enumerated

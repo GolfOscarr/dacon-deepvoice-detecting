@@ -34,12 +34,60 @@ constraint on fold count.
 
 The drops did not cause it — they revealed it. One of the two was a byte-identical copy of MUSAN
 and the other was not noise, so pool E has had one independent source all along. The remedy already
-in the plan is CompSpoof's `env_sources/<corpus>/bonafide/` halves (E4), which moves from wave 2 to
-blocking.
+in the plan is CompSpoof's `env_sources/<corpus>/bonafide/` halves (E4), which moved from wave 2 to
+blocking and **landed the same day** — see E0b.
 
 **What it bought.** G-EDA5 went from 843 cross-source duplicate groups to **0** — it now passes.
 The single remaining duplicate group is unrelated: 5 MLAAD files under `fake/lb/VITS2-Claude/`
 that are byte-identical to each other, from five different utterances.
+
+---
+
+## E0b — CompSpoof lands, and pool E is a pool again
+
+Fetched 2026-09-12 with `fetch_from_s3.py compspoof-v2 --only '*_source.tar.gz' --only '*_label.csv'`
+— **21.8 GB of the 111.8 GB** in the store, sha256-verified, because the rest is speech and
+mixtures we hold better sources for. Registered as `compspoof-env-bonafide`, pool E.
+
+**13,172 files, 14.64 h.** Pool E is now **14,102 rows / 20.9 h across two sources**, past the ~10 h
+target for the first time. `enumerate_source` returns exactly 13,172 of the 122,303 wav files under
+`ESDD2` — the other 109,131 are excluded, and the exclusion is the decision:
+
+> `exclude: [spoofed, speech_sources, mixed_audio, original_audio]`
+
+⚠️ `spoofed` is the one that matters. It is **generated environmental sound** — 12,273 of it
+AudioLDM — which is neither pool E (real) nor pool D (fake **music**), and has no cell of its own.
+Without the exclusion, 12,273 AudioLDM clips would carry the label *real noise*.
+
+### What the census says about it
+
+| corpus | n | sample rate | channels |
+|---|---|---|---|
+| EnvSDD | 6,696 | 16 kHz | mono |
+| VGGSoundEnv | 4,202 | 44.1 kHz | stereo |
+| AudioCapsEnv | 2,274 | 44.1 kHz (one file 22.05 kHz) | 1,578 stereo / 696 mono |
+
+🔴 **Three findings, each of which changes something downstream.**
+
+**1. Every file is exactly 4.00 s.** Not a median — 13,172 of 13,172, one distinct value. Pool E's
+new source is a constant, and `duration_s == 4.00` separates it from `musan-noise` (median 11.13 s)
+perfectly. Test clips are 4–60 s, so a 4.00 s noise bed cannot cover one without tiling, and tiling
+is a render-time decision that must be identical on train and test (R2).
+
+**2. Sample rate and channel count are a corpus fingerprint — on the native plane only.** EnvSDD is
+the only 16 kHz source and VGGSoundEnv the only all-stereo one, so `(orig_sr, orig_channels)`
+recovers the corpus almost exactly. The 16 kHz chain resample collapses it. This is the first place
+in the corpus where the two measurement planes of R1 differ in what they leak, which makes pool E
+the cheapest place to *test* that the chain plane is measuring what we think it is.
+
+**3. `eval_source` and `test_source` are splits of the same corpora, and they overlap.** E1 found
+**32 duplicate groups over 112 rows** inside the source, **18 of them spanning the two splits**.
+They are not two independent halves, and the true independent-group count for pool E is **3**
+(AudioCapsEnv, EnvSDD, VGGSoundEnv) plus MUSAN's two — not the 6 that path depth will report by
+counting `eval_source/...` and `test_source/...` separately. That is the LJSpeech caveat in G-EDA3,
+one pool over, and here it errs optimistic.
+
+No file in the new source is byte-identical to anything in `musan-noise`.
 
 ---
 
