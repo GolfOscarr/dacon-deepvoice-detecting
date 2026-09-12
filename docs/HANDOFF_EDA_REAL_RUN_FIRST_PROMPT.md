@@ -13,6 +13,9 @@ and nothing else does. `duration_s` alone predicts `MUSIC_FAKE` at **AUC 1.000**
 carrying 0.27 of the metric. Format and channel count carry the rest. Remove all three and all four
 heads sit at exactly 0.500, so there is no fourth confound hiding underneath.
 
+The work lives on the **`eda`** branch, not `main` — `main` is parked at `origin/main` and the
+EDA lands on it as a PR.
+
 **Your goal**, in order:
 
 1. **Corpus decisions the run has forced** (config-only): drop `rirs-pointsource` — 843 of 843 files

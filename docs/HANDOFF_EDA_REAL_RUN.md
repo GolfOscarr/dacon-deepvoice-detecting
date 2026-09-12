@@ -15,8 +15,8 @@ found while running it. This document adds the *measured results* and the open p
 | | |
 |---|---|
 | Repository | `/home/hyeonseop.shin/workspace/dacon-deepvoice-detecting` — **one worktree, no others** |
-| Branch | `main`, tracking `origin/main` |
-| HEAD at handoff time | `8fcc942` *docs: settle the whole-repo suite count in the handoff* — the five commits above `dd5c71d` (the PR #7 merge) are this session's |
+| Branch | **`eda`** — every commit of this work lives here. `main` is left at `origin/main` (`dd5c71d`, the PR #7 merge) and is not to be committed to; the EDA lands on it as a PR, the way PRs #2-#7 did |
+| HEAD | `git log --oneline main..eda` — 10 commits above `dd5c71d` (the PR #7 merge). The row below was the state at first drafting; §3's status block says what has landed since |
 | Interpreter | `/data/project/private/dacon-venvs/dacon311/bin/python` — CPython **3.11.15**, the eval server's exact version |
 | Credentials | **None on disk.** `~/.aws` does not exist and no `AWS_*` env var is set; `aws` authenticates through the **EC2 instance role** `EC2-Slurm-GPU-Node-Role`. Nothing to pass, nothing to protect |
 | Corpus | `/data/project/private/dacon-corpus/{raw,interim}` — **50 G + 55 G**, on weka (80 T free). **Not** on `/`, which has ~456 G |
@@ -28,7 +28,8 @@ Verify you are in the right place:
 cd /home/hyeonseop.shin/workspace/dacon-deepvoice-detecting
 V=/data/project/private/dacon-venvs/dacon311/bin/python
 
-git status --short --branch                     # expect: ## main...origin/main
+git status --short --branch                     # expect: ## eda
+git log --oneline main..eda | wc -l             # the EDA commits, 10 at handoff
 $V -c "import sys; sys.path.insert(0,'.'); import eda; print(eda.__file__)"
 # -> /home/hyeonseop.shin/workspace/dacon-deepvoice-detecting/eda/__init__.py
 ls /data/project/private/dacon-corpus/interim   # 7 source dirs + _licences
@@ -84,6 +85,29 @@ but `G-EDA5` moves to `pass`, and `eda sources` shows pool E's composition hones
 ---
 
 ## 3 — Progress and diagnosis
+
+### 🔴 Status: goals 1 and 2 of §2 are DONE. Read this before acting on the rest
+
+The session that received this handoff executed the first two goals the same day. The diagnosis in
+this section is unchanged and still the thing to act on; the *numbers* below it are the pre-decision
+census and are superseded where they disagree with this block.
+
+| goal | state | where it is written up |
+|---|---|---|
+| 1 — corpus decisions | **done**, `c71ed47` | [EDA/05 E0](EDA/05-pool-e-noise.md#e0--decisions-taken-2026-09-12-and-what-they-cost) |
+| 1b — pool E's single source | **done**, `7867d08` — CompSpoof fetched, 13,172 files, pool E is 14,102 rows / 20.9 h over 2 sources | [EDA/05 E0b](EDA/05-pool-e-noise.md#e0b--compspoof-lands-and-pool-e-is-a-pool-again) |
+| 2 — finish wave 1 | **done**, `57eda27` — SONICS fetched, `cell8` is 49,074 rows | [EDA/08 §6c](EDA/08-real-run.md#6c--wave-1-finished-sonics-and-what-cell-8-actually-looks-like) |
+| 3 — Phase 1, the S tier | **not started.** This is the next action | [EDA/00](EDA/00-harness.md) |
+
+Current census: `A` 36,246 · `B` 16,006 · `C` 8,660 · `D` 27,605 · `E` **14,102** · `cell8`
+**49,074** = **151,693 rows**, all `probe_ok` except the 3 known-unreadable. `mixed` is still
+unprobed. Gates: **G-EDA5 now passes** (843 cross-source duplicates → 0), G-EDA1/exclude passes for
+both excluding sources, G-EDA2 and G-EDA3 still fail, the rest `na`.
+
+Five tool defects were found by running it and are fixed with tests: `consolidate` re-merging a
+source blocked after probing, `load_files(cfg, "cell8")` iterating the string's characters,
+G-EDA3 truncating its name list at five silently, and `fetch_from_s3.py --only` with the
+partial-fetch verification trap.
 
 ### What is measured and working
 
@@ -235,7 +259,8 @@ a lowercase `area: what changed` subject, then prose explaining *why*, no bullet
 
 Repository specifics learned this session:
 
-- **Branch is `main`.** There is one worktree; do not create others.
+- **Branch is `eda`**, and `main` stays where `origin/main` is. There is one worktree; do not
+  create others. Commit the EDA to `eda`; open a PR when a phase closes.
 - **Never `git add -A`** — `eda/out/` is gitignored but the corpus paths are not in the repo at all,
   and `configs/eda.yaml` is under active edit.
 - **`scripts/check_links.py` validates heading anchors**, computed with GitHub's algorithm. A
