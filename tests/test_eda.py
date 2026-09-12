@@ -817,8 +817,57 @@ def test_the_shipped_config_blocks_ctrsvdd_with_a_reason():
     assert "bonafide" in cfg.source("ctrsvdd").blocked
     # Everything wave 1 needs is runnable.
     for name in ("fakemusiccaps", "fma", "mlaad", "ljspeech", "zeroth-korean",
-                 "musan-music", "musan-noise", "rirs-pointsource", "sonics"):
+                 "musan-music", "musan-noise", "sonics"):
         assert not cfg.source(name).blocked, name
+
+
+def test_the_shipped_config_drops_both_rirs_sources_and_says_what_was_measured():
+    """🔴 Both were registered in pool E and both are out, for reasons the run
+    measured rather than assumed. `rirs-pointsource` is 843 of 843 byte-identical
+    MUSAN copies and contributes 0.00 h MUSAN does not already have.
+    `rirs-isotropic` is impulse responses -- 1.365 s median, 314 of 417 below the
+    4 s sampler floor, up to 30 channels -- which belong to the reverb transform,
+    not to a pool. Blocked rather than deleted so the finding keeps its evidence."""
+    from eda.config import load_eda_config
+
+    cfg = load_eda_config("configs/eda.yaml")
+    for name in ("rirs-pointsource", "rirs-isotropic"):
+        assert cfg.source(name).blocked, name
+
+    # The reason has to carry the measurement, not just a verdict -- a bare
+    # "dropped" reads as an opinion the next session is free to reverse.
+    assert "843 of 843" in cfg.source("rirs-pointsource").blocked
+    assert "1.365" in cfg.source("rirs-isotropic").blocked
+
+    # And the consequence: pool E is down to one independent source, which
+    # `min_groups_per_role` cannot be met by and `build_folds` cannot rotate.
+    runnable = [s.name for s in cfg.sources_in("E") if not s.blocked]
+    assert runnable == ["musan-noise"]
+    assert cfg.gates.min_groups_per_role > len(runnable)
+
+
+def test_consolidate_skips_a_source_blocked_after_it_was_probed(tmp_path):
+    """🔴 The parts of a dropped source stay on disk -- they are the evidence
+    for dropping it. `consolidate` walks `cfg.sources_in(partition)`, which does
+    not filter on `blocked`, so without this the 843 MUSAN copies would be merged
+    straight back into the pool E census by the next run."""
+    root, out = tmp_path / "i", tmp_path / "o"
+    keep = SourceSpec(name="keep", pool="E", root="keep/v1", suffixes=(".wav",))
+    drop = SourceSpec(name="drop", pool="E", root="drop/v1", suffixes=(".wav",))
+    for src in (keep, drop):
+        _write(root / src.root / "a.wav")
+    cfg = EdaConfig(root=root, out=out, sources=(keep, drop),
+                    probe=ProbeConfig(workers=1, shard_size=4))
+    probe_source(cfg, keep)
+    probe_source(cfg, drop)
+    assert len(pd.read_parquet(consolidate(cfg, "E"))) == 2
+
+    blocked = dataclasses.replace(drop, blocked="843 of 843 are byte-identical copies")
+    cfg = dataclasses.replace(cfg, sources=(keep, blocked))
+    df = pd.read_parquet(consolidate(cfg, "E"))
+    assert list(df["source_name"]) == ["keep"]
+    # and the parts it wrote are still there, unread
+    assert list((out / "E/parts/drop").glob("*.parquet"))
 
 
 def test_a_source_that_yields_no_files_raises_rather_than_returning_empty(tmp_path):

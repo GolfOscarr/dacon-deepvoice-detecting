@@ -269,28 +269,54 @@ sources:
   # -------------------------------------------------------------------------
   # POOL E -- non-musical sound
   # -------------------------------------------------------------------------
+  # 🔴 CONSEQUENCE OF THE TWO BLOCKS BELOW, stated here so it cannot be missed:
+  # pool E is now **one independent source**, `musan-noise` -- 930 files, 6.23 h.
+  # `gates.min_groups_per_role` is 6 and `folds.build_folds` cannot rotate a
+  # single source, so the noise role has no honest validation until a second,
+  # genuinely independent source lands. The candidate is CompSpoof's
+  # `env_sources/<corpus>/bonafide/` halves, already registered below as
+  # `compspoof-v2`. Blocking the two RIRS sources did not cause this; it
+  # revealed it. They were never two sources -- one was a byte-identical copy
+  # of MUSAN and the other was not noise at all.
   - name: musan-noise
     pool: E
     root: musan/openslr-17/musan/noise
     suffixes: [.wav]
 
-  # ⚠️ This is MUSAN's `noise/free-sound` set redistributed: 88 byte-identical
-  # files under the same basenames. It is why E1 exists. Kept as its own source
-  # so the duplicate sweep can name the pair rather than hiding it inside a
-  # combined `rirs-noises`.
+  # 🔴 DROPPED 2026-09-12, and blocked rather than deleted so the finding keeps
+  # its evidence. E1 ran over the whole source and the leak is not partial:
+  # **843 of 843 files are byte-identical to `musan-noise`** -- 843 shared
+  # sha256 digests, 843 distinct digests on each side, and **0.00 hours** of
+  # audio that MUSAN does not already contribute. The 88-file estimate in the
+  # note this replaces came from the 90-row smoke corpus and understated it by
+  # an order of magnitude. Enumerating it double-counts pool E and puts 843
+  # cross-source duplicates in front of G-EDA3, whose threshold is 0.
   - name: rirs-pointsource
     pool: E
     root: rirs-noises/openslr-28/RIRS_NOISES/pointsource_noises
     suffixes: [.wav]
+    blocked: >-
+      843 of 843 files are byte-identical MUSAN noise/free-sound copies
+      (E1, measured 2026-09-12 over all 843 rows); it contributes 0.00 h
+      of audio MUSAN does not already have
 
-  # ⚠️ Predominantly real impulse responses, not noise: measured median 2.00 s,
-  # with 79 of 90 rows below the 4 s sampler floor. An IR is a convolution
-  # kernel and belongs in the reverb transform, not in a pool (docs/EDA/05 E2).
-  # Enumerated anyway so the census can say so with numbers.
+  # 🔴 REMOVED FROM POOL E 2026-09-12. It was enumerated so the census could say
+  # so with numbers, and the numbers came back: 417 files, median duration
+  # **1.365 s** with **314 of 417 below the 4 s sampler floor**, and channel
+  # counts of 1/2/8/16/30 (only 38 are mono). These are impulse responses --
+  # microphone-array measurements of a room -- not ambient sound. An IR is a
+  # convolution kernel: it belongs to the reverb transform, where it is applied
+  # to pool audio, not to a pool, where it would be *mixed in* as if it were
+  # noise (docs/EDA/05 E2). The earlier note said "median 2.00 s, 79 of 90 rows"
+  # -- that was the smoke corpus; this is the source.
   - name: rirs-isotropic
     pool: E
     root: rirs-noises/openslr-28/RIRS_NOISES/real_rirs_isotropic_noises
     suffixes: [.wav]
+    blocked: >-
+      impulse responses, not noise: 417 files, 1.365 s median, 314 of 417
+      below the 4 s floor, 1-30 channels. Material for the reverb transform,
+      not a member of pool E (docs/EDA/05 E2)
 
   # -------------------------------------------------------------------------
   # MIXED -- per-component pools, assigned once the layout is enumerated

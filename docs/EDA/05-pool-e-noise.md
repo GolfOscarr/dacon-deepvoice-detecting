@@ -12,6 +12,37 @@ census.
 
 ---
 
+## E0 — Decisions taken 2026-09-12, and what they cost
+
+E1 and E2 were run over the whole sources rather than the 90-row smoke corpus, and both RIRS
+sources are now `blocked:` in `configs/eda.yaml` — blocked rather than deleted, so the finding
+keeps its evidence and cannot be quietly rediscovered.
+
+| source | measured | decision |
+|---|---|---|
+| `rirs-pointsource` | 843 files, **843 of 843 sha256-identical to `musan-noise`**, 843 distinct digests on each side, **0.00 h** MUSAN does not already hold | dropped — it was never a second source |
+| `rirs-isotropic` | 417 files, median **1.365 s**, **314 of 417 below the 4 s floor**, channels 1/2/8/16/30 (38 mono), 0.89 h | out of pool E — impulse responses, material for the reverb transform (E2) |
+
+Both earlier figures came from the smoke corpus and understated the case: the leak was recorded as
+88 files (it is 843) and the isotropic census as 79 of 90 rows (it is 314 of 417).
+
+**What it cost.** Pool E consolidates to **930 rows / 6.23 h from one source**, `musan-noise`, and
+`gates.min_groups_per_role` is 6. The noise role therefore has **no honest validation**:
+`build_folds` cannot rotate on a single source, and G-EDA3 names `musan-noise` at 2 path-derived
+groups. This is E4's question, answered, and the answer is that the noise role **is** the binding
+constraint on fold count.
+
+The drops did not cause it — they revealed it. One of the two was a byte-identical copy of MUSAN
+and the other was not noise, so pool E has had one independent source all along. The remedy already
+in the plan is CompSpoof's `env_sources/<corpus>/bonafide/` halves (E4), which moves from wave 2 to
+blocking.
+
+**What it bought.** G-EDA5 went from 843 cross-source duplicate groups to **0** — it now passes.
+The single remaining duplicate group is unrelated: 5 MLAAD files under `fake/lb/VITS2-Claude/`
+that are byte-identical to each other, from five different utterances.
+
+---
+
 ## E1 — 🔴 Cross-source duplicate sweep — Tier S, and it must run over **all five pools**
 
 **Compute.** Two passes over every file in the corpus, not just pool E:

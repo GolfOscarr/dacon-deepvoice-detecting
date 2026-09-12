@@ -187,6 +187,14 @@ def consolidate(cfg: EdaConfig, partition: str) -> Path:
         d = parts_root / source.name
         if not d.exists():
             continue
+        # 🔴 A source blocked *after* it was probed still has its parts on disk,
+        # and merging them would put a dropped source back into the census with
+        # nothing saying so. `rirs-pointsource` is the case this was written
+        # for: 843 rows, every one a byte-identical MUSAN copy, sitting under
+        # `out/E/parts/` from the run that found the leak. Skipped and named --
+        # not deleted, because the parts are the evidence for the decision.
+        if source.blocked:
+            continue
         for part in sorted(d.glob("*.parquet")):
             if not part.with_suffix(".DONE").exists():
                 incomplete.append(part)

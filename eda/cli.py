@@ -100,7 +100,13 @@ def cmd_consolidate(cfg, args) -> int:
             print(f"partition {partition}: {exc}", file=sys.stderr)
             return 1
         done += 1
-        print(f"partition {partition}: {out} ({len(pd.read_parquet(out))} rows)")
+        # Critical: a blocked source whose parts are still on disk is skipped by
+        # `consolidate`, and the count would otherwise drop with nothing saying
+        # why. Naming it here is the difference between "the census shrank" and
+        # "we dropped `rirs-pointsource` and here is the row count without it".
+        dropped = [s.name for s in cfg.sources_in(partition) if s.blocked]
+        note = f"; {len(dropped)} blocked and skipped: {', '.join(sorted(dropped))}" if dropped else ""
+        print(f"partition {partition}: {out} ({len(pd.read_parquet(out))} rows){note}")
     print(f"\n{done} consolidated, {len(skipped)} not probed yet"
           + (f": {', '.join(skipped)}" if skipped else ""))
     return 0 if done else 1

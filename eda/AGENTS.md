@@ -105,18 +105,22 @@ sampling the thing X1 needs the *population* of.
 `musan-speech` → A, `musan-music` → C, `musan-noise` → E. `scripts/sources.yaml` marks
 "never feed MUSAN's music partition in as noise" as Critical; splitting it in the config makes that
 structural instead of a rule somebody has to remember ([EDA/03 C7](../docs/EDA/03-pool-c-real-instrumental.md)).
-`rirs-pointsource` and `rirs-isotropic` are split for a different reason: the first is MUSAN's
-`free-sound` redistributed and the duplicate sweep should be able to *name* the pair.
+`rirs-pointsource` and `rirs-isotropic` were split for a different reason: the first is MUSAN's
+`free-sound` redistributed and the duplicate sweep should be able to *name* the pair. It named it —
+843 of 843 files — and **both are now `blocked:`**, the first as a duplicate and the second as
+impulse responses rather than noise ([EDA/05 E0](../docs/EDA/05-pool-e-noise.md)). Splitting them
+is what made the reasons sayable in one line each; a combined `rirs-noises` would have had to
+block or keep both together.
 
 ---
 
 ## Verification
 
 ```bash
-$V -m pytest tests/test_eda.py -o addopts=""      # 46 tests
+$V -m pytest tests/test_eda.py -o addopts=""      # 58 tests
 ```
 
-Every invariant is paired with a mutation that was **observed** to fail — **25 run, 25 killed**:
+Every invariant is paired with a mutation that was **observed** to fail — **37 run, 37 killed** (`scripts/mutate_eda.py`):
 the declared-columns check, the arity check, the `fail > na > pass` ordering, null labels coerced to
 0, the `DONE`-marker and `FIXED_COLUMNS` checks in `consolidate`, the exclusion in
 `enumerate_source` and its component-wise matcher, the `file_id` type guard, duplicate detection,
