@@ -36,3 +36,8 @@ venv/
 # directory, which is the checkout, so these land here rather than in the run
 # directory -- a job's log has to exist before the job knows where --out is.
 slurm-*.out
+
+# EDA outputs are derived from the corpus, not source. `eda probe` regenerates
+# them; `docs/EDA/00` section 1 describes the layout. The corpus itself lives
+# outside the repo (/data/project/private/dacon-corpus).
+eda/out/

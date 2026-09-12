@@ -1,0 +1,188 @@
+"""Adversarial mutation harness for `eda/`.
+
+Each entry breaks one invariant and names the test that must go red. The repo's
+standing rule is that a green suite is not evidence a check can fail
+(docs/pipelines/05); this is how that evidence is produced for the EDA package.
+
+    V=/data/project/private/dacon-venvs/dacon311/bin/python
+    $V scripts/mutate_eda.py $V        # exit 1 if any mutant survives
+
+⚠️ **A mutant that dies against an already-red test is not a kill.** Run the
+suite green first -- `$V -m pytest tests/test_eda.py -o addopts=""` -- or a
+broken test will be scored as a passing guard. That happened once and cost two
+rounds to notice.
+
+⚠️ It edits files in place and restores them in a `finally`. Do not run it
+against a dirty working tree you care about, and do not run it concurrently with
+anything else that reads those files.
+"""
+import pathlib, subprocess, sys
+
+MUTANTS = [
+    ("eda/extract/__init__.py",
+     "        got, want = set(out), set(self.columns)\n        if got != want:",
+     "        got, want = set(out), set(self.columns)\n        if False:",
+     "declared-columns check", "test_an_extractor_that_emits_an_undeclared_column_raises"),
+    ("eda/extract/__init__.py",
+     "        if len(params) != self.arity:",
+     "        if False:",
+     "arity check", "test_registration_refuses_an_extractor_with_the_wrong_arity"),
+    ("eda/gates.py",
+     "_ORDER = {FAIL: 0, NA: 1, PASS: 2}",
+     "_ORDER = {NA: 0, FAIL: 1, PASS: 2}",
+     "fail > na > pass ordering", "test_fail_beats_na_beats_pass"),
+    ("eda/analyze/shortcut.py",
+     "    return pd.to_numeric(out, errors=\"coerce\")",
+     "    return pd.to_numeric(out, errors=\"coerce\").fillna(0)",
+     "null labels coerced to 0", "test_head_labels_are_null_where_the_metric_ignores_them"),
+    ("eda/driver.py",
+     "            if not part.with_suffix(\".DONE\").exists():",
+     "            if False:",
+     "DONE-marker check in consolidate", "test_consolidate_refuses_a_part_whose_done_marker_is_missing"),
+    ("eda/driver.py",
+     "        if source.excludes_path(p.relative_to(root).as_posix()):\n            continue",
+     "        if False:\n            continue",
+     "exclusion in enumerate_source", "test_enumeration_honours_an_exclusion"),
+    ("eda/analyze/duplicates.py",
+     "    return have[counts > 1].sort_values([\"sha256\", \"file_id\"]).reset_index(drop=True)",
+     "    return have.head(0)",
+     "duplicate detection", "test_the_duplicate_sweep_finds_cross_source_byte_identity"),
+    ("eda/ids.py",
+     "        if any(parts[i:i + n] == want for i in range(len(parts) - n + 1)):",
+     "        if any(p.startswith(prefix) for p in ['/'.join(parts)]):",
+     "component-wise exclusion matching", "test_exclusion_matches_path_components_not_substrings"),
+    ("eda/ids.py",
+     "    if not isinstance(source_name, str):",
+     "    if False:",
+     "file_id source-name type guard", "test_file_id_refuses_a_non_string_source"),
+    ("eda/gates.py",
+     "    missing = [k for k in SUMMARY_KEYS if k not in dupes]",
+     "    missing = []",
+     "duplicate-summary completeness check", "test_an_incomplete_duplicate_summary_reads_na_not_pass"),
+    ("eda/driver.py",
+     "            missing = [c for c in FIXED_COLUMNS if c not in frame.columns]",
+     "            missing = []",
+     "FIXED_COLUMNS check in consolidate", "test_consolidate_refuses_a_part_missing_the_fixed_columns"),
+    ("eda/config.py",
+     "            if self.pool is not None:",
+     "            if False:",
+     "whole_file must have pool = null", "test_a_component_source_and_a_whole_file_source_carry_opposite_keys"),
+    ("eda/config.py",
+     "            if self.cell is not None:",
+     "            if False:",
+     "component must have cell = null", "test_a_component_source_and_a_whole_file_source_carry_opposite_keys"),
+    ("eda/config.py",
+     "            if self.cell in UNSCRAPEABLE_CELLS:",
+     "            if False:",
+     "cells 6/7 cannot be whole_file", "test_cells_6_and_7_cannot_be_whole_file_sources"),
+    ("eda/analyze/shortcut.py",
+     "        out = out.mask(cells.notna(), cells.map(by_cell))",
+     "        pass",
+     "head_labels reads CELL_TABLE", "test_head_labels_read_the_cell_table_for_whole_file_rows"),
+    ("eda/config.py",
+     "        return self.pool if self.row_kind == \"component\" else f\"cell{self.cell}\"",
+     "        return self.pool",
+     "whole_file partitions by cell", "test_a_whole_file_source_probes_into_its_own_partition"),
+    ("configs/eda.yaml",
+     "  - name: sonics\n    row_kind: whole_file\n    cell: 8",
+     "  - name: sonics\n    pool: D",
+     "sonics registered as cell 8, not pool D", "test_the_shipped_config_registers_sonics_as_cell_8_not_pool_d"),
+    ("eda/analyze/shortcut.py",
+     "HEADS = {c.removeprefix(\"label_\"): i for i, c in enumerate(_LABEL_COLUMNS)}",
+     "HEADS = {\"voice_present\": 0, \"music_present\": 1, \"music_fake\": 2, \"voice_fake\": 3}",
+     "HEADS derived from manifest order", "test_heads_follow_the_manifest_label_order"),
+    ("eda/analyze/shortcut.py",
+     "        x, names = build_design(sub, top_k=cfg.top_k)",
+     "        x, names = build_design(sub, top_k=20)",
+     "top_k reaches the audit", "test_analysis_knobs_reach_the_analyses"),
+    ("eda/config.py",
+     "    if not raw:",
+     "    if False:",
+     "empty-sources refusal", "test_a_config_with_no_sources_is_refused"),
+    ("eda/cli.py",
+     "    (out / DUPLICATE_SUMMARY).write_text(",
+     "    _unused = (lambda *a, **k: None)(",
+     "duplicate summary written unconditionally", "test_the_cli_records_a_clean_sweep"),
+    ("eda/analyze/duplicates.py",
+     "    if \"sha256\" not in files.columns:",
+     "    if False:",
+     "NoHashes guard", "test_a_probe_without_hashes_leaves_the_duplicate_gate_na"),
+    ("eda/driver.py",
+     "    df.attrs[\"missing_partitions\"] = missing",
+     "    df.attrs[\"missing_partitions\"] = []",
+     "missing-partition reporting", "test_a_partition_with_no_table_is_reported_not_skipped"),
+    ("eda/analyze/shortcut.py",
+     "        n_splits = max(2, min(cfg.n_splits, minority))",
+     "        n_splits = cfg.n_splits",
+     "cv clamp to the minority class", "test_the_cross_validation_is_clamped_to_the_minority_class_and_says_so"),
+    ("eda/driver.py",
+     "from eda.extract import identity as _identity        # noqa: F401",
+     "",
+     "identity registration side-effect import", "test_importing_the_driver_populates_the_metadata_registry"),
+    ("eda/gates.py",
+     "    if key == \"relpath\":\n        return values.astype(str).str.strip()",
+     "    if False:\n        return values.astype(str).str.strip()",
+     "relpath allowlist key", "test_the_allowlist_keys_match_the_shipped_csv_shapes"),
+    ("eda/gates.py",
+     "            if source.allowlist_column not in (reader.fieldnames or []):",
+     "            if False:",
+     "misnamed allowlist column -> na", "test_a_misnamed_allowlist_column_is_na_not_fail"),
+    ("configs/eda.yaml",
+     "    allowlist_key: relpath",
+     "    allowlist_key: stem",
+     "jamendo allowlist key in the shipped config", "test_the_shipped_config_names_the_real_allowlist_columns"),
+    ("eda/driver.py",
+     "    if source.blocked:",
+     "    if False:",
+     "blocked source raises", "test_a_blocked_source_raises_rather_than_enumerating"),
+    ("configs/eda.yaml",
+     "    blocked: >-",
+     "    unread_key: >-",
+     "ctrsvdd blocked in the shipped config", "test_the_shipped_config_blocks_ctrsvdd_with_a_reason"),
+    ("eda/driver.py",
+     "    if not out:",
+     "    if False:",
+     "empty enumeration raises", "test_a_source_that_yields_no_files_raises_rather_than_returning_empty"),
+    ("eda/config.py",
+     "        return (self.root if spec.stage == \"interim\" else self.raw) / spec.root",
+     "        return self.root / spec.root",
+     "raw-stage source root", "test_a_raw_stage_source_reads_from_the_sync_tree"),
+    ("configs/eda.yaml",
+     "    stage: raw\n    root: mlaad/v9/payload",
+     "    root: mlaad/v9",
+     "mlaad stage in the shipped config", "test_the_shipped_config_reads_mlaad_from_raw"),
+    ("eda/cli.py",
+     "        except FileNotFoundError:\n            absent.append(source.name)\n            continue",
+     "        except FileNotFoundError:\n            raise",
+     "absent source is skipped, not fatal", "test_probe_tolerates_absent_and_blocked_sources_but_not_empty_ones"),
+    ("eda/cli.py",
+     "    if not probed:",
+     "    if False:",
+     "nothing probed is a failure", "test_probe_tolerates_absent_and_blocked_sources_but_not_empty_ones"),
+    ("eda/driver.py",
+     "        raise BlockedSource(f\"source {source.name!r} is blocked: {source.blocked}\")",
+     "        raise FileNotFoundError(f\"source {source.name!r} is blocked\")",
+     "blocked is distinct from absent", "test_probe_tolerates_absent_and_blocked_sources_but_not_empty_ones"),
+    ("eda/gates.py",
+     "        if sub.empty:",
+     "        if False:",
+     "empty allowlist check is na", "test_an_allowlist_over_zero_rows_is_na_not_a_vacuous_pass"),
+]
+
+py = sys.argv[1]
+alive = []
+for path, old, new, label, test in MUTANTS:
+    p = pathlib.Path(path); orig = p.read_text()
+    assert old in orig, f"pattern not found for {label}"
+    p.write_text(orig.replace(old, new, 1))
+    try:
+        r = subprocess.run([py, "-m", "pytest", f"tests/test_eda.py::{test}",
+                            "-o", "addopts=", "-q"], capture_output=True, text=True)
+        killed = r.returncode != 0
+    finally:
+        p.write_text(orig)
+    print(f"{'KILLED ' if killed else 'ALIVE  '} {label:38s} <- {test}")
+    if not killed:
+        alive.append(label)
+print(f"\n{len(MUTANTS) - len(alive)}/{len(MUTANTS)} mutants killed")
+sys.exit(1 if alive else 0)

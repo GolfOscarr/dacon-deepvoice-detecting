@@ -1,0 +1,306 @@
+# The EDA pass: which sources are on local disk, which pool each feeds, and the
+# pre-committed gate thresholds. Loaded by `eda.config.load_eda_config`.
+#
+# Every field is written out even where it equals the default, and there is no
+# inheritance between configs -- `configs/run_default.yaml`'s reasoning applies
+# unchanged: a file that names one knob leaves the other twenty to whatever the
+# code happened to default to that week.
+#
+# `root` is where `scripts/fetch_from_s3.py --extract <dir>` unpacked the
+# corpus; that script writes `<dir>/<name>/<version>/`, which is why every
+# source root below starts with that pair.
+
+# Where `scripts/fetch_from_s3.py --extract <dir>` unpacked the corpus.
+# Critical: weka (`/data/project/private`, 93 T free), not `/` (456 G). And
+# `--dest` and `--extract` both retain their output, so budget 2x per source.
+root: /data/project/private/dacon-corpus/interim
+# Where `--dest` put the synced payloads. 🔴 Read by sources with `stage: raw`:
+# not everything in the store is an archive. MLAAD is synced with its
+# `fake/<language>/<generator>/` tree intact -- deliberately, because flattening
+# it would destroy the generator-disjoint split axis -- so `--extract` finds no
+# archive, unpacks nothing, and leaves an EMPTY interim directory behind.
+raw: /data/project/private/dacon-corpus/raw
+out: eda/out
+
+probe:
+  # ffprobe is ~20 ms of process spawn per file and the corpus is ~1.7 M files.
+  # Threads rather than processes: subprocess.run releases the GIL.
+  workers: 32
+  shard_size: 20000
+  ffprobe: ffprobe
+  timeout_s: 20.0
+  header_bytes: 8192
+  hash_chunk_bytes: 1048576
+  # Empty means every registered M-tier extractor. ⚠️ `identity` reads every
+  # byte of the corpus -- the rest touch only headers, so "no decode" is not
+  # "cheap". Narrowing this to [ffprobe, mp3_header] gives a fast first look and
+  # makes E1, the duplicate sweep that caught the RIRS/MUSAN leak, impossible.
+  extractors: []
+
+sample:
+  # Critical: this seed picks WHICH FILES ARE MEASURED and is therefore part of
+  # the corpus definition -- the MLAAD cap is the precedent (docs/data/12).
+  # `analysis.seed` is a different thing and is deliberately a different field.
+  seed: 0
+  per_stratum: 2000
+  stratify_by: [source_name]
+  # Pool D because five generator families are too few to sample from and it
+  # carries 0.27; pool E because it is small and its last surprise cost a
+  # corpus rebuild.
+  full_pools: [D, E]
+
+analysis:
+  # Only a cross-validation shuffle. Changing it does not change the corpus.
+  seed: 0
+  n_splits: 5
+  # One-hot width per categorical; the rest folds into `__other__`. `encoder` is
+  # effectively a corpus fingerprint and would otherwise explode the design.
+  top_k: 20
+  max_depth: 8
+
+gates:
+  # docs/data/07 E-S2. Above this, neutralize before training anything.
+  shortcut_auc_max: 0.60
+  min_groups_per_role: 6
+  max_cross_source_duplicates: 0
+
+# ---------------------------------------------------------------------------
+# POOL A -- real voice
+# ---------------------------------------------------------------------------
+sources:
+  - name: common-voice-en
+    pool: A
+    root: common-voice-en/cv-26.0
+    suffixes: [.mp3]
+
+  - name: common-voice-ko
+    pool: A
+    root: common-voice-ko/cv-26.0
+    suffixes: [.mp3]
+
+  - name: libritts-r
+    pool: A
+    root: libritts-r/openslr-141
+    suffixes: [.wav]
+
+  - name: ljspeech
+    pool: A
+    root: ljspeech/mdc-1.1
+    suffixes: [.wav]
+
+  - name: zeroth-korean
+    pool: A
+    root: zeroth-korean/openslr-40
+    suffixes: [.flac, .wav]
+
+  # Critical: MUSAN's `speech` partition is real voice and belongs in pool A,
+  # not in pool E with the rest of the archive. See the musan-music note below.
+  - name: musan-speech
+    pool: A
+    root: musan/openslr-17/musan/speech
+    suffixes: [.wav]
+
+  # -------------------------------------------------------------------------
+  # POOL B -- fake voice
+  # -------------------------------------------------------------------------
+  # ⚠️ Unarchived in S3 -- see the `raw:` note above. `stage: raw` and the root
+  # carries the `payload/` segment. Enumerating it from `interim` returned 0
+  # files with no error, because `extract_archives` had created the directory.
+  - name: mlaad
+    pool: B
+    stage: raw
+    root: mlaad/v9/payload
+    suffixes: [.wav, .flac, .mp3]
+
+  - name: wavefake
+    pool: B
+    root: wavefake/zenodo-5642694
+    suffixes: [.wav]
+
+  # ⚠️ Fake SUNG voice, and therefore pool B -- not a fake-music source.
+  # docs/data/02: "Voice includes spoken and sung (the rules classify vocals as
+  # voice)"; "Instrumental = 반주·악기음 with no vocals". 260 h from 14 SVS/SVC
+  # methods, and the only sung-fake coverage we hold: without it every song's
+  # vocal reads the same way.
+  # ⚠️ Already 16 kHz native, so it carries NO resampler transition band while
+  # MLAAD and WaveFake both do. Within pool B "sung" and "16 kHz native" are
+  # perfectly confounded -- docs/EDA/01 A2 is the measurement that says by how
+  # much.
+  # ⚠️ CC BY-NC-ND. Usable only in the form #417333 A5 grants: train from the
+  # ORIGINAL files, augment at training time, ship 원본 파일 + 코드 + seed, never
+  # a redistributed derivative. scripts/sources.yaml carries that duty as
+  # `caveat_compliance`; the acquisition record's own note is empty.
+  - name: ctrsvdd
+    pool: B
+    root: ctrsvdd/2024
+    suffixes: [.flac, .wav]
+    # 🔴 BLOCKED, and the reason is a measurement, not a suspicion. Read from
+    # train.txt + dev.txt (7.3 MB, pulled before extracting 18.9 GiB):
+    # 128,029 rows are **109,313 deepfake and 18,716 bonafide** -- 14.6% of
+    # CtrSVDD is REAL sung voice. As a flat pool-B source it would label all
+    # 18,716 real singers `voice_fake = 1`.
+    # And the split is not expressible with `exclude`: train_set.zip is flat
+    # (`train_set/CtrSVDD_0053_T_0038470.flac`), so the label lives only in the
+    # .txt, keyed by utterance id. That needs a label-file join, which does not
+    # exist yet.
+    # ⚠️ Worth having when it does: all 114 speakers appear on BOTH sides of the
+    # label, so a speaker-disjoint fold is mandatory -- the same singer as real
+    # and as fake is memorisable directly on the label axis. `speaker_ref_id`
+    # must come from the .txt, never from a path. 8 attack families (A01-A08),
+    # 6 source corpora, and the two are entangled: jvsmusic has only A06 while
+    # m4singer has 7 of 8.
+    # ℹ️ The bonafide half is not waste -- pool A holds NO sung real voice at
+    # all, so it fills a genuine gap once it can be labelled correctly.
+    blocked: >-
+      14.6% of CtrSVDD is bonafide (real sung voice) and the label lives only in
+      train.txt/dev.txt, which SourceSpec cannot join yet. Registering it as
+      pool B would label 18,716 real singers voice_fake=1. See docs/EDA/08.
+
+  # -------------------------------------------------------------------------
+  # POOL C -- real instrumental
+  # -------------------------------------------------------------------------
+  # Critical: the archive is cleared, individual tracks are NOT. docs/data/12
+  # section 4 partitioned both corpora per track; only ids in the allow list may
+  # enter. G-EDA1 enforces it, and reports `na` -- never `pass` -- while the CSV
+  # is missing. Pull them from
+  # s3://<bucket>/dacon-deepfake-detection/data/licences/.
+  - name: fma
+    pool: C
+    root: fma/fma_small
+    suffixes: [.mp3]
+    allowlist: _licences/fma_allow.csv
+    allowlist_column: id
+    # FMA files are zero-padded (`000002.mp3`) and the allowlist id is `2`.
+    allowlist_key: int_stem
+
+  - name: mtg-jamendo
+    pool: C
+    root: mtg-jamendo/raw_30s
+    suffixes: [.mp3]
+    allowlist: _licences/jamendo_allow.csv
+    allowlist_column: id
+    # ⚠️ Jamendo's allowlist ids are PATHS -- `14/214.mp3` -- not track numbers.
+    # Matching on the stem compares `214` against `14/214.mp3`, every row fails,
+    # and G-EDA1 reports FAIL for a reason that has nothing to do with licences.
+    allowlist_key: relpath
+
+  # Critical: MUSAN ships a `music` partition and scripts/sources.yaml marks it
+  # Critical -- never feed it in as noise, which would put real music in the
+  # noise role and corrupt the music-present labels. Declaring the three
+  # partitions as three sources with three pools makes that structural rather
+  # than a check somebody has to remember (docs/EDA/03 C7).
+  # ⚠️ And its subdirectories are named `fma`, `jamendo` and `hd` -- it is FMA
+  # and Jamendo material, which we acquire separately. docs/EDA/05 E1.
+  - name: musan-music
+    pool: C
+    root: musan/openslr-17/musan/music
+    suffixes: [.wav]
+
+  # -------------------------------------------------------------------------
+  # POOL D -- fake instrumental. The whole pool, and 0.27 of the metric.
+  # -------------------------------------------------------------------------
+  # ✅ D1 ANSWERED 2026-09-11 by enumerating FakeMusicCaps.zip's central
+  # directory. Six top-level entries, and **no real-audio half**:
+  #   MusicGen_medium 5521 · audioldm2 5521 · musicldm 5521 ·
+  #   mustango 5521 · stable_audio_open 5521   = 27,605 generated clips
+  #   __MACOSX 27,605  <- not audio; see below
+  # So the licence question docs/EDA/04 D1 raises has an answer: MusicCaps'
+  # YouTube-derived originals are not in this archive and nothing needs
+  # excluding on licence grounds.
+  #
+  # 🔴 `__MACOSX` does need excluding, for a different reason. It is the macOS
+  # resource-fork sidecar, and it mirrors the tree with `._name.wav` entries --
+  # **27,605 of them, exactly as many as the real audio**. They carry the `.wav`
+  # suffix, so `enumerate_source` would take every one, and because a decode
+  # failure is a row rather than an exception they would land as 27,605
+  # `probe_ok = False` rows: **half of the pool-D census, silently, as garbage**.
+  # Excluded by name rather than by a global rule, because R2 makes every filter
+  # a visible decision.
+  - name: fakemusiccaps
+    pool: D
+    root: fakemusiccaps/zenodo-15063698
+    suffixes: [.wav, .mp3, .flac]
+    exclude: [__MACOSX]
+    exclude_reason: >-
+      macOS resource-fork sidecar: 27,605 `._*.wav` files that are not audio and
+      would double the pool-D census with undecodable rows. Licence-wise the
+      archive is clean -- its central directory holds five generator directories
+      and no MusicCaps real half (docs/EDA/08 section 2).
+
+  # -------------------------------------------------------------------------
+  # WHOLE-FILE SOURCES -- used as-is, never composed. pool is null by contract.
+  # -------------------------------------------------------------------------
+  # 🔴 SONICS was acquired as `pool: D` and that is wrong for 100% of it. Its own
+  # fake_songs.csv reports `no_vocal = False` for all 49,074 rows -- every song
+  # has vocals. POOL_LABELS['D'] asserts `voice_present = 0`, so as a pool-D
+  # component it would have told the model there is no voice in 49k AI songs
+  # that all sing, routed sung vocals into the 0.27-weight music-fake head, and
+  # left `voice_fake` null on the strongest fake-vocal evidence in the corpus.
+  #
+  # It is cell 8 (mixed F/F): voice present, music present, both fake. And
+  # `validate_manifest` requires `pool = null` on a whole_file row -- "a whole
+  # file is used as-is, not drawn from a component pool".
+  #
+  # 🔴 It is also the corpus's FIRST whole_file source, and that is a trap as
+  # well as a gift. docs/data/02's f_c rule requires the composed fraction to be
+  # equal across cells on both sides of FILE_FAKE: 49k whole-file cell-8 rows
+  # with no whole-file cell-5 counterpart makes "is a whole song" predict FAKE.
+  # The counterpart is FMA/Jamendo tracks WITH vocals, which docs/EDA/03 C2's
+  # VAD sweep is what finds -- so C2 is now load-bearing, not hygiene.
+  #
+  # ⚠️ 1,971 h against a ~45 h budget (44x). Subsample per generator at ingest:
+  # `source` (suno/udio) is the artifact family, `algorithm` the model version
+  # (chirp-v2/v3/v3.5 are all Suno). Duration 32.9-240 s, median 131 s -- the
+  # first source reaching the competition's upper range, and mostly ABOVE its
+  # 60 s ceiling, so cropping is mandatory.
+  # ⚠️ ~37 kbps VBR mp3 against FMA's typical 128-320. Bitrate alone may separate
+  # music-fake outright; docs/EDA/06 X1 is the measurement and the codec stage is
+  # the fix.
+  # ⚠️ The FAKE half only. The 48,090 real songs ship as real_songs.csv --
+  # YouTube IDs, no audio -- and docs/data/01 rules YouTube-sourced audio out.
+  # Do NOT reconstruct them. `suffixes` excludes .csv so the metadata files are
+  # not enumerated as audio; join them in by file_id instead.
+  - name: sonics
+    row_kind: whole_file
+    cell: 8
+    root: sonics/hf-2025
+    suffixes: [.mp3, .wav]
+
+  # -------------------------------------------------------------------------
+  # POOL E -- non-musical sound
+  # -------------------------------------------------------------------------
+  - name: musan-noise
+    pool: E
+    root: musan/openslr-17/musan/noise
+    suffixes: [.wav]
+
+  # ⚠️ This is MUSAN's `noise/free-sound` set redistributed: 88 byte-identical
+  # files under the same basenames. It is why E1 exists. Kept as its own source
+  # so the duplicate sweep can name the pair rather than hiding it inside a
+  # combined `rirs-noises`.
+  - name: rirs-pointsource
+    pool: E
+    root: rirs-noises/openslr-28/RIRS_NOISES/pointsource_noises
+    suffixes: [.wav]
+
+  # ⚠️ Predominantly real impulse responses, not noise: measured median 2.00 s,
+  # with 79 of 90 rows below the 4 s sampler floor. An IR is a convolution
+  # kernel and belongs in the reverb transform, not in a pool (docs/EDA/05 E2).
+  # Enumerated anyway so the census can say so with numbers.
+  - name: rirs-isotropic
+    pool: E
+    root: rirs-noises/openslr-28/RIRS_NOISES/real_rirs_isotropic_noises
+    suffixes: [.wav]
+
+  # -------------------------------------------------------------------------
+  # MIXED -- per-component pools, assigned once the layout is enumerated
+  # -------------------------------------------------------------------------
+  # Its `env_sources/<corpus>/bonafide/` halves are real ambient audio (pool E)
+  # and `spoofed/<generator>/` are the smoke corpus's pool-D placeholder --
+  # environmental, not music. Declared as one `mixed` source for the census;
+  # `head_labels` maps `mixed` to null and drops it from the shortcut audit
+  # rather than guessing a label.
+  - name: compspoof-v2
+    pool: mixed
+    root: compspoof-v2/ESDD2
+    suffixes: [.wav, .flac]
