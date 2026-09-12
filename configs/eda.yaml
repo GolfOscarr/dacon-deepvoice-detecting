@@ -99,6 +99,28 @@ sources:
     root: zeroth-korean/openslr-40
     suffixes: [.flac, .wav]
 
+  # 🔴 CFAD's real half: **6 independent Chinese corpora** -- aishell1, aishell3,
+  # magicconversa, magicread, selfrecording, thchs30 -- and the first non-en/ko
+  # language in pool A. 38,600 files, 57.5 h, all 16 kHz mono wav.
+  # ⚠️ Six, not the four `train_clean` shows: `magicconversa` and
+  # `selfrecording` appear only in the dev and test splits. Counting a source
+  # from one split is how the census under-reports its own diversity. Separated from the fake half by `exclude` rather than by root,
+  # because the split is a directory level down: the tree is
+  # `<split>_clean/{real_clean,fake_clean}/<corpus-or-generator>/`.
+  #
+  # ⚠️ Only `clean_version` is registered. CFAD ships the **same utterances**
+  # three times -- `codec_version` (4 codecs) and `noisy_version` (5 SNRs) --
+  # and those are publisher-applied transforms, not more corpus. See the two
+  # blocked entries below.
+  - name: cfad-real
+    pool: A
+    root: cfad/zenodo-8122764/CFAD/clean_version
+    suffixes: [.wav]
+    exclude: [fake_clean]
+    exclude_reason: >-
+      the fake half of the same directory tree is registered separately as
+      `cfad-fake`; a pool-A source must not carry generated speech
+
   # Critical: MUSAN's `speech` partition is real voice and belongs in pool A,
   # not in pool E with the rest of the archive. See the musan-music note below.
   - name: musan-speech
@@ -161,6 +183,88 @@ sources:
       14.6% of CtrSVDD is bonafide (real sung voice) and the label lives only in
       train.txt/dev.txt, which SourceSpec cannot join yet. Registering it as
       pool B would label 18,716 real singers voice_fake=1. See docs/EDA/08.
+
+  # 🔴 CFAD's fake half, and the best generator diversity in the corpus: **11
+  # runnable vocoders and TTS systems** -- gl, hifigan, lpcnet, mbmelgan, pwg,
+  # straight, stylegan, wavenet (7,900 each) plus fasthifigan, tacohifigan and
+  # world (3,500 each). A 12th, `partiallyfake`, is excluded below. G-EDA3's
+  # floor is 6 and this source alone clears it, on a key that is a real
+  # generator identity rather than a path guess. 73,700 files, 69.5 h.
+  #
+  # ⚠️ `partiallyfake` is excluded. Those 3,500 files are **partially** spoofed:
+  # real and generated segments inside one utterance. Pool B asserts the voice
+  # is fake, full stop, so a partially-spoofed file would inject bona fide
+  # speech into the fake pool -- the same reason PartialSpoof is not a pool-B
+  # source. They belong to the frame-level head (models/heads), not to a pool.
+  - name: cfad-fake
+    pool: B
+    root: cfad/zenodo-8122764/CFAD/clean_version
+    suffixes: [.wav]
+    exclude: [real_clean, partiallyfake]
+    exclude_reason: >-
+      `real_clean` is registered separately as `cfad-real`; `partiallyfake` is
+      partially spoofed and contains bona fide segments, so it cannot carry a
+      pool-B label that asserts the whole utterance is generated
+
+  # ⚠️ The same 115,800 utterances as `clean_version`, re-encoded by the
+  # publisher into flac/ogg/m4a/mp3. Blocked for two reasons at once: every row
+  # would be a duplicate of a clean row (E1, and a fold leak), and `container`
+  # plus `codec_name` are already the corpus's sharpest identity proxies
+  # (docs/EDA/06 X1b) -- this would hand them 115,800 more rows to be sharp on.
+  # Codec augmentation is a **transform** under R2, applied to train and test
+  # alike; it is not a second corpus.
+  - name: cfad-codec
+    pool: B
+    root: cfad/zenodo-8122764/CFAD/codec_version
+    suffixes: [.wav]
+    blocked: >-
+      the same 115,800 utterances as clean_version with flac/ogg/m4a/mp3
+      applied by the publisher. A codec is a transform (R2), not a corpus,
+      and these rows would duplicate clean_version's
+
+  # ⚠️ And again at five SNRs (0/5/10/15/20 dB), 115,896 files. Additive noise
+  # is pool E's job at render time, where the SNR is drawn and recorded; baked
+  # in by a publisher it is 115,896 duplicate utterances carrying a fixed SNR
+  # nothing else in the corpus shares.
+  - name: cfad-noisy
+    pool: B
+    root: cfad/zenodo-8122764/CFAD/noisy_version
+    suffixes: [.wav]
+    blocked: >-
+      the same utterances as clean_version with noise added at 5 fixed SNRs.
+      Additive noise is a render-time transform drawn from pool E, not a corpus
+
+  # 🔴 REGISTERED AND BLOCKED: it cannot be extracted on this machine, and that
+  # is a measurement rather than a guess. Codecfake ships a spanned zip
+  # (`train_split.z01..z05` + `.zip`, 5 GB segments, 32,060,882,354 bytes) and
+  # `zip -s 0 --out` -- the only join that produces a readable archive -- exits
+  # **0** while writing **10,737,418,467** bytes. `scripts/fetch_from_s3.py`
+  # now compares the two and refuses; before it did, Python rejected the
+  # truncated result as a possible zip bomb, which is the only reason it
+  # surfaced at all.
+  #
+  # What it would be worth: 740,747 rows, 634,926 fake across 6 neural codecs
+  # (F01..F06) and 105,821 real (AISHELL-3 `SSB*` + VCTK `p*`), from its own
+  # `label/train.txt`. Modern TTS generates straight from a neural codec and
+  # skips the vocoder, so vocoder-trained detectors are structurally blind to
+  # this family (survey/01) -- it is the most valuable of the new sources and
+  # the only one we cannot open.
+  #
+  # ⚠️ Two further decisions are already recorded here so they are not
+  # rediscovered: the licence is **CC BY-NC-ND 4.0**, whose NoDerivatives term
+  # sits badly with a corpus that exists to be cropped, mixed and re-encoded;
+  # and its 14.3% real half is **paired by utterance** with the fakes
+  # (`F01_SSB13650058.wav` from `SSB13650058.wav`), so real and fake share a
+  # speaker and an utterance and must not be split across folds (G-EDA4).
+  - name: codecfake
+    pool: B
+    root: codecfake/zenodo-13838106
+    suffixes: [.wav]
+    blocked: >-
+      cannot be extracted: `zip -s 0` truncates its spanned zip from
+      32,060,882,354 bytes of pieces to 10,737,418,467 and exits 0. Needs a
+      newer Info-ZIP or 7-Zip, or an unsplit re-upload. Also CC BY-NC-ND 4.0,
+      and its 14.3% real half is paired by utterance with the fakes
 
   # -------------------------------------------------------------------------
   # POOL C -- real instrumental

@@ -93,6 +93,52 @@ than merely alarming.
 `voice_fake` at 0.898 — none of which is duration, container, or channel count. A transform plan
 aimed at those three would leave every row of that table in place.
 
+### 🔴 X1c — with 13 sources, grouped AUC becomes measurable, and one head refuses to collapse
+
+Re-run 2026-09-12 after CFAD landed: **264,085 rows, 13 sources**. Enough source groups that
+holding one out no longer leaves a single-class fold, so `auc_source_grouped` is real for three of
+the four heads for the first time.
+
+| head | n | AUC | **source-grouped** |
+|---|--:|--:|--:|
+| `voice_present` | 264,085 | 0.991 | **0.488** |
+| `voice_fake` | 213,626 | 0.867 | **0.467** |
+| `music_present` | 264,085 | 1.000 | **0.991** |
+| `music_fake` | 85,339 | 1.000 | n/a — 4 groups |
+
+**The voice heads collapse to chance.** That is the corpus-identity diagnosis confirmed the strong
+way: hold out the publisher and the metadata tells you nothing about whether a voice is present or
+generated.
+
+**`music_present` does not collapse.** One feature at a time, grouped:
+
+| feature alone | AUC | grouped |
+|---|--:|--:|
+| `duration_s` | 0.975 | **0.933** |
+| `file_bytes` | 0.946 | **0.921** |
+| `codec_name` | 0.997 | 0.875 |
+| `container` | 0.855 | 0.750 |
+| `orig_sr` | 0.455 | 0.167 |
+
+🔴 **Duration survives source-grouping because it is a property of the domain, not of the
+publisher.** Every music source we hold is long — FMA 30.0 s, FakeMusicCaps 10.0 s, SONICS 33–240 s,
+musan-music 216 s — and every voice source is short — CFAD 3–5 s, LJSpeech 6.8 s, MLAAD 7.1 s,
+zeroth 7.9 s. Holding out one music source leaves the others, still long.
+
+**Why that is worse than a corpus fingerprint, not better.** Source-grouped validation is the tool
+this project uses to catch shortcuts, and this is a shortcut it cannot catch: it looks like a
+genuine, generalising signal *within our corpus*. In the **test set** it is absent — every file is
+4–60 s whether it is music or speech — so a model that learns "long ⇒ music" scores well in
+validation and loses the presence heads on the leaderboard. It is the one confound so far that
+source-grouping actively hides.
+
+The crop policy ([03 C5](03-pool-c-real-instrumental.md), [04 D2](04-pool-d-fake-instrumental.md))
+is therefore not a tidy-up. It is what makes the presence heads honest, and
+[02 B0](02-pool-b-fake-voice.md) shows it has to hold *within* a source too — CFAD's own real and
+fake halves differ at AUC 0.725 on duration alone.
+
+---
+
 ### The sharpest case: three header fields identify cell 8 exactly
 
 `(orig_sr, orig_channels, container)` over the whole corpus:

@@ -41,6 +41,7 @@ import hashlib
 import json
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -273,38 +274,88 @@ def split_groups(files: Sequence[pathlib.Path]) -> dict[pathlib.Path, list[pathl
     return out
 
 
+def is_spanned_zip(base: pathlib.Path, pieces: Sequence[pathlib.Path]) -> bool:
+    """Was this group a `name.zNN` + `name.zip` set rather than `split -b`?
+
+    🔴 Asked here rather than inferred from the joined file, because inferring
+    it does not work. Python reads a *small* concatenated spanned zip happily
+    -- 41 entries, no complaint -- and refuses a zip64 one with "zipfiles that
+    span multiple disks are not supported". Codecfake's is zip64 because its
+    single entry is 91 GB, so a first version of this caught that message and
+    shelled out; CFAD's went through Python; and a set that is neither would
+    have picked whichever path its size happened to select. The convention is
+    known at grouping time and that is where the decision belongs.
+    """
+    return base.suffix.lower() == ".zip" and bool(pieces) and pieces[-1] == base
+
+
 def join_split(base: pathlib.Path, pieces: Sequence[pathlib.Path],
                work: pathlib.Path) -> pathlib.Path:
-    """Reassemble one split archive under `work` and return the joined path.
+    """Reassemble one split archive under `work`, and **check the result**.
 
-    Costs a second copy of the archive on disk, which is why it goes to `work`
-    rather than beside the payload -- the caller can delete it after extraction
-    and keep the (verified) pieces.
+    Two conventions, two joins, and only one of them is concatenation:
+
+    * **`split -b`** pieces concatenate. The joined size is exactly the summed
+      piece size.
+    * **A spanned zip does not.** Measured, on a fixture built with the real
+      tool: concatenating the pieces -- with or without stripping the 4-byte
+      `PK\x07\x08` spanning signature -- yields a file whose central directory
+      reads (41 entries) and whose *entries do not*, `BadZipFile: Bad magic
+      number for file header`. Only `zip -s 0 --out` rewrites the offsets, and
+      its output is byte-comparable to the pieces minus that signature.
+
+    🔴 **And the join is verified, because this one lied.** `zip -s 0` exited 0
+    on Codecfake and produced **10,737,418,467 bytes from 32,060,882,354** of
+    pieces -- Info-ZIP 3.0 mishandles segments above 4 GB, and these are 5 GB.
+    Nothing said so. The only reason it surfaced is that Python later refused
+    the truncated archive as a possible zip bomb; a smaller entry would have
+    extracted part of a corpus and reported success.
     """
     work.mkdir(parents=True, exist_ok=True)
-    if base.suffix.lower() == ".zip" and pieces and pieces[-1] == base:
-        # `zip -s 0 in.zip --out joined.zip` is the documented way to turn a
-        # spanned set back into one file. Python's zipfile cannot: the stdlib
-        # has no multi-disk support, so this shells out or it does not happen.
+    want = sum(q.stat().st_size for q in pieces)
+
+    if is_spanned_zip(base, pieces):
         joined = work / f"{base.stem}.joined.zip"
-        if joined.exists():
-            return joined
-        proc = subprocess.run(["zip", "-q", "-s", "0", str(base), "--out", str(joined)],
-                              capture_output=True, text=True)
-        if proc.returncode or not joined.exists():
+        if not joined.exists():
+            if not shutil.which("zip"):
+                raise RuntimeError(
+                    f"{base.name} is a spanned zip and needs Info-ZIP `zip -s 0`; "
+                    f"Python's zipfile cannot read or join one")
+            proc = subprocess.run(
+                ["zip", "-q", "-s", "0", str(base), "--out", str(joined)],
+                capture_output=True, text=True)
+            if proc.returncode or not joined.exists():
+                raise RuntimeError(
+                    f"joining spanned zip {base.name} failed: "
+                    f"{(proc.stderr or proc.stdout).strip()[:300]}")
+        got = joined.stat().st_size
+        # The spanning signature is dropped, so the join is 4 bytes short of
+        # the pieces; anything more than that is a truncation.
+        if abs(got - want) > 64:
             raise RuntimeError(
-                f"joining spanned zip {base.name} failed: "
-                f"{(proc.stderr or proc.stdout).strip()[:300]}. `zip` must be "
-                f"installed; Python's zipfile has no multi-disk support")
+                f"joining {base.name} produced {got} bytes from pieces totalling "
+                f"{want}. ⚠️ Measured, not inferred: this Info-ZIP joins CFAD's "
+                f"four 10 GB segments correctly and truncates Codecfake's six 5 GB "
+                f"ones, so segment size alone does not predict it -- which is "
+                f"exactly why the size is checked every time. A newer Info-ZIP or "
+                f"7-Zip can join it, or the source can be re-uploaded unsplit. A "
+                f"short join extracts part of a corpus and reports success")
         return joined
+
     joined = work / f"{base.name}.joined"
-    if joined.exists():
+    if joined.exists() and joined.stat().st_size == want:
         return joined
     with joined.open("wb") as fh:
         for piece in pieces:
             with piece.open("rb") as src:
                 for block in iter(lambda: src.read(CHUNK), b""):
                     fh.write(block)
+    got = joined.stat().st_size
+    if got != want:
+        joined.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"joining {base.name} produced {got} bytes from pieces totalling "
+            f"{want}. A short join extracts partially and reports success")
     return joined
 
 
@@ -362,7 +413,7 @@ def extract_archives(payload: pathlib.Path, out: pathlib.Path,
                 with zipfile.ZipFile(p) as zf:
                     safe = [m for m in zf.namelist() if _inside(out, out / m)]
                     zf.extractall(out, members=safe)
-                    n += 1
+                n += 1
             else:
                 unpacked.append(p)
                 continue
@@ -379,6 +430,28 @@ def extract_archives(payload: pathlib.Path, out: pathlib.Path,
             q.unlink(missing_ok=True)
         if work.exists() and not any(work.iterdir()):
             work.rmdir()
+
+    # 🔴 An archive inside an archive. Codecfake's spanned zip holds exactly one
+    # entry -- `data7/xyk/codecfake/upload_zenodo/train.zip`, 91 GB unpacked --
+    # so a single pass leaves a corpus that is still one zip. Bounded rather
+    # than recursive: two levels is what publishers do, and an unbounded walk
+    # over extracted output is how a zip bomb gets its wish.
+    for depth in range(2):
+        nested = [q for q in sorted(out.rglob("*"))
+                  if q.is_file() and q.suffix.lower() == ".zip"]
+        if not nested:
+            break
+        for q in nested:
+            print(f"      [nest] {q.relative_to(out)}: unpacking in place")
+            try:
+                with zipfile.ZipFile(q) as zf:
+                    safe = [m for m in zf.namelist() if _inside(out, out / m)]
+                    zf.extractall(out, members=safe)
+                n += 1
+                q.unlink()
+            except Exception as exc:                   # noqa: BLE001
+                print(f"      [warn] {q.name}: {exc}")
+
     missed = [p for p in unpacked if _looks_like_archive(p)]
     if missed:
         print(f"      [warn] {len(missed)} archive-looking file(s) not unpacked "

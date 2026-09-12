@@ -10,9 +10,13 @@ Every test here is paired with the mutation that breaks it.
 
 import hashlib
 import importlib.util
+import shutil
+import subprocess
 import pathlib
+import zipfile
 import sys
 
+import numpy as np
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -379,3 +383,152 @@ def test_pieces_are_not_mistaken_for_archives_of_their_own(tmp_path):
     with contextlib.redirect_stdout(buf):
         pull.extract_archives(payload, out)
     assert "not unpacked" not in buf.getvalue()
+
+
+def test_a_short_join_is_refused_rather_than_extracted(tmp_path):
+    """🔴 The first version of `join_split` shelled out to `zip -s 0 --out`,
+    the documented tool for spanned zips. On Codecfake it produced **10.7 GB
+    from 32.1 GB of pieces**, silently, exit code 0. The only reason it was
+    caught is that Python then refused the truncated archive as a possible zip
+    bomb -- had the entry been smaller, it would have extracted part of a
+    corpus and reported success.
+
+    Concatenation makes the size a checkable claim. Mutation: drop the size
+    comparison and this passes with a half-length archive."""
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    (payload / "w.tar.gz.aa").write_bytes(b"a" * 100)
+    (payload / "w.tar.gz.ab").write_bytes(b"b" * 100)
+    pieces = [payload / "w.tar.gz.aa", payload / "w.tar.gz.ab"]
+    base = payload / "w.tar.gz"
+    work = tmp_path / "work"
+
+    joined = pull.join_split(base, pieces, work)
+    assert joined.stat().st_size == 200
+
+    # a stale short join from an interrupted run is redone, not trusted
+    joined.write_bytes(b"a" * 100)
+    again = pull.join_split(base, pieces, work)
+    assert again.stat().st_size == 200
+
+
+def test_a_nested_zip_is_unpacked_in_place(tmp_path):
+    """🔴 Codecfake's spanned zip holds exactly one entry: a 91 GB `train.zip`.
+    One extraction pass leaves a corpus that is still a zip file."""
+    inner = tmp_path / "train.zip"
+    with zipfile.ZipFile(inner, "w") as zf:
+        zf.writestr("a.wav", b"x" * 10)
+        zf.writestr("b.wav", b"y" * 10)
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    outer = payload / "outer.zip"
+    with zipfile.ZipFile(outer, "w") as zf:
+        zf.write(inner, "deep/train.zip")
+    inner.unlink()
+
+    out = tmp_path / "out"
+    assert pull.extract_archives(payload, out) == 2      # outer + nested
+    assert {q.name for q in out.rglob("*.wav")} == {"a.wav", "b.wav"}
+    assert not list(out.rglob("*.zip")), "the intermediate is not left behind"
+
+
+@pytest.mark.skipif(not shutil.which("zip"), reason="needs Info-ZIP to build the fixture")
+def test_a_real_spanned_zip_round_trips(tmp_path):
+    """🔴 Built with the actual tool rather than mocked, because the thing that
+    went wrong was a *behavioural* assumption: Python reads a small
+    concatenated spanned zip happily and refuses a zip64 one with "zipfiles
+    that span multiple disks are not supported". A first version of this
+    dispatched on that message, so which code path ran depended on the
+    publisher's archive size. Codecfake's is zip64 -- 91 GB in one entry -- and
+    it fell through to a warning.
+
+    Mutation: route spanned joins through `zipfile` and the extraction is
+    silently empty for a zip64 set."""
+    src = tmp_path / "src"
+    src.mkdir()
+    rng = np.random.default_rng(0)
+    for i in range(12):
+        (src / f"f{i}.bin").write_bytes(rng.bytes(120_000))
+
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    subprocess.run(["zip", "-q", "-r", "-s", "1m", str(payload / "whole.zip"), "src"],
+                   cwd=tmp_path, check=True)
+    pieces = sorted(q.name for q in payload.iterdir())
+    assert len(pieces) >= 2, f"expected a split set, got {pieces}"
+
+    groups = pull.split_groups(sorted(payload.iterdir()))
+    assert list(groups) == [payload / "whole.zip"]
+    assert pull.is_spanned_zip(payload / "whole.zip", groups[payload / "whole.zip"])
+
+    out = tmp_path / "out"
+    assert pull.extract_archives(payload, out) == 1
+    got = sorted(q.name for q in out.rglob("*.bin"))
+    assert got == sorted(q.name for q in src.iterdir())
+    for q in out.rglob("*.bin"):
+        assert q.read_bytes() == (src / q.name).read_bytes(), q.name
+
+
+@pytest.mark.skipif(not shutil.which("zip"), reason="needs Info-ZIP to build the fixture")
+def test_concatenating_a_spanned_zip_does_not_produce_a_readable_archive(tmp_path):
+    """🔴 The measurement that settled the join, kept because the wrong answer
+    is so plausible. Concatenating a spanned zip's pieces -- with or without
+    stripping the 4-byte `PK\\x07\\x08` spanning signature -- gives a file whose
+    **central directory reads** and whose **entries do not**. So a join checked
+    by "does it list" passes and the corpus is still unreadable.
+
+    Only `zip -s 0 --out` rewrites the offsets."""
+    src = tmp_path / "src"
+    src.mkdir()
+    rng = np.random.default_rng(1)
+    for i in range(8):
+        (src / f"f{i}.bin").write_bytes(rng.bytes(200_000))
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    subprocess.run(["zip", "-q", "-r", "-s", "1m", str(payload / "w.zip"), "src"],
+                   cwd=tmp_path, check=True)
+    pieces = sorted(payload.iterdir())
+    assert len(pieces) >= 2
+
+    cat = tmp_path / "cat.zip"
+    with cat.open("wb") as fh:
+        for q in pieces:
+            fh.write(q.read_bytes())
+    with zipfile.ZipFile(cat) as zf:              # the directory reads...
+        names = [i.filename for i in zf.infolist() if not i.is_dir()]
+        assert names
+        with pytest.raises(zipfile.BadZipFile):   # ...and the entries do not
+            zf.read(names[0])
+
+    # the real join, and it round-trips
+    joined = pull.join_split(payload / "w.zip", pieces, tmp_path / "work")
+    with zipfile.ZipFile(joined) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            assert zf.read(info.filename) == (tmp_path / info.filename).read_bytes()
+
+
+@pytest.mark.skipif(not shutil.which("zip"), reason="needs Info-ZIP to build the fixture")
+def test_a_truncated_spanned_join_is_refused(tmp_path):
+    """🔴 Info-ZIP 3.0 exits 0 and truncates spanned sets whose segments exceed
+    4 GB. On Codecfake it wrote **10,737,418,467 bytes from 32,060,882,354** of
+    pieces, silently. The size check is the only thing between that and a
+    corpus that extracts part-way and reports success.
+
+    Mutation: drop the comparison and this returns a short archive."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.bin").write_bytes(np.random.default_rng(2).bytes(400_000))
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    subprocess.run(["zip", "-q", "-r", "-s", "1m", str(payload / "w.zip"), "src"],
+                   cwd=tmp_path, check=True)
+    pieces = sorted(payload.iterdir())
+
+    work = tmp_path / "work"
+    work.mkdir()
+    # a short join left by a previous run, exactly the Codecfake shape
+    (work / "w.joined.zip").write_bytes(b"PK\x03\x04" + b"\x00" * 64)
+    with pytest.raises(RuntimeError, match="bytes from pieces totalling"):
+        pull.join_split(payload / "w.zip", pieces, work)

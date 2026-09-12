@@ -17,6 +17,52 @@ design possible that nothing else in the corpus supports.
 
 ---
 
+## B0 — CFAD registered: 11 generators, and the duration confound is not only cross-corpus
+
+Fetched, joined, extracted and probed 2026-09-12. CFAD is the best-structured source in the corpus:
+real and fake are separated **by directory**, and each side names its origin one level down, so the
+grouping key is the publisher's own rather than a path guess.
+
+| | n | hours | groups |
+|---|--:|--:|--:|
+| `cfad-real` → pool A | 38,600 | 57.5 | **6** Chinese corpora |
+| `cfad-fake` → pool B | 73,700 | 69.5 | **11** generators |
+
+All 16 kHz mono wav, so it adds no format diversity — and being natively 16 kHz it is on the
+unresampled side of the split described in [00 §4c](00-harness.md#4c---r1s-premise-measured-on-pool-e-it-holds).
+
+🔴 **Duration separates real from fake at AUC 0.725 inside a single publisher's dataset.** Median
+4.61 s real against 3.11 s fake; every one of the 11 generators sits between 2.66 s and 3.82 s
+while the real corpora span 2.10 s (`magicconversa`) to 9.12 s (`thchs30`).
+
+| real corpus | median | | generator | median |
+|---|--:|---|---|--:|
+| thchs30 | 9.12 s | | world | 3.82 s |
+| selfrecording | 5.20 s | | lpcnet | 3.48 s |
+| aishell1 | 4.52 s | | gl | 3.45 s |
+| magicread | 4.18 s | | hifigan | 3.22 s |
+| aishell3 | 3.21 s | | wavenet | 3.03 s |
+| magicconversa | 2.10 s | | fasthifigan | 2.66 s |
+
+This matters because it is the first evidence that the duration confound is **not** merely an
+artifact of mixing publishers. FakeMusicCaps at 10.0 s against `fma_small` at 30.0 s could be
+dismissed as two archives with different conventions; here one publisher's own real and fake halves
+differ, so the crop policy that [03 C5](03-pool-c-real-instrumental.md) and
+[04 D2](04-pool-d-fake-instrumental.md) call for has to hold **within** a source as well as across
+sources. ⚠️ Caveat: the halves are not the same utterances (38,600 real against 73,700 fake), so
+part of the gap is utterance selection rather than generation. Separating those needs the
+utterance-level join, which CFAD's protocols support and which is not done yet.
+
+**Three of CFAD's four shipped versions are not registered.** `codec_version` (4 codecs) and
+`noisy_version` (5 SNRs) are the same 115,800 utterances transformed by the publisher — under R2 a
+codec and additive noise are render-time transforms applied to train and test alike, not more
+corpus, and as rows they would be duplicates carrying a fixed fingerprint. `partiallyfake` (3,500
+files) is excluded from the fake half because it is *partially* spoofed: pool B asserts the voice is
+generated throughout, and those files contain bona fide segments. They belong to the frame head.
+
+---
+
+
 ## B1 — 🔴 WaveFake ↔ LJSpeech pair reconstruction — Tier S, and the highest-value item in this pool
 
 **Compute.** WaveFake is LJSpeech re-synthesized by 7 vocoders (MelGAN, Parallel WaveGAN,
