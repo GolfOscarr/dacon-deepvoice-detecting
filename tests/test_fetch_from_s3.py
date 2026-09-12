@@ -177,3 +177,38 @@ def test_extraction_refuses_members_that_escape_the_root(tmp_path):
 def test_inside_accepts_normal_paths_and_rejects_traversal(tmp_path):
     assert pull._inside(tmp_path, tmp_path / "a" / "b.txt")
     assert not pull._inside(tmp_path, tmp_path / ".." / "b.txt")
+
+
+def test_extraction_is_recursive_over_the_payload(tmp_path, capsys):
+    """🔴 SONICS nests its ten zips under `payload/fake_songs/`. A
+    non-recursive `iterdir()` yielded the *directory*, `is_file()` was False,
+    and 30 GiB extracted to nothing while the run reported success."""
+    import zipfile
+
+    payload = tmp_path / "payload" / "fake_songs"
+    payload.mkdir(parents=True)
+    inner = tmp_path / "src"
+    inner.mkdir()
+    (inner / "a.wav").write_bytes(b"RIFF....")
+    with zipfile.ZipFile(payload / "part_01.zip", "w") as zf:
+        zf.write(inner / "a.wav", "songs/a.wav")
+
+    out = tmp_path / "out"
+    assert pull.extract_archives(tmp_path / "payload", out) == 1
+    assert (out / "songs" / "a.wav").exists()
+
+
+def test_an_unpacked_archive_looking_file_is_reported(tmp_path, capsys):
+    """CompSpoof ships `development.tar.gz.part_aa..ae`; neither `is_tarfile`
+    nor `is_zipfile` recognises a part. Returning a smaller count silently is
+    the "validates and does nothing" failure -- the caller sees a successful
+    extraction of a corpus that is not there."""
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    (payload / "development.tar.gz.part_aa").write_bytes(b"\x1f\x8b not really")
+    (payload / "README.md").write_text("not an archive, and not a warning")
+
+    assert pull.extract_archives(payload, tmp_path / "out") == 0
+    warned = capsys.readouterr().out
+    assert "not unpacked" in warned and "part_aa" in warned
+    assert "README" not in warned, "warning about docs trains the reader to ignore it"

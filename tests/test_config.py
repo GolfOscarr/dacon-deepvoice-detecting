@@ -22,6 +22,7 @@ from models.config import (
     load_train_config,
     validate_model_config,
 )
+from eda.config import load_eda_config
 from training.config import load_run_config
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -58,6 +59,11 @@ LOADERS = {
     "model": load_model_config,
     "train": load_train_config,
     "run": load_run_config,
+    # configs/eda.yaml. It ships here rather than under eda/ so that this sweep
+    # sees it -- a config nobody classified is the thing the sweep exists to
+    # catch, and hiding it in another directory would have satisfied the test by
+    # removing it from the population.
+    "eda": load_eda_config,
 }
 
 

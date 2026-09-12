@@ -39,6 +39,7 @@ import argparse
 import hashlib
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import tarfile
@@ -185,7 +186,13 @@ def extract_archives(payload: pathlib.Path, out: pathlib.Path) -> int:
     """
     out.mkdir(parents=True, exist_ok=True)
     n = 0
-    for p in sorted(payload.iterdir()):
+    unpacked: list[pathlib.Path] = []
+    # Critical: **recursive**. `iterdir()` misses any publisher that nests its
+    # archives, and SONICS does exactly that -- its ten zips live under
+    # `payload/fake_songs/`, so a non-recursive walk yielded the *directory*,
+    # `is_file()` was False, and 30 GiB extracted to nothing while the run
+    # reported success.
+    for p in sorted(payload.rglob("*")):
         if not p.is_file():
             continue
         try:
@@ -204,9 +211,35 @@ def extract_archives(payload: pathlib.Path, out: pathlib.Path) -> int:
                     safe = [m for m in zf.namelist() if _inside(out, out / m)]
                     zf.extractall(out, members=safe)
                     n += 1
+            else:
+                unpacked.append(p)
+                continue
         except Exception as exc:                       # noqa: BLE001
             print(f"      [warn] {p.name}: {exc}")
+    # Critical: a file that looks like an archive and was not unpacked is
+    # reported. Split archives are the live case -- CompSpoof ships
+    # `development.tar.gz.part_aa..ae`, and neither `is_tarfile` nor
+    # `is_zipfile` recognises a part, so each is skipped. Silently returning a
+    # smaller `n` is the "validates and does nothing" failure: the caller sees a
+    # successful extraction of a corpus that is not there.
+    missed = [p for p in unpacked if _looks_like_archive(p)]
+    if missed:
+        print(f"      [warn] {len(missed)} archive-looking file(s) not unpacked "
+              f"(split archive?): {', '.join(p.name for p in missed[:4])}")
     return n
+
+
+#: Suffix patterns that mean "this was meant to be unpacked". Deliberately not
+#: a general guess: payloads legitimately contain README.md, LICENSE and CSVs,
+#: and warning about those would train the reader to ignore the warning.
+_ARCHIVE_HINTS = (".zip", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".7z", ".rar")
+
+
+def _looks_like_archive(p: pathlib.Path) -> bool:
+    name = p.name.lower()
+    if ".part_" in name or re.search(r"\.z\d{2}$|\.\d{3}$", name):
+        return True
+    return any(name.endswith(s) for s in _ARCHIVE_HINTS)
 
 
 def _inside(root: pathlib.Path, target: pathlib.Path) -> bool:
