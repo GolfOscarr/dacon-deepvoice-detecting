@@ -206,23 +206,146 @@ def sync_down(bucket: str, prefix: str, name: str, version: str,
         print("\n".join("      " + l for l in proc.stdout.strip().splitlines()[:6]))
 
 
-def extract_archives(payload: pathlib.Path, out: pathlib.Path) -> int:
+# --------------------------------------------------------------------------
+# split archives
+# --------------------------------------------------------------------------
+
+#: A `split -b` piece: a two-letter tail after something archive-shaped.
+_SPLIT_TAIL = re.compile(r"^(?P<base>.+\.(?:tar|tgz|tar\.gz|tar\.bz2|tar\.xz|zip))"
+                         r"\.(?P<piece>[a-z]{2})$", re.IGNORECASE)
+#: A spanned zip piece: `name.z01` .. `name.zNN`, whose last part is `name.zip`.
+_SPANNED_ZIP = re.compile(r"^(?P<base>.+)\.z(?P<piece>\d{2})$", re.IGNORECASE)
+
+
+def split_groups(files: Sequence[pathlib.Path]) -> dict[pathlib.Path, list[pathlib.Path]]:
+    """`{whole archive -> its pieces, in order}` for the split sets in `files`.
+
+    Two conventions, because publishers use both and neither is guessable from
+    one filename:
+
+    * **`split -b`** -- `database_eval.tar.gz.aa/.ab/.ac`. Concatenating the
+      pieces *is* the archive (PartialSpoof, CompSpoof).
+    * **spanned zip** -- `CFAD.z01/.z02/.z03` plus `CFAD.zip`, where the `.zip`
+      is the **last** piece and holds the central directory. Concatenation is
+      NOT the archive: the parts must be joined by `zip -s 0`, and Python's
+      `zipfile` cannot read either the pieces or the set (CFAD, Codecfake).
+
+    ⚠️ A group is only returned when it is **contiguous from the first piece**.
+    A missing `.z02` would otherwise be joined into a corrupt archive that
+    extracts partially and reports success, which is worse than not extracting.
+    """
+    by_base: dict[pathlib.Path, dict[str, pathlib.Path]] = {}
+    kinds: dict[pathlib.Path, str] = {}
+    for f in files:
+        m = _SPLIT_TAIL.match(f.name)
+        if m:
+            base = f.with_name(m.group("base"))
+            by_base.setdefault(base, {})[m.group("piece").lower()] = f
+            kinds[base] = "cat"
+            continue
+        m = _SPANNED_ZIP.match(f.name)
+        if m:
+            base = f.with_name(m.group("base") + ".zip")
+            by_base.setdefault(base, {})[m.group("piece")] = f
+            kinds[base] = "zip"
+    out: dict[pathlib.Path, list[pathlib.Path]] = {}
+    for base, pieces in by_base.items():
+        if kinds[base] == "cat":
+            want = [f"{a}{b}" for a in "abcdefghijklmnopqrstuvwxyz"
+                    for b in "abcdefghijklmnopqrstuvwxyz"]
+            ordered, i = [], 0
+            while i < len(want) and want[i] in pieces:
+                ordered.append(pieces[want[i]]); i += 1
+            if len(ordered) != len(pieces):
+                continue                       # a hole: leave it to the warning
+            out[base] = ordered
+        else:
+            # The `.zip` last part must exist, or there is no central directory
+            # and nothing can be joined.
+            if not base.exists():
+                continue
+            ordered, i = [], 1
+            while f"{i:02d}" in pieces:
+                ordered.append(pieces[f"{i:02d}"]); i += 1
+            if len(ordered) != len(pieces):
+                continue
+            out[base] = ordered + [base]
+    return out
+
+
+def join_split(base: pathlib.Path, pieces: Sequence[pathlib.Path],
+               work: pathlib.Path) -> pathlib.Path:
+    """Reassemble one split archive under `work` and return the joined path.
+
+    Costs a second copy of the archive on disk, which is why it goes to `work`
+    rather than beside the payload -- the caller can delete it after extraction
+    and keep the (verified) pieces.
+    """
+    work.mkdir(parents=True, exist_ok=True)
+    if base.suffix.lower() == ".zip" and pieces and pieces[-1] == base:
+        # `zip -s 0 in.zip --out joined.zip` is the documented way to turn a
+        # spanned set back into one file. Python's zipfile cannot: the stdlib
+        # has no multi-disk support, so this shells out or it does not happen.
+        joined = work / f"{base.stem}.joined.zip"
+        if joined.exists():
+            return joined
+        proc = subprocess.run(["zip", "-q", "-s", "0", str(base), "--out", str(joined)],
+                              capture_output=True, text=True)
+        if proc.returncode or not joined.exists():
+            raise RuntimeError(
+                f"joining spanned zip {base.name} failed: "
+                f"{(proc.stderr or proc.stdout).strip()[:300]}. `zip` must be "
+                f"installed; Python's zipfile has no multi-disk support")
+        return joined
+    joined = work / f"{base.name}.joined"
+    if joined.exists():
+        return joined
+    with joined.open("wb") as fh:
+        for piece in pieces:
+            with piece.open("rb") as src:
+                for block in iter(lambda: src.read(CHUNK), b""):
+                    fh.write(block)
+    return joined
+
+
+def extract_archives(payload: pathlib.Path, out: pathlib.Path,
+                     work: pathlib.Path | None = None, keep_joined: bool = False
+                     ) -> int:
     """Unpack tar/zip archives into `out`. Returns how many were unpacked.
+
+    Split sets are **joined first** (`split_groups`, `join_split`) and the
+    joined copy is deleted afterwards unless `keep_joined`. Four of the sources
+    in the store ship this way and none of them could be extracted before.
 
     Caveat: members whose path escapes `out` are skipped rather than written.
     These archives come from third parties, and a `../` member would otherwise
     write outside the extraction root.
     """
     out.mkdir(parents=True, exist_ok=True)
+    work = work or out.parent / "_joining"
     n = 0
     unpacked: list[pathlib.Path] = []
+    files = [q for q in sorted(payload.rglob("*")) if q.is_file()]
+    groups = split_groups(files)
+    consumed = {q for pieces in groups.values() for q in pieces}
+    joined_paths: list[pathlib.Path] = []
+    for base, pieces in sorted(groups.items()):
+        try:
+            joined = join_split(base, pieces, work)
+        except Exception as exc:                       # noqa: BLE001
+            print(f"      [warn] {base.name}: {exc}")
+            continue
+        print(f"      [join] {base.name}: {len(pieces)} piece(s) -> {joined.name}")
+        joined_paths.append(joined)
     # Critical: **recursive**. `iterdir()` misses any publisher that nests its
     # archives, and SONICS does exactly that -- its ten zips live under
     # `payload/fake_songs/`, so a non-recursive walk yielded the *directory*,
     # `is_file()` was False, and 30 GiB extracted to nothing while the run
     # reported success.
-    for p in sorted(payload.rglob("*")):
-        if not p.is_file():
+    for p in files + joined_paths:
+        # A piece of a split set is not an archive on its own; the joined file
+        # stands in for the whole group.
+        if p in consumed:
             continue
         try:
             if tarfile.is_tarfile(p):
@@ -251,6 +374,11 @@ def extract_archives(payload: pathlib.Path, out: pathlib.Path) -> int:
     # `is_zipfile` recognises a part, so each is skipped. Silently returning a
     # smaller `n` is the "validates and does nothing" failure: the caller sees a
     # successful extraction of a corpus that is not there.
+    if not keep_joined:
+        for q in joined_paths:
+            q.unlink(missing_ok=True)
+        if work.exists() and not any(work.iterdir()):
+            work.rmdir()
     missed = [p for p in unpacked if _looks_like_archive(p)]
     if missed:
         print(f"      [warn] {len(missed)} archive-looking file(s) not unpacked "

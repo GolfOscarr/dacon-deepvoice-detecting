@@ -279,3 +279,103 @@ def test_split_pieces_named_by_letters_are_reported_too():
     # and things that merely end in two letters are not archives
     for name in ("notes.md", "readme.txt", "model.pt", "subtitles.srt.en"):
         assert not pull._looks_like_archive(pathlib.Path(name)), name
+
+
+# --------------------------------------------------------------------------
+# split archives
+# --------------------------------------------------------------------------
+
+def _tar_of(path, names):
+    import io, tarfile
+    with tarfile.open(path, "w:gz") as tf:
+        for n in names:
+            data = (n * 100).encode()
+            info = tarfile.TarInfo(n)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return path
+
+
+def test_a_split_tar_is_joined_and_extracted(tmp_path):
+    """🔴 Four sources in the store ship this way -- PartialSpoof, CompSpoof,
+    CFAD, Codecfake -- and none of them could be extracted at all before. The
+    pieces are not archives individually, so every one was skipped."""
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    whole = _tar_of(tmp_path / "whole.tar.gz", ["a.wav", "b.wav"])
+    blob = whole.read_bytes()
+    half = len(blob) // 2
+    (payload / "whole.tar.gz.aa").write_bytes(blob[:half])
+    (payload / "whole.tar.gz.ab").write_bytes(blob[half:])
+    whole.unlink()
+
+    out = tmp_path / "out"
+    assert pull.extract_archives(payload, out) == 1
+    assert {q.name for q in out.iterdir()} == {"a.wav", "b.wav"}
+    # the joined copy is not left behind to double the corpus on disk
+    assert not (tmp_path / "_joining").exists()
+
+
+def test_a_split_set_with_a_hole_is_not_joined(tmp_path):
+    """🔴 Joining `.aa` and `.ac` produces a corrupt archive that extracts
+    partially and reports success -- worse than not extracting. The group must
+    be contiguous from the first piece or it is left to the warning.
+
+    Mutation: drop the contiguity check and this extracts a truncated tar."""
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    whole = _tar_of(tmp_path / "whole.tar.gz", ["a.wav", "b.wav", "c.wav"])
+    blob = whole.read_bytes()
+    third = len(blob) // 3
+    (payload / "whole.tar.gz.aa").write_bytes(blob[:third])
+    (payload / "whole.tar.gz.ac").write_bytes(blob[2 * third:])   # .ab missing
+    whole.unlink()
+
+    assert pull.split_groups(sorted(payload.iterdir())) == {}
+    out = tmp_path / "out"
+    assert pull.extract_archives(payload, out) == 0
+
+
+def test_a_spanned_zip_is_recognised_as_one_group(tmp_path):
+    """CFAD ships `CFAD.z01..z03` plus `CFAD.zip`, where the `.zip` is the LAST
+    piece and carries the central directory -- so concatenation is wrong and
+    `zip -s 0` is the only correct join. Python's zipfile has no multi-disk
+    support at all."""
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    for name in ("CFAD.z01", "CFAD.z02", "CFAD.z03", "CFAD.zip"):
+        (payload / name).write_bytes(b"x" * 10)
+    groups = pull.split_groups(sorted(payload.iterdir()))
+    assert list(groups) == [payload / "CFAD.zip"]
+    pieces = [q.name for q in groups[payload / "CFAD.zip"]]
+    assert pieces == ["CFAD.z01", "CFAD.z02", "CFAD.z03", "CFAD.zip"]
+
+
+def test_a_spanned_zip_missing_its_last_part_is_not_joined(tmp_path):
+    """Without the `.zip` there is no central directory, so there is nothing to
+    join and the pieces are just bytes."""
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    for name in ("CFAD.z01", "CFAD.z02"):
+        (payload / name).write_bytes(b"x" * 10)
+    assert pull.split_groups(sorted(payload.iterdir())) == {}
+
+
+def test_pieces_are_not_mistaken_for_archives_of_their_own(tmp_path):
+    """A `.aa` piece must be consumed by its group, not reported as an
+    unpacked archive as well -- the warning would then fire on a set that was
+    successfully extracted."""
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    whole = _tar_of(tmp_path / "w.tar.gz", ["a.wav"])
+    blob = whole.read_bytes()
+    (payload / "w.tar.gz.aa").write_bytes(blob[: len(blob) // 2])
+    (payload / "w.tar.gz.ab").write_bytes(blob[len(blob) // 2:])
+    whole.unlink()
+    out = tmp_path / "out"
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        pull.extract_archives(payload, out)
+    assert "not unpacked" not in buf.getvalue()
