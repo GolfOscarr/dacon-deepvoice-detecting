@@ -28,16 +28,22 @@ from typing import Iterator, Sequence
 import pandas as pd
 
 from eda.config import EdaConfig, SourceSpec
-from eda.extract import run_metadata
+from eda.extract import run_metadata, run_signal
 from eda.ids import file_id_for
+from eda.planes import load_planes
+from eda.sample import SAMPLE_FILE, load_sample, sampled_rows
 # Importing for the side effect of registration. Critical: without these the
 # registry is empty and `probe_source` writes a table of ids and nothing else --
 # which would look like a successful run.
 from eda.extract import identity as _identity        # noqa: F401
 from eda.extract import metadata as _metadata        # noqa: F401
+from eda.extract import level as _level              # noqa: F401
+from eda.extract import spectral as _spectral        # noqa: F401
+from eda.extract import timing as _timing            # noqa: F401
 
-__all__ = ["BlockedSource", "FIXED_COLUMNS", "NotProbed", "consolidate",
-           "enumerate_source", "load_files", "probe_source", "shards"]
+__all__ = ["BlockedSource", "FIXED_COLUMNS", "NotProbed", "SIGNAL_TABLE",
+           "SignalResult", "consolidate", "enumerate_source", "load_files",
+           "load_signal", "probe_source", "shards", "signal_partition"]
 
 
 class NotProbed(RuntimeError):
@@ -270,3 +276,125 @@ def load_files(cfg: EdaConfig, partitions: Sequence[str] | None = None) -> pd.Da
     df = pd.concat(frames, ignore_index=True)
     df.attrs["missing_partitions"] = missing
     return df
+
+
+#: The S tier's table, beside `files.parquet` and joined to it on `file_id`.
+SIGNAL_TABLE = "signal.parquet"
+#: Written for every signal row whatever happened, so a decode failure is a row
+#: rather than a gap. `signal_ok` false with `signal_error` set is the shape.
+SIGNAL_FIXED = ("file_id", "source_name", "partition", "signal_ok", "signal_error")
+
+
+@dataclass
+class SignalResult:
+    partition: str
+    files: int
+    shards_run: int
+    shards_skipped: int
+    failures: int
+    table: Path
+
+
+def _signal_row(cfg: EdaConfig, row: pd.Series, partition: str) -> dict:
+    """One file, both planes. A decode failure is a row, not an exception.
+
+    ⚠️ `declared_sr` comes from the M tier's `orig_sr`, and `native_rate` will
+    raise if the decoder disagrees. That is deliberate and it is the reason the
+    two tiers join: a file whose census row describes a different file than the
+    decoder opens must not quietly contribute statistics to either.
+    """
+    fixed = {"file_id": row["file_id"], "source_name": row["source_name"],
+             "partition": partition}
+    path = (cfg.root if row.get("stage", "interim") == "interim" else cfg.raw) / row["path"]
+    declared = row.get("orig_sr")
+    declared = None if declared is None or pd.isna(declared) else int(declared)
+    try:
+        planes = load_planes(path, declared_sr=declared, file_id=str(row["file_id"]))
+    except Exception as exc:                         # noqa: BLE001 -- a row, not a raise
+        return {**fixed, "signal_ok": False,
+                "signal_error": f"{type(exc).__name__}: {exc}"}
+    return {**fixed, "signal_ok": True, "signal_error": None,
+            **run_signal(planes)}
+
+
+def signal_partition(cfg: EdaConfig, partition: str, *, progress=None
+                     ) -> SignalResult:
+    """S tier over one partition's recorded draw. Resumable at part granularity.
+
+    The draw must already exist -- `eda.sample.draw` writes it before anything
+    decodes, and this reads it. A pass that drew its own sample would measure a
+    different set of files every time a source was re-probed, and the numbers it
+    published would not be reproducible from `sample.json` (docs/EDA/00 §3).
+    """
+    files = load_files(cfg, partition)
+    sample = load_sample(cfg, partition)
+    if sample is None:
+        raise NotProbed(
+            f"partition {partition}: no {SAMPLE_FILE} -- draw the sample first. "
+            f"The draw is part of the corpus definition, not a step this pass "
+            f"may improvise")
+    rows = sampled_rows(files, sample)
+
+    parts_dir = cfg.out / partition / "signal_parts"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    table = cfg.out / partition / SIGNAL_TABLE
+    run = skipped = failures = 0
+    with ThreadPoolExecutor(max_workers=cfg.probe.workers) as pool:
+        for idx, batch in shards(list(range(len(rows))), cfg.sample.shard_size):
+            part = parts_dir / f"{idx:05d}.parquet"
+            done = part.with_suffix(".DONE")
+            if done.exists():
+                skipped += 1
+                continue
+            out = list(pool.map(
+                lambda i: _signal_row(cfg, rows.iloc[i], partition), batch))
+            frame = pd.DataFrame(out)
+            frame.to_parquet(part, index=False)
+            failures += int((~frame["signal_ok"]).sum())
+            done.write_text(json.dumps({"rows": len(out), "shard": idx}),
+                            encoding="utf-8")
+            run += 1
+            if progress is not None:
+                progress(partition, idx, len(out))
+
+    frames = []
+    for part in sorted(parts_dir.glob("*.parquet")):
+        if part.with_suffix(".DONE").exists():
+            frames.append(pd.read_parquet(part))
+    if not frames:
+        raise NotProbed(f"partition {partition}: no completed signal parts")
+    merged = pd.concat(frames, ignore_index=True)
+    merged.to_parquet(table, index=False)
+    return SignalResult(partition, len(rows), run, skipped,
+                        int((~merged["signal_ok"]).sum()), table)
+
+
+def load_signal(cfg: EdaConfig, partitions: Sequence[str] | None = None
+                ) -> pd.DataFrame:
+    """Every partition's `signal.parquet`, concatenated and joined to the M tier.
+
+    The join is an inner one on `file_id` and that is the contract: an S-tier
+    row with no census row cannot be labelled, and a census row outside the
+    draw has no S-tier statistics. `missing_partitions` carries the partitions
+    that have no signal table yet, the same way `load_files` does.
+    """
+    if isinstance(partitions, str):
+        partitions = [partitions]
+    partitions = list(partitions or cfg.partitions())
+    frames, missing = [], []
+    for partition in partitions:
+        path = cfg.out / partition / SIGNAL_TABLE
+        if path.exists():
+            frames.append(pd.read_parquet(path))
+        else:
+            missing.append(partition)
+    if not frames:
+        raise RuntimeError(
+            f"no {SIGNAL_TABLE} under {cfg.out} for partition(s) {partitions}. "
+            f"Run `eda signal` first")
+    signal = pd.concat(frames, ignore_index=True)
+    files = load_files(cfg, [p for p in partitions if p not in missing])
+    merged = signal.merge(files.drop(columns=["source_name"]), on="file_id",
+                          how="inner", validate="one_to_one")
+    merged.attrs["missing_partitions"] = missing
+    return merged

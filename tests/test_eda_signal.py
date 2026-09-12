@@ -355,3 +355,175 @@ def test_a_silent_spectrum_is_reported_as_silent_not_as_a_decode_failure():
     assert "silent" in row["spectral_error"]
     assert row["effective_bandwidth_hz"] == 0.0
     assert row["band_energy_0"] == 0.0
+
+
+# --------------------------------------------------------------------------
+# the draw, and the pass that consumes it
+# --------------------------------------------------------------------------
+
+def _signal_corpus(tmp_path, n_per_source=6):
+    """Two sources in one pool, with enough rows to sample from."""
+    from eda.config import EdaConfig, ProbeConfig, SampleConfig, SourceSpec
+    from eda.driver import consolidate, probe_source
+
+    root = tmp_path / "interim"
+    rng = np.random.default_rng(0)
+    for name in ("src-a", "src-b"):
+        for i in range(n_per_source):
+            path = root / f"{name}/v1" / f"{i}.wav"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            sf.write(path, (rng.standard_normal(8_000) * 0.1).astype(np.float32), 16_000)
+    cfg = EdaConfig(
+        root=root, out=tmp_path / "out",
+        sources=(SourceSpec(name="src-a", pool="A", root="src-a/v1", suffixes=(".wav",)),
+                 SourceSpec(name="src-b", pool="A", root="src-b/v1", suffixes=(".wav",))),
+        probe=ProbeConfig(workers=2, shard_size=4),
+        sample=SampleConfig(seed=0, per_stratum=3, stratify_by=("source_name",),
+                            full_pools=()),
+    )
+    for src in cfg.sources:
+        probe_source(cfg, src)
+    consolidate(cfg, "A")
+    return cfg
+
+
+def test_the_draw_is_stratified_seeded_and_recorded(tmp_path):
+    from eda.driver import load_files
+    from eda.sample import draw, load_sample
+
+    cfg = _signal_corpus(tmp_path)
+    files = load_files(cfg, "A")
+    sample = draw(cfg, files, "A")
+
+    assert sample.n_population == 12 and sample.n_drawn == 6    # 3 per source
+    drawn = files.set_index("file_id").loc[list(sample.file_ids)]
+    assert drawn["source_name"].value_counts().to_dict() == {"src-a": 3, "src-b": 3}
+    # and it is on disk, which is what makes it reproducible from originals
+    assert load_sample(cfg, "A").file_ids == sample.file_ids
+
+
+def test_the_same_seed_draws_the_same_files_whatever_the_row_order(tmp_path):
+    """🔴 `files.parquet`'s row order is an artifact of shard scheduling --
+    thread completion order, and which parts happened to exist. A draw taken in
+    table order is reproducible only until someone re-probes one source.
+
+    Mutation: drop the `sort_values("file_id")` and this fails."""
+    from eda.driver import load_files
+    from eda.sample import draw
+
+    cfg = _signal_corpus(tmp_path)
+    files = load_files(cfg, "A")
+    first = draw(cfg, files, "A")
+    shuffled = files.sample(frac=1.0, random_state=7).reset_index(drop=True)
+    second = draw(cfg, shuffled, "A", force=True)
+    assert first.file_ids == second.file_ids
+
+
+def test_a_recorded_draw_is_not_silently_replaced(tmp_path):
+    """🔴 The sample is part of the corpus definition (docs/EDA/00 §3).
+    Redrawing invalidates every S-tier number published from the old draw, so it
+    takes a flag rather than happening because a pass was re-run."""
+    from eda.driver import load_files
+    from eda.sample import SampleExists, draw
+
+    cfg = _signal_corpus(tmp_path)
+    files = load_files(cfg, "A")
+    draw(cfg, files, "A")
+    with pytest.raises(SampleExists, match="Re-read it rather than redrawing"):
+        draw(cfg, files, "A")
+    draw(cfg, files, "A", force=True)          # deliberate is allowed
+
+
+def test_a_full_pool_is_measured_whole_not_sampled(tmp_path):
+    """Pool D because five generator families are too few to sample from, pool E
+    because its last surprise cost a corpus rebuild."""
+    import dataclasses
+
+    from eda.config import SampleConfig
+    from eda.driver import load_files
+    from eda.sample import draw
+
+    cfg = _signal_corpus(tmp_path)
+    cfg = dataclasses.replace(cfg, sample=SampleConfig(
+        seed=0, per_stratum=3, stratify_by=("source_name",), full_pools=("A",)))
+    sample = draw(cfg, load_files(cfg, "A"), "A")
+    assert sample.full and sample.n_drawn == sample.n_population == 12
+
+
+def test_a_draw_whose_files_have_gone_is_refused(tmp_path):
+    """🔴 A recorded id missing from `files.parquet` means the corpus moved
+    under the draw -- a source re-probed with new exclusions, or a blocked
+    source's rows dropped. Measuring the remainder would publish an S tier that
+    does not match its own sample.json."""
+    from eda.driver import load_files
+    from eda.sample import draw, sampled_rows
+
+    cfg = _signal_corpus(tmp_path)
+    files = load_files(cfg, "A")
+    sample = draw(cfg, files, "A")
+    shrunk = files[files["source_name"] != "src-b"]
+    with pytest.raises(KeyError, match="no longer in files.parquet"):
+        sampled_rows(shrunk, sample)
+
+
+def test_the_signal_pass_writes_both_planes_and_joins_back_to_the_census(tmp_path):
+    from eda.driver import load_files, load_signal, signal_partition
+    from eda.sample import draw
+
+    cfg = _signal_corpus(tmp_path)
+    draw(cfg, load_files(cfg, "A"), "A")
+    res = signal_partition(cfg, "A")
+    assert res.files == 6 and res.failures == 0
+
+    signal = load_signal(cfg, "A")
+    assert len(signal) == 6
+    assert signal["signal_ok"].all()
+    for base in ("rms_dbfs", "silence_ratio", "effective_bandwidth_hz"):
+        assert f"{base}_{NATIVE}" in signal and f"{base}_{CHAIN}" in signal
+    # the join is what makes the S tier labellable at all
+    assert set(signal["pool"]) == {"A"}
+    assert "duration_s" in signal
+
+
+def test_the_signal_pass_is_resumable_and_does_not_redo_finished_shards(tmp_path):
+    from eda.driver import load_files, signal_partition
+    from eda.sample import draw
+
+    cfg = _signal_corpus(tmp_path)
+    draw(cfg, load_files(cfg, "A"), "A")
+    first = signal_partition(cfg, "A")
+    second = signal_partition(cfg, "A")
+    assert first.shards_run > 0 and first.shards_skipped == 0
+    assert second.shards_run == 0 and second.shards_skipped == first.shards_run
+
+
+def test_a_file_that_cannot_be_decoded_is_a_row_not_a_lost_census(tmp_path):
+    """🔴 F-S2: corruption is a finding. A file that vanishes from the S tier
+    makes the census wrong in the direction that hides problems."""
+    from eda.driver import load_files, signal_partition
+    from eda.sample import draw
+
+    cfg = _signal_corpus(tmp_path)
+    files = load_files(cfg, "A")
+    sample = draw(cfg, files, "A")
+    # ⚠️ A file *in the draw*. Half the corpus is not sampled, so corrupting
+    # `files.iloc[0]` proves nothing -- it passed once written that way.
+    victim = cfg.root / files.set_index("file_id").loc[sample.file_ids[0], "path"]
+    victim.write_bytes(b"truncated")
+
+    res = signal_partition(cfg, "A")
+    assert res.files == 6
+    frame = __import__("pandas").read_parquet(res.table)
+    assert len(frame) == 6, "the broken file is still a row"
+    assert int((~frame["signal_ok"]).sum()) >= 1
+    assert frame.loc[~frame["signal_ok"], "signal_error"].notna().all()
+
+
+def test_the_signal_pass_refuses_to_improvise_a_sample(tmp_path):
+    """The draw is written before anything decodes. A pass that drew its own
+    would measure a different set every time a source was re-probed."""
+    from eda.driver import NotProbed, signal_partition
+
+    cfg = _signal_corpus(tmp_path)
+    with pytest.raises(NotProbed, match="draw the sample first"):
+        signal_partition(cfg, "A")

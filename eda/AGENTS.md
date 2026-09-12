@@ -1,7 +1,8 @@
 # `eda/` — measuring what is actually in the corpus
 
-The plan is [`docs/EDA/`](../docs/EDA/README.md). This package is **Phase 0** of it:
-everything answerable without decoding a single sample.
+The plan is [`docs/EDA/`](../docs/EDA/README.md). This package is **Phase 0** of it --
+everything answerable without decoding a single sample -- plus **Phase 1**, the S tier, which
+decodes.
 
 ```bash
 V=/data/project/private/dacon-venvs/dacon311/bin/python
@@ -9,9 +10,17 @@ V=/data/project/private/dacon-venvs/dacon311/bin/python
 $V -m eda sources                    # what the config declares, and whether it is on disk
 $V -m eda probe --partition A        # M tier: ffprobe + sha256 over 100%, resumable
 $V -m eda consolidate                # parts -> <partition>/files.parquet
+$V -m eda sample --partition E       # the seeded draw -> <partition>/sample.json
+$V -m eda signal --partition E       # S tier: decode the draw on both planes, resumable
 $V -m eda analyze                    # X1 + E1 + grouping, then the gates; exit 1 on any fail
 $V -m eda gates                      # re-read the saved analyses and re-run the gates alone
 ```
+
+🔴 `sample` is its own verb, before `signal`, because **the draw is part of the corpus
+definition** (docs/EDA/00 §3). It decides every S-tier number anyone will quote, so it is
+recorded to `sample.json` before anything decodes and `signal` refuses to improvise one.
+Redrawing takes `--redraw`: it makes every S-tier number published from the old draw
+unreproducible.
 
 Config is [`configs/eda.yaml`](../configs/eda.yaml). Unknown keys are an error — the rule and its
 implementation are `models.config`'s, imported rather than restated, exactly as `training/config.py`
@@ -117,10 +126,11 @@ block or keep both together.
 ## Verification
 
 ```bash
-$V -m pytest tests/test_eda.py -o addopts=""      # 58 tests
+$V -m pytest tests/test_eda.py -o addopts=""         # 62 tests, no decode
+$V -m pytest tests/test_eda_signal.py -o addopts="" # 31 tests, the S tier
 ```
 
-Every invariant is paired with a mutation that was **observed** to fail — **37 run, 37 killed** (`scripts/mutate_eda.py`):
+Every invariant is paired with a mutation that was **observed** to fail — **46 run, 46 killed** (`scripts/mutate_eda.py`):
 the declared-columns check, the arity check, the `fail > na > pass` ordering, null labels coerced to
 0, the `DONE`-marker and `FIXED_COLUMNS` checks in `consolidate`, the exclusion in
 `enumerate_source` and its component-wise matcher, the `file_id` type guard, duplicate detection,

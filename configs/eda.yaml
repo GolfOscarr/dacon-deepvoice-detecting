@@ -48,6 +48,12 @@ sample:
   # carries 0.27; pool E because it is small and its last surprise cost a
   # corpus rebuild.
   full_pools: [D, E]
+  # ⚠️ Not `probe.shard_size`, and an order of magnitude smaller. That one is
+  # sized for ffprobe at ~20 ms a file; a part is the unit of resumability, and
+  # 20,000 files at decode speed is a run you cannot interrupt. Pool E's first
+  # signal pass proved it -- one 14,102-file part, nothing on disk until it
+  # finished.
+  shard_size: 500
 
 analysis:
   # Only a cross-validation shuffle. Changing it does not change the corpus.

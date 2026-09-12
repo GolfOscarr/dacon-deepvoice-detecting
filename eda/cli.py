@@ -19,7 +19,9 @@ from eda.analyze import duplicates as dup
 from eda.analyze import grouping as grp
 from eda.analyze import shortcut as sc
 from eda.config import load_eda_config
-from eda.driver import BlockedSource, NotProbed, consolidate, load_files, probe_source
+from eda.driver import (BlockedSource, NotProbed, consolidate, load_files,
+                        load_signal, probe_source, signal_partition)
+from eda.sample import SampleExists, draw, load_sample
 from eda.gates import FAIL, run_gates
 
 DEFAULT_CONFIG = "configs/eda.yaml"
@@ -138,6 +140,65 @@ def _analyses(cfg, files: pd.DataFrame) -> dict:
     }
 
 
+def cmd_sample(cfg, args) -> int:
+    """Draw the S-tier sample, or print the draw that already exists.
+
+    Separate from `signal` on purpose. The draw decides every S-tier number
+    anyone will quote, so it is its own step with its own output, and a reader
+    can see what was drawn before a day of decoding starts.
+    """
+    partitions = [args.partition] if args.partition else cfg.partitions()
+    drawn = 0
+    for partition in partitions:
+        try:
+            files = load_files(cfg, partition)
+        except RuntimeError as exc:
+            print(f"partition {partition}: {exc}", file=sys.stderr)
+            continue
+        try:
+            sample = draw(cfg, files, partition, force=args.redraw)
+        except SampleExists:
+            existing = load_sample(cfg, partition)
+            print(f"partition {partition}: {existing.n_drawn} of "
+                  f"{existing.n_population} already drawn (seed {existing.seed}"
+                  f"{', full' if existing.full else ''}) -- --redraw to replace")
+            continue
+        drawn += 1
+        print(f"partition {partition}: drew {sample.n_drawn} of "
+              f"{sample.n_population}"
+              + (" (measured in full)" if sample.full
+                 else f" at {sample.per_stratum}/stratum by "
+                      f"{list(sample.stratify_by)}, seed {sample.seed}"))
+    print(f"\n{drawn} partition(s) drawn")
+    return 0
+
+
+def cmd_signal(cfg, args) -> int:
+    """S tier: decode the draw on both planes."""
+    partitions = [args.partition] if args.partition else cfg.partitions()
+    done, skipped = 0, []
+    for partition in partitions:
+        try:
+            res = signal_partition(
+                cfg, partition,
+                progress=lambda part, idx, rows: print(
+                    f"  [{part}] shard {idx:05d}: {rows} rows", flush=True))
+        except (NotProbed, RuntimeError) as exc:
+            skipped.append(partition)
+            print(f"partition {partition}: skipped -- {exc}", file=sys.stderr)
+            continue
+        done += 1
+        # ⚠️ Failures are printed even when zero. A decode-failure count that
+        # only appears when it is non-zero trains the reader to skim past the
+        # line, and F-S2 says corruption is a finding.
+        print(f"partition {partition}: {res.table} ({res.files} rows, "
+              f"{res.shards_run} shard(s) run, {res.shards_skipped} already done, "
+              f"{res.failures} decode failure(s))")
+    print(f"\n{done} partition(s) measured, {len(skipped)} skipped"
+          + (f": {', '.join(skipped)}" if skipped else ""))
+    return 0 if done else 1
+
+
 def cmd_analyze(cfg, args) -> int:
     files = load_files(cfg)
     out = cfg.out / "_shared"
@@ -239,6 +300,17 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("consolidate", help="parts -> files.parquet")
     s.add_argument("--partition", help=part_help)
     s.set_defaults(fn=cmd_consolidate)
+
+    s = sub.add_parser("sample", help="draw the S-tier sample and record it")
+    s.add_argument("--partition", help=part_help)
+    s.add_argument("--redraw", action="store_true",
+                   help="replace an existing draw. Every S-tier number published "
+                        "from the old one becomes unreproducible")
+    s.set_defaults(fn=cmd_sample)
+
+    s = sub.add_parser("signal", help="S tier: decode the draw on both planes")
+    s.add_argument("--partition", help=part_help)
+    s.set_defaults(fn=cmd_signal)
 
     s = sub.add_parser("analyze", help="X1 + E1 + grouping, then the gates")
     s.set_defaults(fn=cmd_analyze)

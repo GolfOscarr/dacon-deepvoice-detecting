@@ -236,6 +236,14 @@ class SampleConfig:
     #: families are too few to sample from and it carries 0.27, E because it is
     #: small and its last surprise cost a corpus rebuild (docs/EDA/00 section 5).
     full_pools: tuple[str, ...] = ("D", "E")
+    #: Files per S-tier part, and therefore the unit of resumability.
+    #:
+    #: ⚠️ Deliberately not `probe.shard_size`. That one is sized for ffprobe at
+    #: ~20 ms a file, where 20,000 files is about seven minutes of work; the
+    #: same count at decode speed is a run you cannot interrupt. Measured on
+    #: pool E: the first signal pass ran as a single 14,102-file part, wrote
+    #: nothing until it finished, and had no checkpoint if it had died.
+    shard_size: int = 500
 
 
 @dataclass

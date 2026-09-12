@@ -91,6 +91,36 @@ No file in the new source is byte-identical to anything in `musan-noise`.
 
 ---
 
+## E0c — The S tier over pool E, and what it settled
+
+14,102 files, both planes, **0 decode failures, 21 minutes** (32 threads; `user + sys` is 41
+minutes, so the GIL holds the speedup to ~2× and the S tier is I/O- and decode-bound, not
+parallel-bound). Pool E is measured in full, so these are population statements, not samples.
+
+🔴 **Pool E answered the project's open R1 question, and the answer is not the one the plan
+expected.** The 16 kHz chain destroys the native bandwidth fingerprint and replaces it with a
+*sharper* one — `near_nyquist_ratio` on the chain plane separates a natively-16 kHz file from the
+same file round-tripped through 44.1 kHz at **AUC 0.940**. The numbers, the controlled experiment
+and the consequence are in [00 §4c](00-harness.md#4c---r1s-premise-measured-on-pool-e-half-right-and-the-other-half-is-worse);
+they belong there because they are a property of the chain, not of pool E.
+
+What is specific to pool E:
+
+| | median `rms_dbfs` | median `crest_factor_db` | silence ratio |
+|---|---|---|---|
+| AudioCapsEnv | −22.8 | 16.5 | 0.000 |
+| VGGSoundEnv | −23.6 | 16.7 | 0.000 |
+| EnvSDD | **−44.8** | 12.9 | 0.025 |
+| musan-noise | −19.8 | 19.8 | 0.010 |
+
+⚠️ **EnvSDD sits 20 dB below every other noise source, and the chain does not touch it** — it is
+natively 16 kHz, so both planes are identical. A noise bed's level is exactly what an SNR-controlled
+mix has to normalize away; without that normalization, "quiet noise bed" *is* the corpus label, and
+E4's independent groups become distinguishable by a single scalar. The mix should set component
+level from a measured target, not from the file as published.
+
+---
+
 ## E1 — 🔴 Cross-source duplicate sweep — Tier S, and it must run over **all five pools**
 
 **Compute.** Two passes over every file in the corpus, not just pool E:
