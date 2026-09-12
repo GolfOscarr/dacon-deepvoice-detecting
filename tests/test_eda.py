@@ -846,6 +846,60 @@ def test_the_shipped_config_keeps_generated_environmental_audio_out_of_pool_e():
         "eval_source/env_sources/EnvSDD/bonafide/spoofed_like_name.wav")
 
 
+def test_a_source_can_claim_half_a_directory_by_filename(tmp_path):
+    """🔴 `exclude` matches path components, and OpenSLR-28's
+    `real_rirs_isotropic_noises/` holds 325 impulse responses beside 92 noise
+    recordings with **no subtree** between them -- only the filenames differ.
+    Treating the directory as one kind is what E0 got wrong."""
+    root = tmp_path / "i"
+    for name in ("RVB2014_type1_noise_largeroom1_1.wav",
+                 "RWCP_type4_rir_circle_ane_imp001.wav",
+                 "air_type1_air_binaural_stairway_1_1_1.wav"):
+        _write(root / "r/v1" / name)
+    cfg = EdaConfig(root=root, out=tmp_path / "o", sources=())
+
+    noise = SourceSpec(name="n", pool="E", root="r/v1", suffixes=(".wav",),
+                       name_glob=("*_noise_*",), name_glob_reason="the noise half")
+    rirs = SourceSpec(name="r", pool="E", root="r/v1", suffixes=(".wav",),
+                      name_glob=("*_rir_*", "air_*"), name_glob_reason="the kernels")
+    assert len(enumerate_source(cfg, noise)) == 1
+    assert len(enumerate_source(cfg, rirs)) == 2
+
+    # and a source with no glob is still the whole directory
+    whole = SourceSpec(name="w", pool="E", root="r/v1", suffixes=(".wav",))
+    assert len(enumerate_source(cfg, whole)) == 3
+
+
+def test_a_filename_glob_must_say_why():
+    """The same rule `exclude_reason` carries: selecting part of a directory
+    says this source is not the whole directory, and the reason travels with
+    it."""
+    with pytest.raises(ConfigError, match="name_glob_reason"):
+        SourceSpec(name="x", pool="E", root="r", name_glob=("*_noise_*",))
+
+
+def test_the_shipped_config_splits_the_rirs_directory_by_filename():
+    """🔴 E0 blocked `real_rirs_isotropic_noises` whole, on a 1.365 s median and
+    314 sub-4s files. Both statistics belong to the impulse-response half: the
+    92 noise recordings have a 30.0 s median and **none** below the floor. The
+    split is what lets each half state its own case."""
+    from eda.config import load_eda_config
+
+    cfg = load_eda_config("configs/eda.yaml")
+    kernels = cfg.source("rirs-isotropic-rir")
+    noise = cfg.source("rirs-isotropic-noise")
+    assert kernels.root == noise.root, "same directory, different halves"
+    assert kernels.blocked and not noise.blocked
+    assert kernels.selects_name("RWCP_type4_rir_circle_ane_imp001.wav")
+    assert not kernels.selects_name("RVB2014_type1_noise_largeroom1_1.wav")
+    assert noise.selects_name("RVB2014_type1_noise_largeroom1_1.wav")
+    assert not noise.selects_name("RWCP_type4_rir_circle_ane_imp001.wav")
+    # no file can belong to both, or the census would count it twice
+    for name in ("RVB2014_type1_noise_simroom1_3.wav",
+                 "air_type1_air_binaural_stairway_1_1_1.wav"):
+        assert kernels.selects_name(name) != noise.selects_name(name), name
+
+
 def test_the_shipped_config_drops_both_rirs_sources_and_says_what_was_measured():
     """🔴 Both were registered in pool E and both are out, for reasons the run
     measured rather than assumed. `rirs-pointsource` is 843 of 843 byte-identical
@@ -856,20 +910,21 @@ def test_the_shipped_config_drops_both_rirs_sources_and_says_what_was_measured()
     from eda.config import load_eda_config
 
     cfg = load_eda_config("configs/eda.yaml")
-    for name in ("rirs-pointsource", "rirs-isotropic"):
+    for name in ("rirs-pointsource", "rirs-isotropic-rir"):
         assert cfg.source(name).blocked, name
 
     # The reason has to carry the measurement, not just a verdict -- a bare
     # "dropped" reads as an opinion the next session is free to reverse.
     assert "843 of 843" in cfg.source("rirs-pointsource").blocked
-    assert "1.365" in cfg.source("rirs-isotropic").blocked
+    assert "1.25 s median" in cfg.source("rirs-isotropic-rir").blocked
 
     # And the consequence: dropping them left `musan-noise` alone in pool E,
     # which `build_folds` cannot rotate. `compspoof-env-bonafide` is the answer
     # to that and was fetched for it -- so the invariant is that pool E never
     # goes back to a single runnable source, not that it has a particular one.
     runnable = {s.name for s in cfg.sources_in("E") if not s.blocked}
-    assert runnable == {"musan-noise", "compspoof-env-bonafide"}
+    assert runnable == {"musan-noise", "compspoof-env-bonafide",
+                        "rirs-isotropic-noise"}
 
 
 def test_the_grouping_gate_says_when_it_truncated_the_name_list(tmp_path):

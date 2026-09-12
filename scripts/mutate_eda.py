@@ -250,6 +250,21 @@ MUTANTS = [
      '    dupes = merged["file_id"].duplicated() & False',
      'signal parts cannot merge with duplicates',
      'tests/test_eda_signal.py::test_signal_parts_that_disagree_cannot_merge_into_a_table'),
+    ('eda/driver.py',
+     '        if not source.selects_name(p.name):\n            continue',
+     '        if False:\n            continue',
+     'name_glob selects half a directory',
+     'tests/test_eda.py::test_a_source_can_claim_half_a_directory_by_filename'),
+    ('eda/config.py',
+     '        if self.name_glob and not self.name_glob_reason:',
+     '        if False:',
+     'a filename glob must say why',
+     'tests/test_eda.py::test_a_filename_glob_must_say_why'),
+    ('eda/driver.py',
+     '                if marker.get("fingerprint") != sample.fingerprint:',
+     '                if False:',
+     'a redraw invalidates its old parts',
+     'tests/test_eda_signal.py::test_a_redraw_invalidates_the_parts_it_no_longer_describes'),
 ]
 
 py = sys.argv[1]

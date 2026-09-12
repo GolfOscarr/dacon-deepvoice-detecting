@@ -21,6 +21,7 @@ says.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,8 +62,26 @@ class Sample:
     def n_drawn(self) -> int:
         return len(self.file_ids)
 
+    @property
+    def fingerprint(self) -> str:
+        """sha256 over the drawn ids, in draw order. Twelve hex digits of it.
+
+        🔴 What makes a signal part *belong* to a draw. Parts are indexed by
+        position in the draw, so a redraw that changes the population silently
+        re-points every index: admit 92 files to pool E, redraw, and shards
+        0..28 still exist and are still marked DONE, so the pass skips all of
+        them and the 92 new files are never measured. The table looks complete
+        and is 92 rows short. Measured on exactly that change.
+        """
+        h = hashlib.sha256()
+        for fid in self.file_ids:
+            h.update(fid.encode("utf-8"))
+            h.update(b"\0")
+        return h.hexdigest()[:12]
+
     def to_json(self) -> dict:
         return {"partition": self.partition, "seed": self.seed,
+                "fingerprint": self.fingerprint,
                 "per_stratum": self.per_stratum,
                 "stratify_by": list(self.stratify_by), "full": self.full,
                 "n_population": self.n_population, "n_drawn": self.n_drawn,

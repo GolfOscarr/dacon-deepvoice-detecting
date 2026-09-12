@@ -94,6 +94,9 @@ def enumerate_source(cfg: EdaConfig, source: SourceSpec) -> list[Path]:
         # disagree about what an exclusion means.
         if source.excludes_path(p.relative_to(root).as_posix()):
             continue
+        # `SourceSpec` owns this too, for the same reason.
+        if not source.selects_name(p.name):
+            continue
         out.append(p)
     out.sort()
     # Critical: a registered source that yields nothing is a misconfiguration --
@@ -353,6 +356,13 @@ def signal_partition(cfg: EdaConfig, partition: str, *, progress=None
                 # duplicate file_ids, silently. The marker records the size so
                 # the mismatch is a refusal instead.
                 marker = json.loads(done.read_text(encoding="utf-8"))
+                if marker.get("fingerprint") != sample.fingerprint:
+                    raise RuntimeError(
+                        f"partition {partition}: {part.name} belongs to draw "
+                        f"{marker.get('fingerprint')} and the recorded draw is now "
+                        f"{sample.fingerprint}. Parts are indexed by position in the "
+                        f"draw, so resuming would skip shards that no longer hold the "
+                        f"same files. Delete {parts_dir} and re-run")
                 wrote = marker.get("shard_size")
                 if wrote != cfg.sample.shard_size:
                     raise RuntimeError(
@@ -370,7 +380,8 @@ def signal_partition(cfg: EdaConfig, partition: str, *, progress=None
             failures += int((~frame["signal_ok"]).sum())
             done.write_text(
                 json.dumps({"rows": len(out), "shard": idx,
-                            "shard_size": cfg.sample.shard_size}),
+                            "shard_size": cfg.sample.shard_size,
+                            "fingerprint": sample.fingerprint}),
                 encoding="utf-8")
             run += 1
             if progress is not None:

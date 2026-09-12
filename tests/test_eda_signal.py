@@ -584,3 +584,56 @@ def dataclasses_replace_full(cfg):
     import dataclasses
     return dataclasses.replace(cfg, sample=dataclasses.replace(
         cfg.sample, full_pools=("A",), shard_size=8))
+
+
+def test_a_redraw_invalidates_the_parts_it_no_longer_describes(tmp_path):
+    """🔴 Parts are indexed by position in the draw, so a redraw that changes
+    the population silently re-points every index. Admitting 92 files to pool E
+    and redrawing leaves shards 0..28 on disk and still marked DONE -- the pass
+    skips all of them, the 92 new files are never measured, and the table looks
+    complete while being 92 rows short.
+
+    This is the exact change that was about to be made when the guard was
+    written. Mutation: drop the fingerprint comparison and the second pass
+    below reports 8 rows for a 12-file draw."""
+    import dataclasses
+
+    from eda.driver import load_files, signal_partition
+    from eda.sample import draw
+
+    cfg = _signal_corpus(tmp_path, n_per_source=4)      # 8 files
+    cfg = dataclasses.replace(cfg, sample=dataclasses.replace(
+        cfg.sample, full_pools=("A",), shard_size=4))
+    draw(cfg, load_files(cfg, "A"), "A")
+    first = signal_partition(cfg, "A")
+    assert first.files == 8
+
+    # the corpus grows, exactly as pool E's did
+    from eda.driver import consolidate, probe_source
+    import numpy as np, soundfile as sf
+    rng = np.random.default_rng(9)
+    for i in range(4):
+        path = cfg.root / "src-a/v1" / f"extra{i}.wav"
+        sf.write(path, (rng.standard_normal(8_000) * 0.1).astype(np.float32), 16_000)
+    for src in cfg.sources:
+        probe_source(cfg, src)
+    consolidate(cfg, "A")
+    grew = draw(cfg, load_files(cfg, "A"), "A", force=True)
+    assert grew.n_drawn == 12
+
+    with pytest.raises(RuntimeError, match="belongs to draw"):
+        signal_partition(cfg, "A")
+
+
+def test_the_draw_fingerprint_follows_the_ids_not_the_count():
+    """Two draws of the same size over different files must not look alike."""
+    from eda.sample import Sample
+
+    def s(ids):
+        return Sample(partition="A", seed=0, per_stratum=2, stratify_by=("source_name",),
+                      full=False, n_population=9, file_ids=ids)
+
+    assert s(("a", "b")).fingerprint == s(("a", "b")).fingerprint
+    assert s(("a", "b")).fingerprint != s(("a", "c")).fingerprint
+    # and order matters, because the parts are indexed by it
+    assert s(("a", "b")).fingerprint != s(("b", "a")).fingerprint

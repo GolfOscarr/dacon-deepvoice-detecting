@@ -17,6 +17,7 @@ registry would silently omit it.
 from __future__ import annotations
 
 import dataclasses
+import fnmatch
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -101,6 +102,21 @@ class SourceSpec:
     #: licence decision and must name its reason.
     exclude: tuple[str, ...] = ()
     exclude_reason: str = ""
+    #: Filename globs; empty means every file. 🔴 This exists because `exclude`
+    #: matches **path components** and one real directory distinguishes two
+    #: kinds of material by filename alone: OpenSLR-28's
+    #: `real_rirs_isotropic_noises/` holds 325 impulse responses (`*_rir_*`,
+    #: `air_*binaural*`, median 1.25 s) beside 92 isotropic noise recordings
+    #: (`*_noise_*`, median 30.0 s). The first are convolution kernels for the
+    #: reverb transform and the second are pool-E audio, and no subtree
+    #: separates them (docs/EDA/05 E0d).
+    #:
+    #: ⚠️ Narrow on purpose. This is not a general query language: it selects
+    #: *which files a source is*, so two sources over one directory each state
+    #: their own half and the census can name both. Every use needs
+    #: `name_glob_reason` for the same purpose `exclude_reason` serves.
+    name_glob: tuple[str, ...] = ()
+    name_glob_reason: str = ""
     #: G-EDA1. A CSV of permitted track ids, relative to `EdaConfig.root`. FMA
     #: and MTG-Jamendo are single downloads whose audio is **not under a single
     #: licence**: docs/data/12 section 4 partitions them per track and says
@@ -138,6 +154,16 @@ class SourceSpec:
         "group" -- `folds.grouping_atoms` already owns that word.
         """
         return self.pool if self.row_kind == "component" else f"cell{self.cell}"
+
+    def selects_name(self, name: str) -> bool:
+        """Does this source claim a file with this basename?
+
+        Empty `name_glob` claims everything, which is what every source but the
+        RIRS pair wants.
+        """
+        if not self.name_glob:
+            return True
+        return any(fnmatch.fnmatch(name, g) for g in self.name_glob)
 
     def excludes_path(self, rel: str) -> bool:
         """Is this path under one of the source's excluded subtrees?
@@ -193,6 +219,11 @@ class SourceSpec:
                 f"source {self.name!r}: `exclude` without `exclude_reason`. An "
                 f"excluded subtree is a licence or a label decision and the "
                 f"reason travels with it (docs/EDA/07 G-EDA1)")
+        if self.name_glob and not self.name_glob_reason:
+            raise ConfigError(
+                f"source {self.name!r}: `name_glob` without `name_glob_reason`. "
+                f"Selecting part of a directory by filename says this source is "
+                f"not the whole directory, and the reason travels with it")
 
 
 @dataclass

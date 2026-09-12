@@ -74,12 +74,15 @@ stationary recording:
 
 The noise half looks like MUSAN, not like a kernel.
 
-**Consequence, not yet acted on.** Pool E's binding constraint is independent groups — 3 corpora
-against a floor of 6 — and RVB2014 would be a 4th. Admitting it needs a config field the schema
-does not have: `SourceSpec.exclude` matches **path components**, and here the two kinds differ only
-by filename. The options are a narrow filename-glob field on `SourceSpec`, or leaving 0.76 h and an
-independent group on the floor. ⚠️ Until one is chosen, pool E is short one group **by omission
-rather than by decision**, which is exactly the state `blocked:` exists to prevent.
+**Acted on the same day.** `SourceSpec.name_glob` was added — narrow on purpose, and paired with a
+`name_glob_reason` for the same reason `exclude` is — and the source is now two:
+`rirs-isotropic-rir` (blocked, `*_rir_*` and `air_*`) and `rirs-isotropic-noise` (pool E,
+`*_noise_*`). No file can belong to both, and a test asserts that rather than trusting the globs.
+
+Pool E is now **14,194 rows across three runnable sources and four independent groups**:
+`musan-noise`, `rirs-isotropic-noise` (RVB2014), and CompSpoof's AudioCapsEnv, EnvSDD and
+VGGSoundEnv. The floor is 6, so it is still short — but short by two rather than three, and the
+missing groups are now a fetch question rather than a bookkeeping one.
 
 ---
 
@@ -161,6 +164,33 @@ natively 16 kHz, so both planes are identical. A noise bed's level is exactly wh
 mix has to normalize away; without that normalization, "quiet noise bed" *is* the corpus label, and
 E4's independent groups become distinguishable by a single scalar. The mix should set component
 level from a measured target, not from the file as published.
+
+---
+
+## E0e — E3 answered: 58.4% of pool E can supply a 4 s window
+
+With the split landed, pool E is **14,194 rows / 21.7 h** and the S tier covers all of it. E3's
+question — *the real size of pool E, after the sampler floor* — has an answer:
+
+| corpus | n | with a ≥4 s span | % | median longest span |
+|---|--:|--:|--:|--:|
+| AudioCapsEnv | 2,274 | 1,663 | 73.1 | 4.00 s |
+| VGGSoundEnv | 4,202 | 2,888 | 68.7 | 4.00 s |
+| `rirs-isotropic-noise` | 92 | 62 | 67.4 | **30.00 s** |
+| musan-noise | 930 | 563 | 60.5 | 6.53 s |
+| EnvSDD | 6,696 | 3,110 | **46.4** | **2.65 s** |
+| **pool E** | **14,194** | **8,286** | **58.4** | — |
+
+**8,286 files and 14.45 h survive the floor, not 14,194 and 21.7.** The newly admitted RVB2014
+recordings have the longest usable spans in the pool by a factor of five.
+
+⚠️ **EnvSDD's 46.4% is the level finding wearing a different hat, and the two must be read
+together.** Its median `rms_dbfs` is −44.8, and `SILENCE_DBFS` is −50: the corpus's *average* level
+sits 5 dB above the threshold that defines silence, so an absolute criterion scores nearly half of
+it as unusable. That is a real property of the files as published — the sampler does not renormalize
+before looking — but it is not a statement that the audio is empty. It is the same argument for
+setting component level from a measured target rather than from the file, one step further on: get
+the level wrong and even the usability census is wrong.
 
 ---
 

@@ -303,23 +303,45 @@ sources:
       (E1, measured 2026-09-12 over all 843 rows); it contributes 0.00 h
       of audio MUSAN does not already have
 
-  # 🔴 REMOVED FROM POOL E 2026-09-12. It was enumerated so the census could say
-  # so with numbers, and the numbers came back: 417 files, median duration
-  # **1.365 s** with **314 of 417 below the 4 s sampler floor**, and channel
-  # counts of 1/2/8/16/30 (only 38 are mono). These are impulse responses --
-  # microphone-array measurements of a room -- not ambient sound. An IR is a
-  # convolution kernel: it belongs to the reverb transform, where it is applied
-  # to pool audio, not to a pool, where it would be *mixed in* as if it were
-  # noise (docs/EDA/05 E2). The earlier note said "median 2.00 s, 79 of 90 rows"
-  # -- that was the smoke corpus; this is the source.
-  - name: rirs-isotropic
+  # 🔴 SPLIT 2026-09-12, after a re-check found the note this replaces had
+  # treated one directory as one kind of material. `real_rirs_isotropic_noises/`
+  # holds both, and the filenames are the only thing separating them -- there is
+  # no subtree to exclude, which is why `name_glob` exists (docs/EDA/05 E0d).
+  #
+  # The kernels. 325 files, median **1.25 s**, and **all 314** of the directory's
+  # sub-4s files are here. An impulse response is a convolution kernel: it
+  # belongs to the reverb transform, where it is applied to pool audio, not to a
+  # pool, where it would be *mixed in* as if it were sound (docs/EDA/05 E2).
+  - name: rirs-isotropic-rir
     pool: E
     root: rirs-noises/openslr-28/RIRS_NOISES/real_rirs_isotropic_noises
     suffixes: [.wav]
+    name_glob: ["*_rir_*", "air_*"]
+    name_glob_reason: >-
+      the impulse-response half of a directory that also holds noise
+      recordings; separated so each half can state its own case
     blocked: >-
-      impulse responses, not noise: 417 files, 1.365 s median, 314 of 417
-      below the 4 s floor, 1-30 channels. Material for the reverb transform,
-      not a member of pool E (docs/EDA/05 E2)
+      impulse responses, not noise: 325 files, 1.25 s median, and all 314 of
+      the directory's sub-4s files. Material for the reverb transform, not a
+      member of pool E (docs/EDA/05 E2)
+
+  # The recordings. 92 files, median **30.0 s**, minimum 10 s, and **not one
+  # below the 4 s floor** -- the statistic the old note used to condemn the
+  # whole source belongs entirely to the half above. Real ambient audio from 10
+  # rooms, duplicated nowhere else in the corpus, and pool E's 4th independent
+  # group against a `min_groups_per_role` of 6.
+  #
+  # ⚠️ 8- and 30-channel. The chain downmixes per `AudioConfig.channels`, so
+  # that is not an obstacle -- but it is why `orig_channels` must never be read
+  # as a pool property.
+  - name: rirs-isotropic-noise
+    pool: E
+    root: rirs-noises/openslr-28/RIRS_NOISES/real_rirs_isotropic_noises
+    suffixes: [.wav]
+    name_glob: ["*_noise_*"]
+    name_glob_reason: >-
+      the noise half of a directory that also holds impulse responses;
+      `exclude` cannot express it because the two differ only by filename
 
   # CompSpoof's environmental halves, and the answer to pool E having one
   # source. Fetched 2026-09-12 with `fetch_from_s3.py --only '*_source.tar.gz'`
