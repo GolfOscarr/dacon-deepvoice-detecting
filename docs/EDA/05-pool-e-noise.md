@@ -21,7 +21,7 @@ keeps its evidence and cannot be quietly rediscovered.
 | source | measured | decision |
 |---|---|---|
 | `rirs-pointsource` | 843 files, **843 of 843 sha256-identical to `musan-noise`**, 843 distinct digests on each side, **0.00 h** MUSAN does not already hold | dropped — it was never a second source |
-| `rirs-isotropic` | 417 files, median **1.365 s**, **314 of 417 below the 4 s floor**, channels 1/2/8/16/30 (38 mono), 0.89 h | out of pool E — impulse responses, material for the reverb transform (E2) |
+| `rirs-isotropic` | 417 files, median **1.365 s**, **314 of 417 below the 4 s floor**, channels 1/2/8/16/30 (38 mono), 0.89 h | out of pool E — impulse responses, material for the reverb transform (E2). ⚠️ **Partly wrong — see E0d** |
 
 Both earlier figures came from the smoke corpus and understated the case: the leak was recorded as
 88 files (it is 843) and the isotropic census as 79 of 90 rows (it is 314 of 417).
@@ -40,6 +40,46 @@ blocking and **landed the same day** — see E0b.
 **What it bought.** G-EDA5 went from 843 cross-source duplicate groups to **0** — it now passes.
 The single remaining duplicate group is unrelated: 5 MLAAD files under `fake/lb/VITS2-Claude/`
 that are byte-identical to each other, from five different utterances.
+
+---
+
+## E0d — 🔴 E0's second decision was half wrong: that directory holds two kinds of file
+
+Found by re-checking E0 rather than by a new measurement, which is the point of re-checking it.
+`real_rirs_isotropic_noises/` is **not** one kind of material. Its filenames carry the distinction
+and its directory structure does not:
+
+| kind | pattern | n | median | min | below 4 s | channels | hours |
+|---|---|--:|--:|--:|--:|---|--:|
+| impulse responses | `*_rir_*`, `air_*binaural*` | **325** | 1.25 s | 0.10 s | **314** | 1/2/8/16/30 | 0.14 |
+| isotropic noise | `*_noise_*` | **92** | 30.00 s | 10.00 s | **0** | 8 (90), 30 (2) | 0.76 |
+
+**Every one of the 314 sub-floor files is an impulse response, and not one noise recording is
+below the floor.** The 1.365 s median and the 314 count that E0 gave as its reason are statistics
+of the *mixture*; quoted against the whole source they describe a property that only half of it
+has. Blocking the RIR half stays correct — an IR is a convolution kernel and belongs to the reverb
+transform. Blocking the other 92 was not argued for, and they are real ambient recordings from
+**10 distinct rooms** (`largeroom1/2`, `mediumroom1/2`, `smallroom1/2`, `cirline_ofc`, and
+`simroom1/2/3`), 0.76 h, all 30 s, **none duplicated anywhere else in the corpus**.
+
+A signal check confirms the two halves behave differently, using the S tier on the blocked files
+directly — fraction of energy in the first 100 ms, which is ~1 for a kernel and ~0 for a
+stationary recording:
+
+| set | frac in first 100 ms (median) | peak position (median) |
+|---|--:|--:|
+| `rirs-isotropic` `*_noise_*` sample | 0.003 | 0.573 |
+| `musan-noise` | 0.000 | 0.358 |
+| CompSpoof EnvSDD bonafide | 0.024 | 0.451 |
+
+The noise half looks like MUSAN, not like a kernel.
+
+**Consequence, not yet acted on.** Pool E's binding constraint is independent groups — 3 corpora
+against a floor of 6 — and RVB2014 would be a 4th. Admitting it needs a config field the schema
+does not have: `SourceSpec.exclude` matches **path components**, and here the two kinds differ only
+by filename. The options are a narrow filename-glob field on `SourceSpec`, or leaving 0.76 h and an
+independent group on the floor. ⚠️ Until one is chosen, pool E is short one group **by omission
+rather than by decision**, which is exactly the state `blocked:` exists to prevent.
 
 ---
 

@@ -266,8 +266,32 @@ exactly 32.90 s. The generator emits fixed lengths. Read together with FakeMusic
 duration-degenerate**, and the crop that fixes it is a render-time transform applied to train and
 test alike (R2), not a filter.
 
-**Two groups, not six.** Path depth finds one group; the generator token in the filename finds
-two, `suno` and `udio`. G-EDA3's floor is 6, and SONICS is the sixth source to fail it.
+**Five groups, not two — and the publisher ships the key.** Path depth finds one group and the
+filename token finds two (`suno`, `udio`), which is what G-EDA3 reports. But
+`payload/fake_songs.csv` has an `algorithm` column, and joining it to the census matches
+**49,074 of 49,074 rows with the CSV's own `duration` agreeing with ffprobe to 0.000 s**:
+
+| algorithm | n | median duration |
+|---|--:|--:|
+| chirp-v3.5 | 19,057 | 202.75 s |
+| udio-120s | 18,745 | **131.22 s** |
+| chirp-v3 | 4,285 | 120.10 s |
+| udio-30s | 4,903 | **32.90 s** |
+| chirp-v2-xxl-alpha | 2,084 | 80.10 s |
+
+⚠️ Each generator has its own characteristic length, so **duration is very nearly the generator
+id** — the udio rows' fixed 131.22 s and 32.90 s are two whole algorithms, not two quirks. Still
+below the floor of 6, but 5 real groups beat 2 path-derived ones, and this is precisely what the
+grouping report means by *"needs the publisher's own key"*. The join is one CSV read.
+
+**All of it is fake, and that is checked rather than assumed.** `target = 1` for all 49,074 rows,
+`no_vocal` is `False` for all 49,074, and the README states plainly that *"this dataset contains
+only fake songs"* — real songs ship as YouTube ids, not audio. The `label` column's
+"full/half/mostly fake" split (2,173 / 6,132 / 40,769) is about lyric and style provenance, not
+about the audio: SONICS is an **end-to-end** synthetic-song corpus, explicitly contrasted in its
+own abstract with SVDD sets *"where the vocals are AI-generated but the instrumental music is
+sourced from real songs"*. Cell 8 = `(1, 1, 1, 1)` is therefore right, and "half fake" does **not**
+mean cell 6 or 7.
 
 ---
 
