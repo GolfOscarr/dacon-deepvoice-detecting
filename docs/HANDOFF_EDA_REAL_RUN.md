@@ -44,14 +44,14 @@ ls /data/project/private/dacon-corpus/interim   # 7 source dirs + _licences
 $V -m pytest tests/test_eda.py -o addopts="" -q  # 56 passed
 $V scripts/mutate_eda.py $V                      # 37/37 mutants killed
 python3 scripts/check_links.py                   # all links and anchors OK (101 files)
-$V -m pytest -o addopts="" -q                    # whole repo, ~13 min
+$V -m pytest -o addopts="" -q                    # 990 passed, ~13 min
 ```
 
-⚠️ **The whole-repo count is UNVERIFIED at handoff time.** The run was still in flight when this
-was written; the three fast gates above were measured. The last clean whole-repo figure this
-session was **972 passed** at an earlier commit, before `eda/` gained its last four guards, so
-expect slightly more and **no failures**. Settle it with the fourth command before your first
-commit.
+All four are measured at HEAD. The whole-repo figure was in flight when this document was first
+drafted and is now settled: **990 passed, 3 warnings, exit 0, 792 s** on a clean tree at
+`a0063dd`. It supersedes the 972 recorded earlier in the session, which predated the last four
+`eda/` guards. The 3 warnings are `torch.nn.utils.weight_norm` deprecations from
+`tests/test_frontends_beats.py`, and are pre-existing.
 
 ⚠️ **Do not run the full suite while editing `configs/eda.yaml`.** Three tests assert on the
 shipped config; editing it mid-run produced three failures that were artifacts of the race and
