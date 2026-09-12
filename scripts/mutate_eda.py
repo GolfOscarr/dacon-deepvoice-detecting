@@ -240,6 +240,16 @@ MUTANTS = [
      '    except Exception as exc:                         # noqa: BLE001 -- a row, not a raise\n        raise\n        return {**fixed, "signal_ok": False,',
      'a decode failure is a row, not a lost census',
      'tests/test_eda_signal.py::test_a_file_that_cannot_be_decoded_is_a_row_not_a_lost_census'),
+    ('eda/driver.py',
+     '                if wrote != cfg.sample.shard_size:',
+     '                if False:',
+     'shard size recorded and checked',
+     'tests/test_eda_signal.py::test_changing_the_shard_size_between_runs_is_refused'),
+    ('eda/driver.py',
+     '    dupes = merged["file_id"].duplicated()',
+     '    dupes = merged["file_id"].duplicated() & False',
+     'signal parts cannot merge with duplicates',
+     'tests/test_eda_signal.py::test_signal_parts_that_disagree_cannot_merge_into_a_table'),
 ]
 
 py = sys.argv[1]

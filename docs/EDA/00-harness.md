@@ -186,14 +186,18 @@ correct division of labour with `level.dc_offset`, now written down.
 
 ---
 
-## 4c — 🔴 R1's premise, measured on pool E: half right, and the other half is worse
+## 4c — 🔴 R1's premise, measured on pool E: it holds
 
 Section 2 calls the 16 kHz question *"the premise the entire music-head strategy rests on and which
 no published work has tested"*. Pool E's S tier is the first test. 14,102 files, both planes, 0
 decode failures, 21 minutes.
 
-**The good half. The native bandwidth fingerprint dies exactly as hoped.** Median
-`effective_bandwidth_hz`:
+⚠️ **This section was rewritten after its own numbers contradicted its first conclusion.** The
+first version claimed the chain "replaces the fingerprint with a sharper one". Three checks below
+show that is wrong, and they were in the same table it was written from. The commit message of
+`f81712e` carries the superseded claim; this is the position that replaces it.
+
+**The native bandwidth fingerprint dies, cleanly.** Median `effective_bandwidth_hz`:
 
 | corpus | native sr | native | chain |
 |---|---|---|---|
@@ -202,25 +206,42 @@ decode failures, 21 minutes.
 | EnvSDD | 16 kHz | 7,984 Hz | 7,984 Hz |
 | musan-noise | 16 kHz | 7,781 Hz | 7,781 Hz |
 
-A 2× separation at `native` becomes no separation at `chain`. As an AUC for *"was this file
-published above 16 kHz"*, `hf_ratio_8k` goes **0.957 → 0.761** and `effective_bandwidth_hz`
-**0.906 → 0.689**. The natively-16 kHz sources have identical planes — delta exactly 0.000 —
-which is also the check that the chain short-circuits rather than silently resampling.
+A 2× separation at `native`, none at `chain`. The natively-16 kHz sources have identical planes —
+delta exactly 0.000 — which is also the check that the chain short-circuits rather than silently
+resampling.
 
-**The bad half. The chain does not erase the fingerprint, it replaces it with a sharper one.**
-The residual 0.761 is not noise. A controlled experiment isolates it: take 400 natively-16 kHz
-EnvSDD files, resample each **16 → 44.1 → 16 kHz**, and compare against itself. Same content, same
-file, only a resampling history added.
+### The residual is content, not format — three checks that say so
+
+As an AUC for *"was this file published above 16 kHz"*, `hf_ratio_8k` reads 0.957 at `native` and
+**0.761** at `chain`. That residual is not a surviving fingerprint:
+
+1. **The column it is computed on is numerically empty.** `hf_ratio_8k_chain` has median
+   **3.8e-07**, and **62% of rows are below 1e-06**. An AUC over values that are all approximately
+   zero ranks float dust from the resampler's own arithmetic. ⚠️ *An AUC is only as meaningful as
+   the spread of the column under it* — check the distribution before quoting the number.
+2. **The two groups are different sounds.** `spectral_centroid_hz` on the **chain** plane is
+   **183.7 Hz** for the natively-16 kHz corpora and **997.0 Hz** for the resampled ones. MUSAN and
+   EnvSDD are low-frequency noise; VGGSound and AudioCaps are broadband ambience. Content at 5×
+   separation explains the residual without any format term, and it is not a shortcut — it is what
+   those corpora *are*.
+3. **Held against the corpora, the format signal is nearly absent.** `near_nyquist_ratio` on the
+   chain plane gives AUC **0.611** for "was resampled", and the two never-resampled corpora
+   **straddle** the resampled ones: musan-noise **0.062**, VGGSound 0.146, AudioCaps 0.148,
+   EnvSDD **0.219**.
+
+### The resampler does leave a signature — on identical content only
+
+Take 400 natively-16 kHz EnvSDD files, resample each **16 → 44.1 → 16 kHz**, compare against
+itself. Same file, only a resampling history added:
 
 | column (chain plane) | as published | round-tripped | AUC |
 |---|---|---|---|
 | `near_nyquist_ratio` | 0.2461 | 0.0963 | **0.940** |
-| `hf_ratio_8k` | 0.0000 | 0.0000 | 0.680 |
 | `effective_bandwidth_hz` | 7,984 Hz | 7,609 Hz | 0.576 |
 | `spectral_centroid_hz` | 161.66 | 161.63 | 0.500 |
 | `rms_dbfs` | −46.953 | −46.946 | 0.501 |
 
-**AUC 0.940 on identical audio.** The mechanism, per-band energy fraction on one file:
+Per-band energy fraction on one file shows the mechanism — `resample_poly`'s anti-alias skirt:
 
 | band | as published | round-tripped |
 |---|---|---|
@@ -229,28 +250,19 @@ file, only a resampling history added.
 | **7.5–7.9 kHz** | **1.58e-05** | **5.41e-06** |
 | **7.9–8.0 kHz** | **3.14e-06** | **7.95e-07** |
 
-`resample_poly`'s anti-alias skirt attenuates the top 500 Hz by 3–4× and leaves everything below
-7 kHz alone. So `near_nyquist_ratio` on the **chain** plane is very close to a detector for
-*"has this file been resampled"*.
+**0.940 paired against 0.611 unpaired is the whole result.** The skirt is real and measurable when
+content is held constant, and it is invisible once content varies. So it is a **train/test domain
+difference**, not a corpus-identity shortcut: every test file has been through the organizers'
+resampler, and EnvSDD, MUSAN and our other natively-16 kHz sources have not.
 
-### Why this matters more than the thing it replaced
+> Giving every file the same resampling history is worth doing — it is one cheap R2 transform,
+> applied identically to train and test, and it removes a difference we have measured. It is **not**
+> urgent, and it is not the shortcut the native-bandwidth column was. Ranking it above the
+> duration and level findings would be ranking it by how interesting it is rather than by how large.
 
-The competition's test set is **standardized to 16 kHz**, which means every test file has been
-through the organizers' resampler. Our corpus is split down the middle: EnvSDD, MUSAN and the other
-natively-16 kHz sources have **not** been resampled, and VGGSound, AudioCaps, FMA and the rest
-have. That is both an in-train shortcut and a train/test mismatch, and it points the same way in
-both cases:
-
-> **The render chain should give every file the same resampling history.** A file that arrives at
-> 16 kHz must not be recognisable *because* it arrived at 16 kHz. This is an R2 transform — applied
-> identically to train and test — not a filter, and it is the first transform this EDA has
-> established a need for from measurement rather than from expectation.
-
-⚠️ Not every column collapses, and not all of the residual is format. `spectral_centroid_hz` holds
-at **0.861 → 0.848**: the ambient corpora genuinely differ in content from the noise corpora, which
-is a real property and not a shortcut. And `spectral_flatness` **reverses direction** across the
-planes (0.200 → 0.773) because dropping a near-empty HF region raises the geometric mean — a
-statistic whose sign depends on the plane cannot be quoted without naming it.
+⚠️ One statistic to distrust across planes: `spectral_flatness` **reverses direction**
+(0.200 → 0.773) because dropping a near-empty HF region raises the geometric mean. A statistic
+whose sign depends on the plane cannot be quoted without naming the plane.
 
 ---
 

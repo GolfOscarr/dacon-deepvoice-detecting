@@ -47,6 +47,83 @@ AUC of 0.52 is not evidence of safety.
 
 ---
 
+## X1b — 🔴 X1 run on the full corpus: it is one confound wearing fifteen hats
+
+Measured 2026-09-12 over **151,693 rows / 10 sources** — pools A-E plus `cell8`, the first audit
+with whole-file rows in it.
+
+| head | n | AUC |
+|---|---|---|
+| `music_fake` | 85,339 | **1.0000** |
+| `music_present` | 151,693 | 0.99996 |
+| `voice_fake` | 101,326 | 0.9611 |
+| `voice_present` | 151,693 | 0.9919 |
+
+⚠️ **This corrects how the earlier result was summarised, not the result itself.** The wave-1
+handoff reported the shortcut as *"three metadata columns — duration, format, channels — and
+nothing underneath them"*. The cumulative ablation it was drawn from actually removed five groups
+before reaching 0.500, and re-running the audit one column at a time shows why that compression is
+dangerous. **Every metadata column except `n_streams` separates the corpus on its own:**
+
+| feature alone | voice_present | music_present | voice_fake | music_fake |
+|---|---|---|---|---|
+| `bit_rate` | **0.941** | 0.672 | 0.799 | 0.640 |
+| `codec_name` | 0.890 | **0.998** | 0.954 | 0.705 |
+| `sample_fmt` | 0.835 | **0.997** | 0.877 | 0.705 |
+| `container` | 0.793 | 0.891 | **0.954** | 0.642 |
+| `encoder` | 0.783 | 0.834 | 0.877 | **0.986** |
+| `file_bytes` | 0.743 | 0.880 | **0.898** | 0.870 |
+| `duration_s` | 0.658 | **0.946** | 0.860 | 0.603 |
+| `lame_version` | 0.763 | 0.811 | 0.877 | **0.904** |
+| `xing_tag` | 0.663 | 0.834 | 0.877 | 0.642 |
+| `lame_tag` | 0.702 | 0.811 | 0.877 | 0.587 |
+| `bits_per_raw_sample` | 0.659 | 0.717 | 0.813 | 0.500 |
+| `orig_sr` | 0.541 | 0.701 | 0.558 | **0.962** |
+| `orig_channels` | 0.636 | 0.503 | 0.500 | **0.957** |
+| `id3_tag` | 0.579 | 0.547 | 0.500 | **0.962** |
+| `n_streams` | 0.500 | 0.500 | 0.500 | 0.500 |
+| **all fifteen removed** | **0.500** | **0.500** | **0.500** | **0.500** |
+
+**What survives from the earlier diagnosis**: removing every metadata feature puts all four heads at
+exactly 0.500. There is no shortcut outside the columns we measure, and the audit is complete rather
+than merely alarming.
+
+**What does not**: the idea that three knobs close it. `encoder` alone predicts `music_fake` at
+0.986, `bit_rate` alone predicts `voice_present` at 0.941, and `file_bytes` alone predicts
+`voice_fake` at 0.898 — none of which is duration, container, or channel count. A transform plan
+aimed at those three would leave every row of that table in place.
+
+### The sharpest case: three header fields identify cell 8 exactly
+
+`(orig_sr, orig_channels, container)` over the whole corpus:
+
+| tuple | A | B | C | D | E | cell8 |
+|---|--:|--:|--:|--:|--:|--:|
+| `16000 / 1 / mp3` | 0 | 0 | 0 | 0 | 0 | **49,074** |
+| `16000 / 1 / wav` | 426 | 0 | 660 | 27,605 | 7,626 | 0 |
+| `22050 / 1 / wav` | 13,100 | 16,006 | 0 | 0 | 0 | 0 |
+| `44100 / 2 / mp3` | 0 | 0 | 7,490 | 0 | 0 | 0 |
+| `16000 / 1 / flac` | 22,720 | 0 | 0 | 0 | 0 | 0 |
+
+**One tuple covers every cell-8 row and nothing else.** Cell 8 is `1` on *all four heads* and is
+32% of the corpus, so those three fields alone label a third of it perfectly — which is where
+`orig_sr` 0.962, `orig_channels` 0.957 and `id3_tag` 0.962 on `music_fake` come from. `encoder`
+is the same story with a finer edge: **`LAME3.100` appears on all 49,074 SONICS files and on no
+other file in the corpus**, while `fma`'s mp3s carry eighteen *other* LAME versions.
+
+⚠️ Adding a whole-file partition sourced from one publisher makes the shortcut *worse*, not
+better, and that is a property of the acquisition rather than of SONICS. A second cell-8 source
+from a different publisher would do more for this gate than any transform.
+
+🔴 **The right reading is that there is exactly one confound — corpus identity — and fifteen
+columns are each a proxy for it.** The source-grouped collapse says the same thing from the other
+side. The fix is correspondingly not a list of knobs but a property: **every file must leave the
+render chain having been through one identical encode** — one container, one codec, one bit depth,
+one bitrate policy, tags stripped — so that no header field can name its source. Anything less
+leaves a column that still can.
+
+---
+
 ## X2 — 🔴 The metadata-leak question (A5) — Tier A, and the one genuinely open feature question
 
 **Compute.** X1's model, but treated as a **candidate submission feature** rather than as a

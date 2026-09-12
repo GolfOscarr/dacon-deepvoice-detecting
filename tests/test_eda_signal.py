@@ -527,3 +527,60 @@ def test_the_signal_pass_refuses_to_improvise_a_sample(tmp_path):
     cfg = _signal_corpus(tmp_path)
     with pytest.raises(NotProbed, match="draw the sample first"):
         signal_partition(cfg, "A")
+
+
+def test_changing_the_shard_size_between_runs_is_refused(tmp_path):
+    """🔴 A part is identified by its index, so its boundaries only mean
+    something under the shard size that wrote it. Retune `sample.shard_size`
+    and part 00000 covers rows 0..N-1 of the old size while the loop believes
+    it covers 0..M-1 -- every row between is measured twice and both copies are
+    merged.
+
+    Measured before the guard existed: 8 files became **14 rows with 6
+    duplicate file_ids**, with nothing said. It was live on pool E, whose first
+    pass ran at 20,000 and whose config then moved to 500.
+
+    Mutation: drop the marker comparison and this returns 14 rows."""
+    import dataclasses
+
+    from eda.driver import load_files, signal_partition
+    from eda.sample import draw
+
+    cfg = _signal_corpus(tmp_path, n_per_source=4)
+    cfg = dataclasses.replace(cfg, sample=dataclasses.replace(
+        cfg.sample, full_pools=("A",), shard_size=8))
+    draw(cfg, load_files(cfg, "A"), "A")
+    first = signal_partition(cfg, "A")
+    assert first.files == 8
+
+    retuned = dataclasses.replace(cfg, sample=dataclasses.replace(
+        cfg.sample, shard_size=2))
+    with pytest.raises(RuntimeError, match="shard_size=8 and the config now says 2"):
+        signal_partition(retuned, "A")
+
+
+def test_signal_parts_that_disagree_cannot_merge_into_a_table(tmp_path):
+    """The backstop, and the same guard `consolidate` has always had for
+    files.parquet. A parts directory can carry rows from an aborted run under
+    an older draw, which no shard-size check would catch."""
+    import shutil
+
+    from eda.driver import load_files, signal_partition
+    from eda.sample import draw
+
+    cfg = _signal_corpus(tmp_path, n_per_source=4)
+    cfg = dataclasses_replace_full(cfg)
+    draw(cfg, load_files(cfg, "A"), "A")
+    res = signal_partition(cfg, "A")
+
+    parts = cfg.out / "A" / "signal_parts"
+    shutil.copy(parts / "00000.parquet", parts / "00001.parquet")
+    shutil.copy(parts / "00000.DONE", parts / "00001.DONE")
+    with pytest.raises(RuntimeError, match="duplicate file_id"):
+        signal_partition(cfg, "A")
+
+
+def dataclasses_replace_full(cfg):
+    import dataclasses
+    return dataclasses.replace(cfg, sample=dataclasses.replace(
+        cfg.sample, full_pools=("A",), shard_size=8))

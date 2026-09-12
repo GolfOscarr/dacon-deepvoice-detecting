@@ -97,12 +97,15 @@ No file in the new source is byte-identical to anything in `musan-noise`.
 minutes, so the GIL holds the speedup to ~2× and the S tier is I/O- and decode-bound, not
 parallel-bound). Pool E is measured in full, so these are population statements, not samples.
 
-🔴 **Pool E answered the project's open R1 question, and the answer is not the one the plan
-expected.** The 16 kHz chain destroys the native bandwidth fingerprint and replaces it with a
-*sharper* one — `near_nyquist_ratio` on the chain plane separates a natively-16 kHz file from the
-same file round-tripped through 44.1 kHz at **AUC 0.940**. The numbers, the controlled experiment
-and the consequence are in [00 §4c](00-harness.md#4c---r1s-premise-measured-on-pool-e-half-right-and-the-other-half-is-worse);
-they belong there because they are a property of the chain, not of pool E.
+🔴 **Pool E answered the project's open R1 question, and the premise holds.** The 16 kHz chain
+destroys the native bandwidth fingerprint: 15,246 Hz and 15,289 Hz of median effective bandwidth
+for the two 44.1 kHz corpora become 8,000 Hz, and what looks like a residual is content rather than
+format. The resampler does leave a skirt signature — AUC **0.940** on *identical* audio, **0.611**
+once content varies — so it is a train/test domain difference worth one cheap transform, not a
+shortcut. The numbers, the controlled experiment and the three checks that overturned this
+section's own first conclusion are in
+[00 §4c](00-harness.md#4c---r1s-premise-measured-on-pool-e-it-holds); they belong there because
+they are a property of the chain, not of pool E.
 
 What is specific to pool E:
 

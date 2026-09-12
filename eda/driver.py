@@ -344,6 +344,23 @@ def signal_partition(cfg: EdaConfig, partition: str, *, progress=None
             part = parts_dir / f"{idx:05d}.parquet"
             done = part.with_suffix(".DONE")
             if done.exists():
+                # 🔴 A part is identified by its index, so its *boundaries* are
+                # only meaningful under the shard size that wrote it. Change
+                # `sample.shard_size` between runs and part 00000 covers rows
+                # 0..N-1 of the old size while this loop believes it covers
+                # 0..M-1 -- every row in between is measured twice and both
+                # copies are merged. Measured: 8 files became 14 rows with 6
+                # duplicate file_ids, silently. The marker records the size so
+                # the mismatch is a refusal instead.
+                marker = json.loads(done.read_text(encoding="utf-8"))
+                wrote = marker.get("shard_size")
+                if wrote != cfg.sample.shard_size:
+                    raise RuntimeError(
+                        f"partition {partition}: {part.name} was written with "
+                        f"shard_size={wrote} and the config now says "
+                        f"{cfg.sample.shard_size}. Part boundaries are not "
+                        f"comparable across sizes and resuming would measure rows "
+                        f"twice. Delete {parts_dir} and re-run, or put the size back")
                 skipped += 1
                 continue
             out = list(pool.map(
@@ -351,8 +368,10 @@ def signal_partition(cfg: EdaConfig, partition: str, *, progress=None
             frame = pd.DataFrame(out)
             frame.to_parquet(part, index=False)
             failures += int((~frame["signal_ok"]).sum())
-            done.write_text(json.dumps({"rows": len(out), "shard": idx}),
-                            encoding="utf-8")
+            done.write_text(
+                json.dumps({"rows": len(out), "shard": idx,
+                            "shard_size": cfg.sample.shard_size}),
+                encoding="utf-8")
             run += 1
             if progress is not None:
                 progress(partition, idx, len(out))
@@ -364,6 +383,17 @@ def signal_partition(cfg: EdaConfig, partition: str, *, progress=None
     if not frames:
         raise NotProbed(f"partition {partition}: no completed signal parts")
     merged = pd.concat(frames, ignore_index=True)
+    # The backstop, and the same guard `consolidate` has had all along for
+    # files.parquet. Its absence here was an inconsistency, not a judgement:
+    # a parts directory can also carry rows from an aborted run under an older
+    # draw, which no shard-size check would catch.
+    dupes = merged["file_id"].duplicated()
+    if dupes.any():
+        raise RuntimeError(
+            f"partition {partition}: {int(dupes.sum())} duplicate file_id(s) across "
+            f"the signal parts, e.g. {merged.loc[dupes, 'file_id'].iloc[0]!r}. The "
+            f"parts under {parts_dir} were written by runs that do not agree; delete "
+            f"them and re-run")
     merged.to_parquet(table, index=False)
     return SignalResult(partition, len(rows), run, skipped,
                         int((~merged["signal_ok"]).sum()), table)

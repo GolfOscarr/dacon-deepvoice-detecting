@@ -168,10 +168,20 @@ alone separates `MUSIC_FAKE` at **AUC 1.000**, on the head carrying **0.27** of 
 Removing every codec column changes nothing. The 0.962 residual after duration is **channel
 count** — `fma` is the only stereo source in the corpus.
 
-**Ruled out**: a fourth, unexplained confound. Once duration, format and channels are removed,
-all four heads sit at exactly 0.500. The audit is complete, not merely alarming.
+**Ruled out**: a fourth, unexplained confound. Once **every** metadata feature is removed, all four
+heads sit at exactly 0.500. The audit is complete, not merely alarming.
 
-Each maps to an already-planned transform — none is new work:
+🔴 **Corrected 2026-09-12, after re-running the audit column by column on the full corpus** — see
+[EDA/06 X1b](EDA/06-cross-pool.md#x1b---x1-run-on-the-full-corpus-it-is-one-confound-wearing-fifteen-hats).
+Read "duration, format and channels" as shorthand for the whole cumulative ablation above, not as a
+list of three columns to fix. **Every metadata column except `n_streams` separates the corpus on its
+own**: `encoder` alone predicts `music_fake` at 0.986, `bit_rate` alone predicts `voice_present` at
+0.941, `file_bytes` alone predicts `voice_fake` at 0.898. There is one confound — corpus identity —
+and fifteen proxies for it, so the fix is a property rather than a knob list: every file leaves the
+render chain having been through one identical encode, tags stripped.
+
+Each maps to an already-planned transform — none is new work, though per X1b the coverage has to be
+total rather than confined to these three rows:
 
 | Confound | Knob | Doc |
 |---|---|---|
