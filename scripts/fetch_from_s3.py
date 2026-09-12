@@ -36,6 +36,7 @@ more than any tuning in here.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import pathlib
@@ -44,6 +45,7 @@ import subprocess
 import sys
 import tarfile
 import zipfile
+from collections.abc import Sequence
 
 DEFAULT_BUCKET = "hyeonseop-s3"
 DEFAULT_PREFIX = "dacon-deepfake-detection/data/raw"
@@ -145,6 +147,20 @@ def human(n: float | None) -> str:
     return "?"
 
 
+def selected(names, only: Sequence[str]) -> list[str]:
+    """The payload-relative names matching any `--only` glob; all of them when
+    no glob is given.
+
+    Critical: the same function filters the sync and the verification. If the
+    two ever disagree, a partial fetch reports every unfetched file as
+    "missing" -- a red run for a corpus that is exactly what was asked for --
+    and the reader learns to ignore the one check that matters.
+    """
+    if not only:
+        return list(names)
+    return [n for n in names if any(fnmatch.fnmatch(n, g) for g in only)]
+
+
 def verify_dir(payload: pathlib.Path, want: dict[str, str]) -> tuple[list, list]:
     """`(ok, bad)` for the files a checksum manifest names.
 
@@ -165,9 +181,22 @@ def verify_dir(payload: pathlib.Path, want: dict[str, str]) -> tuple[list, list]
 
 
 def sync_down(bucket: str, prefix: str, name: str, version: str,
-              dest: pathlib.Path, dry_run: bool) -> None:
+              dest: pathlib.Path, dry_run: bool,
+              only: Sequence[str] = ()) -> None:
     uri = f"s3://{bucket}/{prefix.rstrip('/')}/{name}/{version}/"
     cmd = ["aws", "s3", "sync", uri, str(dest), "--only-show-errors"]
+    # `--only` is a *partial* fetch: exclude everything, then re-include the
+    # payload paths asked for. CompSpoof is the case it exists for -- 111.8 GB
+    # in the store, of which pool E needs the two `*_source.tar.gz` that carry
+    # `env_sources/`. Egress is billed and the rest is speech and mixtures we
+    # already have better sources for.
+    # Critical: ONE `--exclude "*"` first, then every include. aws applies
+    # filters in the order given, so a second `--exclude "*"` after an include
+    # cancels it and the sync transfers nothing at all.
+    if only:
+        cmd += ["--exclude", "*"]
+        for glob in only:
+            cmd += ["--include", f"payload/{glob}"]
     if dry_run:
         cmd.append("--dryrun")
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -279,6 +308,10 @@ def main() -> int:
     p.add_argument("--dest", type=pathlib.Path, default=pathlib.Path("data/raw"))
     p.add_argument("--extract", type=pathlib.Path,
                    help="also unpack archives under this directory")
+    p.add_argument("--only", action="append", default=[], metavar="GLOB",
+                   help="payload paths matching this glob only; repeatable. A "
+                        "partial fetch: DONE still means the upload was "
+                        "complete, but your copy deliberately is not")
     p.add_argument("--verify-only", action="store_true",
                    help="re-hash what is already local; transfer nothing")
     p.add_argument("--dry-run", action="store_true", help="show what would transfer")
@@ -343,10 +376,18 @@ def main() -> int:
 
         local = args.dest / name / s["version"]
         if not args.verify_only:
-            print(f"  [get ] {name}/{s['version']}  {human(s['bytes'])}, "
-                  f"{len(s['files'])} file(s)")
+            take = selected(s["files"], args.only)
+            if args.only and not take:
+                print(f"  [skip] {name}: no payload file matches {args.only}")
+                skipped.append(name)
+                continue
+            size = s["bytes"] if not args.only else None
+            print(f"  [get ] {name}/{s['version']}  "
+                  f"{human(size) if size else '(partial)'}, {len(take)} file(s)"
+                  + (f" of {len(s['files'])}" if args.only else ""))
             try:
-                sync_down(args.bucket, args.prefix, name, s["version"], local, args.dry_run)
+                sync_down(args.bucket, args.prefix, name, s["version"], local,
+                          args.dry_run, args.only)
             except Exception as exc:                   # noqa: BLE001
                 print(f"  [FAIL] {name}: {exc}", file=sys.stderr)
                 failures.append(name)
@@ -358,7 +399,12 @@ def main() -> int:
         if not text:
             print(f"  [warn] {name}: no checksums.sha256 in the store -- cannot verify")
         else:
-            ok, bad = verify_dir(local / "payload", parse_checksums(text))
+            # Critical: verify only what was asked for. Handing the full
+            # manifest to a partial fetch reports every file it deliberately
+            # did not take as "missing", which is a FAIL for a correct run.
+            want = parse_checksums(text)
+            want = {k: v for k, v in want.items() if k in set(selected(want, args.only))}
+            ok, bad = verify_dir(local / "payload", want)
             if bad:
                 for fname, why in bad[:5]:
                     print(f"  [BAD ] {name}/{fname}: {why}", file=sys.stderr)

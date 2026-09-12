@@ -212,3 +212,54 @@ def test_an_unpacked_archive_looking_file_is_reported(tmp_path, capsys):
     warned = capsys.readouterr().out
     assert "not unpacked" in warned and "part_aa" in warned
     assert "README" not in warned, "warning about docs trains the reader to ignore it"
+
+
+# --------------------------------------------------------------------------
+# partial fetch (`--only`)
+# --------------------------------------------------------------------------
+
+def test_only_selects_by_glob_and_no_glob_takes_everything():
+    names = ["eval.tar.gz", "test_source.tar.gz", "eval_source.tar.gz",
+             "development.tar.gz.part_aa"]
+    assert pull.selected(names, ["*_source.tar.gz"]) == ["test_source.tar.gz",
+                                                         "eval_source.tar.gz"]
+    assert pull.selected(names, []) == names
+
+
+def test_the_sync_excludes_once_and_then_includes(monkeypatch):
+    """🔴 aws applies filters in the order given. A second `--exclude *` after
+    an include cancels it, and the sync transfers nothing while reporting
+    success. Mutation: emit the exclude inside the loop and this catches it."""
+    seen = {}
+
+    class _Done:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(pull.subprocess, "run",
+                        lambda cmd, **k: (seen.update(cmd=cmd), _Done())[1])
+    pull.sync_down("b", "p", "n", "v1", pathlib.Path("/tmp/x"), False,
+                   ["a.tar.gz", "b.tar.gz"])
+    cmd = seen["cmd"]
+    assert cmd.count("--exclude") == 1
+    assert cmd.index("--exclude") < cmd.index("--include")
+    assert "payload/a.tar.gz" in cmd and "payload/b.tar.gz" in cmd
+
+
+def test_a_partial_fetch_verifies_only_what_it_asked_for(tmp_path):
+    """🔴 The trap this pairs with: handing the *full* manifest to a partial
+    fetch reports every file it deliberately did not take as `missing`, which
+    is a red run for a correct one. CompSpoof is 18 payload files and pool E
+    needs two of them."""
+    d = tmp_path / "payload"
+    want = {"eval_source.tar.gz": _write(d / "eval_source.tar.gz", b"x"),
+            "development.tar.gz.part_aa": "0" * 64}
+    only = ["*_source.tar.gz"]
+    trimmed = {k: v for k, v in want.items() if k in set(pull.selected(want, only))}
+    ok, bad = pull.verify_dir(d, trimmed)
+    assert ok == ["eval_source.tar.gz"] and bad == []
+
+    # and without the trim it is a false failure
+    ok, bad = pull.verify_dir(d, want)
+    assert bad == [("development.tar.gz.part_aa", "missing")]

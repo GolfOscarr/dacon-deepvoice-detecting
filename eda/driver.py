@@ -248,6 +248,13 @@ def load_files(cfg: EdaConfig, partitions: Sequence[str] | None = None) -> pd.Da
     The names land in `df.attrs["missing_partitions"]` so the CLI can print them
     and `eda.gates` can tell an empty partition from an absent one.
     """
+    # 🔴 A bare string is a Sequence[str] of its own characters, so
+    # `load_files(cfg, "cell8")` asked for partitions c, e, l, l, 8 and raised
+    # naming them. `"E"` happened to work, which is what made it survive: every
+    # pool name is one character and only the first `cellN` partition exposed
+    # it. Accept the singular spelling rather than punish it.
+    if isinstance(partitions, str):
+        partitions = [partitions]
     partitions = list(partitions or cfg.partitions())
     frames, missing = [], []
     for partition in partitions:

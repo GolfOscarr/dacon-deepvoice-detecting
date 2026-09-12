@@ -170,7 +170,13 @@ def _g_eda3(cfg: EdaConfig, groups: pd.DataFrame | None) -> GateResult:
         "G-EDA3", FAIL if len(short) else PASS,
         f"{len(short)} of {len(groups)} source(s) below "
         f"{cfg.gates.min_groups_per_role} path-derived groups"
-        + (f": {', '.join(short['source_name'].head(5))}" if len(short) else "")
+        # 🔴 `.head(5)` silently truncated. The 6th source to fail was SONICS
+        # and the detail read "6 of 9 source(s) below 6 ... : <five names>",
+        # which reads as a transcription error rather than a cut list -- and
+        # the missing name is the one the reader has not thought about yet.
+        + (f": {', '.join(short['source_name'].head(5))}"
+           + (f" (+{len(short) - 5} more)" if len(short) > 5 else "")
+           if len(short) else "")
         + ". Caveat: path depth is a suggestion -- LJSpeech is one speaker at any depth")
 
 

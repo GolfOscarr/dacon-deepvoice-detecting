@@ -23,7 +23,7 @@ from eda.config import (AnalysisConfig, ConfigError, EdaConfig, GateConfig, Prob
 from eda.driver import consolidate, enumerate_source, load_files, probe_source
 from eda.extract import METADATA, Extractor, ExtractorError, Registry, run_metadata
 from eda.ids import file_id_for, relpath_of, under_any
-from eda.gates import FAIL, NA, PASS, run_gates, worst
+from eda.gates import FAIL, NA, PASS, _g_eda3, run_gates, worst
 
 SR = 16000
 
@@ -844,6 +844,41 @@ def test_the_shipped_config_drops_both_rirs_sources_and_says_what_was_measured()
     runnable = [s.name for s in cfg.sources_in("E") if not s.blocked]
     assert runnable == ["musan-noise"]
     assert cfg.gates.min_groups_per_role > len(runnable)
+
+
+def test_the_grouping_gate_says_when_it_truncated_the_name_list(tmp_path):
+    """🔴 `.head(5)` cut the list with nothing saying so: the detail read
+    "6 of 9 source(s) below 6 ... : <five names>". A count that disagrees with
+    the list it is followed by reads as a typo, and the name that got cut is
+    the one the reader has not thought about yet -- it was SONICS."""
+    groups = pd.DataFrame({"source_name": [f"s{i}" for i in range(7)],
+                           "meets_floor": [False] * 6 + [True]})
+    cfg = EdaConfig(root=tmp_path, out=tmp_path, sources=(), gates=GateConfig())
+    res = _g_eda3(cfg, groups)
+    assert res.verdict == FAIL
+    assert "6 of 7" in res.detail and "(+1 more)" in res.detail
+
+    # five or fewer and there is nothing to say
+    groups["meets_floor"] = [False] * 5 + [True] * 2
+    assert "more)" not in _g_eda3(cfg, groups).detail
+
+
+def test_load_files_accepts_one_partition_named_as_a_string(tmp_path):
+    """🔴 A bare `str` is a `Sequence[str]` of its own characters, so
+    `load_files(cfg, "cell8")` asked for partitions c, e, l, l and 8. It
+    survived because every pool name is one character -- `"E"` works by
+    accident -- and only the first `cellN` partition exposed it."""
+    root, out = tmp_path / "i", tmp_path / "o"
+    src = SourceSpec(name="songs", row_kind="whole_file", cell=8, root="songs/v1",
+                     suffixes=(".wav",))
+    _write(root / "songs/v1/a.wav")
+    cfg = EdaConfig(root=root, out=out, sources=(src,),
+                    probe=ProbeConfig(workers=1, shard_size=4))
+    probe_source(cfg, src)
+    consolidate(cfg, "cell8")
+
+    assert len(load_files(cfg, "cell8")) == 1
+    assert len(load_files(cfg, ["cell8"])) == 1
 
 
 def test_consolidate_skips_a_source_blocked_after_it_was_probed(tmp_path):

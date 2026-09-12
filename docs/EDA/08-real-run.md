@@ -239,6 +239,38 @@ These three only appeared once the verbs were pointed at a real, partially-fetch
 
 ---
 
+## 6c — Wave 1 finished: SONICS, and what cell 8 actually looks like
+
+49,074 files fetched, verified against sha256, extracted, probed and consolidated. Every one is
+`probe_ok`. This is the **first audit of any `whole_file` row**, and it says two things the
+component pools could not.
+
+**Cell 8 is one encoder.** 49,074 of 49,074 are mp3, `LAME3.100`, 16 kHz, mono, `fltp`, at
+34–40 kbps. Not a dominant mode — the *only* value of every one of those columns. Whatever a
+whole-file row is worth, a model can currently read "this is cell 8" off the header and never
+listen, which is the [§3](#-what-priority-0-actually-found--73-mb-before-extracting-189-gib)
+confound in a new place: a whole file arrives with its encoder attached.
+
+**Cell 8 barely overlaps the test distribution.** Test files are 4–60 s. SONICS' shortest file is
+**32.90 s** and 44,139 of 49,074 are **over 60 s** — only **4,935 fall inside the window at all**,
+and 4,903 of those are a single duration.
+
+| | n | min | median | max | in 4–60 s |
+|---|---|---|---|---|---|
+| udio | 23,648 | 32.90 | **131.22** | **131.22** | 4,903 |
+| suno | 25,426 | 34.99 | 180.40 | 240.08 | 32 |
+
+Udio's median *equals* its maximum: **18,745 files are exactly 131.22 s** and 4,903 more are
+exactly 32.90 s. The generator emits fixed lengths. Read together with FakeMusicCaps' 10.0 s and
+`fma_small`'s 30.0 s, duration is not one source's quirk — **every fake-music source we hold is
+duration-degenerate**, and the crop that fixes it is a render-time transform applied to train and
+test alike (R2), not a filter.
+
+**Two groups, not six.** Path depth finds one group; the generator token in the filename finds
+two, `suno` and `udio`. G-EDA3's floor is 6, and SONICS is the sixth source to fail it.
+
+---
+
 ## 7 — What this run cannot answer
 
 Carried forward from [07 §4](07-order-and-gates.md) and unchanged: three dummy files make every
