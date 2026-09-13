@@ -86,7 +86,14 @@ but `G-EDA5` moves to `pass`, and `eda sources` shows pool E's composition hones
 
 ## 3 — Progress and diagnosis
 
-### 🔴 Status: goals 1 and 2 of §2 are DONE. Read this before acting on the rest
+### 🔴 SUPERSEDED for the plan — read [`docs/EDA/09-next-steps.md`](EDA/09-next-steps.md) first
+
+All three goals of §2 are done, and the corpus has roughly doubled since this document was written
+(264,085 rows, 13 sources). **[EDA/09](EDA/09-next-steps.md) is the plan of record**; it carries the
+measured state and what remains. What is still worth reading here is the *diagnosis* below, which
+09 §"three findings" summarises and extends.
+
+### Status: goals 1 and 2 of §2 are DONE. Read this before acting on the rest
 
 The session that received this handoff executed the first two goals the same day. The diagnosis in
 this section is unchanged and still the thing to act on; the *numbers* below it are the pre-decision

@@ -47,7 +47,15 @@ sample:
   # Pool D because five generator families are too few to sample from and it
   # carries 0.27; pool E because it is small and its last surprise cost a
   # corpus rebuild.
-  full_pools: [D, E]
+  #
+  # 🔴 `cell8` added 2026-09-13, on the same argument as pool D and a stronger
+  # version of it. It is 49,074 rows -- 19% of the corpus -- from **one
+  # publisher and five generators**, and it is the only partition that is `1`
+  # on all four heads, so it feeds every head at once. Sampling 2,000 of it
+  # would draw from a single `source_name` stratum and let five generators with
+  # five distinct duration signatures (32.90 s to 240.08 s) land in whatever
+  # proportion the draw happened to pick.
+  full_pools: [D, E, cell8]
   # ⚠️ Not `probe.shard_size`, and an order of magnitude smaller. That one is
   # sized for ffprobe at ~20 ms a file; a part is the unit of resumability, and
   # 20,000 files at decode speed is a run you cannot interrupt. Pool E's first

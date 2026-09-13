@@ -21,6 +21,7 @@ concrete computation, an output file, and a gate.
 | [00](00-harness.md) | the shared harness | — | what every script emits, and the two measurement planes |
 | [07](07-order-and-gates.md) | execution | — | phase order, cost, gates, and what each finding changes |
 | [08](08-real-run.md) | **the real run** | — | wave priority over the 15 acquired sources, verified layouts, and the four defects found checking it |
+| [09](09-next-steps.md) | **Next steps** — the plan of record | — | what remains, in dependency order |
 
 `compspoof-v2` (111.8 GiB) spans pools and is treated per-component; its `env_sources` halves are
 covered in [05](05-pool-e-noise.md).
