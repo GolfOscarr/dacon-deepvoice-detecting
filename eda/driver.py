@@ -23,15 +23,16 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Any, Iterator, Sequence
 
+import numpy as np
 import pandas as pd
 
 from eda.config import EdaConfig, SourceSpec
-from eda.extract import run_metadata, run_signal
+from eda.extract import VECTOR, run_metadata, run_signal, run_vectors
 from eda.groupkeys import attach_group_keys
 from eda.ids import file_id_for
-from eda.planes import load_planes
+from eda.planes import PLANES, load_planes
 from eda.sample import SAMPLE_FILE, load_sample, sampled_rows
 # Importing for the side effect of registration. Critical: without these the
 # registry is empty and `probe_source` writes a table of ids and nothing else --
@@ -41,10 +42,12 @@ from eda.extract import metadata as _metadata        # noqa: F401
 from eda.extract import level as _level              # noqa: F401
 from eda.extract import spectral as _spectral        # noqa: F401
 from eda.extract import timing as _timing            # noqa: F401
+from eda.extract import vectors as _vectors          # noqa: F401
 
 __all__ = ["BlockedSource", "FIXED_COLUMNS", "NotProbed", "SIGNAL_TABLE",
-           "SignalResult", "consolidate", "enumerate_source", "load_files",
-           "load_signal", "probe_source", "shards", "signal_partition"]
+           "SignalResult", "VECTOR_TABLE", "consolidate", "enumerate_source",
+           "load_files", "load_signal", "load_vectors", "probe_source", "shards",
+           "signal_partition"]
 
 
 class NotProbed(RuntimeError):
@@ -289,6 +292,12 @@ def load_files(cfg: EdaConfig, partitions: Sequence[str] | None = None) -> pd.Da
 
 #: The S tier's table, beside `files.parquet` and joined to it on `file_id`.
 SIGNAL_TABLE = "signal.parquet"
+#: The S tier's **other half**: the `[128]`-wide statistics, keyed by `file_id`
+#: and written by the same pass over the same decode (docs/EDA/00 section 1).
+#: A separate artifact rather than 384 more parquet columns, and separate for a
+#: reason that cost a decode to learn -- running it as a second pass would mean
+#: opening 91,765 files twice.
+VECTOR_TABLE = "vectors.npz"
 #: Written for every signal row whatever happened, so a decode failure is a row
 #: rather than a gap. `signal_ok` false with `signal_error` set is the shape.
 SIGNAL_FIXED = ("file_id", "source_name", "partition", "signal_ok", "signal_error")
@@ -320,10 +329,36 @@ def _signal_row(cfg: EdaConfig, row: pd.Series, partition: str) -> dict:
     try:
         planes = load_planes(path, declared_sr=declared, file_id=str(row["file_id"]))
     except Exception as exc:                         # noqa: BLE001 -- a row, not a raise
-        return {**fixed, "signal_ok": False,
-                "signal_error": f"{type(exc).__name__}: {exc}"}
-    return {**fixed, "signal_ok": True, "signal_error": None,
-            **run_signal(planes)}
+        # 🔴 The vectors still get a row, filled with NaNs of the declared
+        # width. `vectors.npz` is indexed positionally against the part's
+        # `file_id` array, so a decode failure that produced no vector row
+        # would shift every file after it onto somebody else's spectrum.
+        flags, arrays = _split_vectors(_failed_vectors())
+        return ({**fixed, "signal_ok": False,
+                 "signal_error": f"{type(exc).__name__}: {exc}", **flags},
+                arrays)
+    scalars = {**fixed, "signal_ok": True, "signal_error": None,
+               **run_signal(planes)}
+    # The flags belong in the table a reader opens, the arrays in the npz.
+    flags, arrays = _split_vectors(run_vectors(planes))
+    return {**scalars, **flags}, arrays
+
+
+def _failed_vectors() -> dict[str, Any]:
+    """Every V-tier column, on every plane, as a decode failure would emit it."""
+    out: dict[str, Any] = {}
+    for plane in PLANES:
+        for ex in VECTOR.values():
+            for column, value in ex.failed("decode failed").items():
+                out[f"{column}_{plane}"] = value
+    return out
+
+
+def _split_vectors(row: dict[str, Any]) -> tuple[dict[str, Any], dict[str, "np.ndarray"]]:
+    """`(flags, arrays)`: the scalars go to `signal.parquet`, the rest to the npz."""
+    flags = {k: v for k, v in row.items() if not isinstance(v, np.ndarray)}
+    arrays = {k: v for k, v in row.items() if isinstance(v, np.ndarray)}
+    return flags, arrays
 
 
 def signal_partition(cfg: EdaConfig, partition: str, *, progress=None
@@ -381,8 +416,16 @@ def signal_partition(cfg: EdaConfig, partition: str, *, progress=None
                 continue
             out = list(pool.map(
                 lambda i: _signal_row(cfg, rows.iloc[i], partition), batch))
-            frame = pd.DataFrame(out)
+            scalars = [row for row, _ in out]
+            frame = pd.DataFrame(scalars)
             frame.to_parquet(part, index=False)
+            # ⚠️ Written **before** the DONE marker and beside the parquet, so
+            # the two halves of a part are complete together or neither is. The
+            # marker is what a resume trusts, and a part whose parquet exists
+            # and whose npz does not would resume into a vectors table that is
+            # short by 500 rows with nothing saying so.
+            _write_vectors(part.with_suffix(".npz"), frame["file_id"].tolist(),
+                           [vec for _, vec in out])
             failures += int((~frame["signal_ok"]).sum())
             done.write_text(
                 json.dumps({"rows": len(out), "shard": idx,
@@ -393,10 +436,11 @@ def signal_partition(cfg: EdaConfig, partition: str, *, progress=None
             if progress is not None:
                 progress(partition, idx, len(out))
 
-    frames = []
+    frames, vector_parts = [], []
     for part in sorted(parts_dir.glob("*.parquet")):
         if part.with_suffix(".DONE").exists():
             frames.append(pd.read_parquet(part))
+            vector_parts.append(part.with_suffix(".npz"))
     if not frames:
         raise NotProbed(f"partition {partition}: no completed signal parts")
     merged = pd.concat(frames, ignore_index=True)
@@ -412,8 +456,66 @@ def signal_partition(cfg: EdaConfig, partition: str, *, progress=None
             f"parts under {parts_dir} were written by runs that do not agree; delete "
             f"them and re-run")
     merged.to_parquet(table, index=False)
+    _merge_vectors(cfg.out / partition / VECTOR_TABLE, vector_parts,
+                   merged["file_id"].tolist(), partition)
     return SignalResult(partition, len(rows), run, skipped,
                         int((~merged["signal_ok"]).sum()), table)
+
+
+def _write_vectors(path: Path, file_ids: list[str],
+                   rows: list[dict[str, np.ndarray]]) -> None:
+    """One part's vectors: `file_id` plus a `(n, width)` matrix per column."""
+    columns = sorted({c for row in rows for c in row})
+    arrays = {"file_id": np.asarray(file_ids, dtype=object)}
+    for column in columns:
+        arrays[column] = np.stack([row[column] for row in rows]).astype(np.float32)
+    np.savez_compressed(path, **arrays)
+
+
+def _merge_vectors(path: Path, parts: list[Path], file_ids: list[str],
+                   partition: str) -> None:
+    """Every part's vectors into one `vectors.npz`, keyed by `file_id`.
+
+    🔴 The keys are checked against `signal.parquet`'s, in order. The two files
+    are read together by every analysis that uses them, and an npz that is
+    merely the right *length* joins silently and wrongly -- which is exactly
+    the `dup_group` shape this repo keeps paying for. A mismatch raises and
+    names the first offending position.
+    """
+    if not parts:
+        return
+    loaded = []
+    for part in parts:
+        if not part.exists():
+            raise RuntimeError(
+                f"partition {partition}: {part.name} has a DONE marker and no "
+                f"vectors beside it. It was written before the vector half "
+                f"existed; delete {part.parent} and re-run `signal`")
+        loaded.append(np.load(part, allow_pickle=True))
+    columns = sorted(set(loaded[0].files) - {"file_id"})
+    keys = np.concatenate([npz["file_id"] for npz in loaded])
+    if list(keys) != list(file_ids):
+        bad = next((i for i, (a, b) in enumerate(zip(keys, file_ids)) if a != b),
+                   min(len(keys), len(file_ids)))
+        raise RuntimeError(
+            f"partition {partition}: {VECTOR_TABLE} holds {len(keys)} key(s) and "
+            f"{SIGNAL_TABLE} holds {len(file_ids)}; they first differ at position "
+            f"{bad}. The two are read together and joined by position, so a "
+            f"mismatch would give every later row somebody else's spectrum. "
+            f"Delete the signal parts and re-run")
+    merged = {"file_id": keys}
+    for column in columns:
+        merged[column] = np.concatenate([npz[column] for npz in loaded])
+    np.savez_compressed(path, **merged)
+
+
+def load_vectors(cfg: EdaConfig, partition: str) -> dict[str, np.ndarray]:
+    """One partition's `vectors.npz`, or `{}` when it has none yet."""
+    path = cfg.out / partition / VECTOR_TABLE
+    if not path.exists():
+        return {}
+    with np.load(path, allow_pickle=True) as npz:
+        return {name: npz[name] for name in npz.files}
 
 
 def load_signal(cfg: EdaConfig, partitions: Sequence[str] | None = None

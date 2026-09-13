@@ -605,6 +605,33 @@ def test_a_partition_with_no_table_is_reported_not_skipped(corpus):
         "G-EDA2", "verdict"] == NA
 
 
+def test_importing_the_driver_populates_the_signal_and_vector_registries():
+    """🔴 The same guard as below, for the two tiers that decode -- and it is
+    here because the defect happened. `eda.extract.vectors` was written, tested
+    and wired into `_signal_row`, and its registration import was never added
+    to this module: `run_vectors` returned `{}`, every part wrote a
+    `vectors.npz` holding nothing but `file_id`, and the pass reported success.
+
+    ⚠️ Run in a clean interpreter, and deliberately **not** importing
+    `eda.extract.vectors` here. The end-to-end test that should have caught it
+    imported the module itself, which registered the extractor as a side effect
+    and made the missing line invisible.
+    """
+    import subprocess
+    import sys as _sys
+
+    probe = (
+        "import eda.driver as d; from eda.extract import SIGNAL, VECTOR;"
+        "assert sorted(SIGNAL) == ['level', 'spectral', 'timing'], sorted(SIGNAL);"
+        "assert sorted(VECTOR) == ['vector'], sorted(VECTOR);"
+        "assert VECTOR.widths == {'vector': 128}, VECTOR.widths;"
+        "print('ok')"
+    )
+    r = subprocess.run([_sys.executable, "-c", probe], capture_output=True,
+                       text=True, cwd=str(Path(__file__).resolve().parents[1]))
+    assert r.returncode == 0, r.stderr
+
+
 def test_importing_the_driver_populates_the_metadata_registry():
     """`eda.driver` imports the extractor modules for their registration side
     effect, and a tidy-up that removes those lines leaves the registry empty --

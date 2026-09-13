@@ -696,3 +696,199 @@ def test_spreading_over_a_column_the_census_lacks_names_the_fix():
                     sample=SampleConfig(spread_by=("group_key",)))
     with pytest.raises(KeyError, match="written by `consolidate`"):
         _spread(cfg, rows, np.random.default_rng(0))
+
+
+# --------------------------------------------------------------------------- #
+# the vector half (docs/EDA/09 step 3)
+# --------------------------------------------------------------------------- #
+
+def test_the_mel_bank_is_the_same_absolute_hz_on_both_planes():
+    """🔴 The design decision of `extract/vectors.py`. A bank running to each
+    plane's own Nyquist makes band 61 mean 5.2 kHz at 44.1 kHz and 2.4 kHz at
+    16 kHz, and `native - chain` is then not a subtraction of anything.
+
+    Mutation: `MEL_HZ_MAX` replaced by `sample_rate / 2`. Every shape assertion
+    still holds and the paired round-trip silently compares different bands.
+    """
+    from eda.extract.vectors import MEL_HZ_MAX, N_MELS, _filterbank
+
+    for rate in (16000, 44100):
+        bank = _filterbank(rate, 1024)
+        freqs = np.fft.rfftfreq(1024, 1.0 / rate)
+        assert bank.shape == (len(freqs), N_MELS)
+        top = freqs[bank[:, -1] > 0]
+        assert top.max() <= MEL_HZ_MAX + 1e-6, (
+            f"at {rate} Hz the bank reaches {top.max()} Hz")
+
+
+def test_a_single_frame_file_fails_the_vectors_rather_than_emitting_nan_skew():
+    """skew and kurtosis of one observation are NaN. Emitting them beside a
+    perfectly good `ltas` publishes two columns that read as a decode failure.
+
+    Mutation: the `power.shape[1] < 2` guard removed.
+    """
+    from eda.extract.vectors import mel_vectors
+
+    out = mel_vectors(np.zeros((1, 1024), dtype=np.float32) + 0.1, 16000)
+    assert out["vector_ok"] is False
+    assert "need at least 2" in out["vector_error"]
+
+
+def test_a_vector_failure_has_the_declared_width_not_none():
+    """🔴 `Extractor.failed` fills `None`, which parquet tolerates and
+    `np.stack` does not: one `None` among 500 arrays makes the part an object
+    array and the merge fails on dtype rather than on the decode error.
+
+    Mutation: `VectorExtractor.failed` deleted so the base runs.
+    """
+    from eda.extract import VECTOR
+    from eda.extract.vectors import WIDTH
+
+    row = VECTOR["vector"].failed("boom")
+    assert row["vector_ok"] is False
+    assert row["vector_error"] == "boom", (
+        "the extractor's name must match its *_error column or the text is lost")
+    assert row["ltas"].shape == (WIDTH,) and np.isnan(row["ltas"]).all()
+
+
+def test_a_vector_extractor_must_declare_its_width():
+    from eda.extract import ExtractorError, VectorRegistry
+
+    reg = VectorRegistry("V", 2, ("wav", "sample_rate"))
+    with pytest.raises(ExtractorError, match="how wide"):
+        reg.add("nowidth", ("a", "ok"), "ok", lambda wav, sample_rate: {})
+
+
+def test_the_vectors_are_written_beside_the_signal_parts_and_keyed_alike(tmp_path):
+    """One decode, two artifacts. Mutation: the `_write_vectors` call removed
+    from the part loop -- `signal.parquet` is complete, every test about it
+    passes, and `vectors.npz` never exists."""
+    from eda.config import ProbeConfig, SourceSpec
+    from eda.driver import (VECTOR_TABLE, consolidate, load_vectors,
+                            probe_source, signal_partition)
+    from eda.sample import draw
+
+    root = tmp_path / "interim"
+    rng = np.random.default_rng(0)
+    for i in range(4):
+        path = root / "src-v/v1" / f"g{i % 2}" / f"a{i}.wav"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sf.write(path, rng.standard_normal(16000).astype(np.float32) * 0.1,
+                 16000, subtype="PCM_16")
+    cfg = EdaConfig(
+        root=root, out=tmp_path / "out",
+        sources=(SourceSpec(name="src-v", pool="A", root="src-v/v1",
+                            suffixes=(".wav",)),),
+        probe=ProbeConfig(workers=1, shard_size=4),
+        sample=SampleConfig(per_stratum=10, shard_size=2))
+    probe_source(cfg, cfg.source("src-v"))
+    files = pd.read_parquet(consolidate(cfg, "A"))
+    draw(cfg, files, "A")
+    result = signal_partition(cfg, "A")
+
+    assert (cfg.out / "A" / VECTOR_TABLE).exists()
+    vectors = load_vectors(cfg, "A")
+    signal = pd.read_parquet(result.table)
+    assert list(vectors["file_id"]) == signal["file_id"].tolist()
+    for plane in ("native", "chain"):
+        assert vectors[f"ltas_{plane}"].shape == (4, 128)
+        assert vectors[f"mel_band_skew_{plane}"].shape == (4, 128)
+        assert vectors[f"mel_band_kurt_{plane}"].shape == (4, 128)
+    assert signal["vector_ok_native"].all()
+
+
+def test_signal_parts_written_before_the_vector_half_are_refused(tmp_path):
+    """🔴 Pool E's 29 parts were written by the scalar-only pass. Merging them
+    would produce a `vectors.npz` silently short of `signal.parquet`, so the
+    merge refuses and names the fix.
+
+    Mutation: the `part.exists()` check in `_merge_vectors` removed.
+    """
+    from eda.driver import _merge_vectors
+
+    with pytest.raises(RuntimeError, match="before the vector half existed"):
+        _merge_vectors(tmp_path / "vectors.npz", [tmp_path / "00000.npz"],
+                       ["a"], "E")
+
+
+def test_a_vector_table_that_does_not_key_like_the_signal_table_is_refused(tmp_path):
+    """An npz of the right *length* joins silently and wrongly -- every later
+    row gets somebody else's spectrum. Mutation: the key comparison replaced by
+    a length comparison."""
+    from eda.driver import _merge_vectors
+
+    part = tmp_path / "00000.npz"
+    np.savez_compressed(part, file_id=np.asarray(["a", "b"], dtype=object),
+                        ltas_chain=np.zeros((2, 128), dtype=np.float32))
+    with pytest.raises(RuntimeError, match="first differ at position 1"):
+        _merge_vectors(tmp_path / "vectors.npz", [part], ["a", "c"], "A")
+
+
+def test_a_band_that_never_moves_keeps_its_nan_and_is_counted():
+    """🔴 Measured on pool C: 3.6% of native bands and 0.0% of chain bands are
+    constant at the floor — every file whose native rate is below 16 kHz has
+    empty top bands, and an mp3's bottom two sit on the floor too. skew and
+    kurtosis of a constant are 0/0.
+
+    Filling them with 0.0 would put a perfectly symmetric, perfectly Gaussian
+    band in the table wherever there was no audio at all, so they stay NaN and
+    `mel_bands_flat` says how many. Mutation: `mel_bands_flat` hardcoded to 0 —
+    the `dup_group` shape, a value computed and never reaching its consumer.
+    """
+    from eda.extract.vectors import mel_vectors
+
+    silent = mel_vectors(np.zeros((1, 16000), dtype=np.float32), 16000)
+    assert silent["vector_ok"] is True
+    assert silent["mel_bands_flat"] == 128
+    assert np.isnan(silent["mel_band_skew"]).all()
+
+    rng = np.random.default_rng(0)
+    noisy = mel_vectors(rng.standard_normal((1, 16000)).astype(np.float32) * 0.1,
+                        16000)
+    assert noisy["mel_bands_flat"] == 0
+    assert not np.isnan(noisy["mel_band_skew"]).any()
+
+
+def test_the_flat_band_count_lands_in_the_table_not_the_npz():
+    """It is a scalar, so it belongs in `signal.parquet` where a reader looking
+    at a NaN vector will actually find it. Mutation: the `isinstance(ndarray)`
+    split in `_signal_row` inverted."""
+    from eda.extract import run_vectors
+    from eda.planes import CHAIN, NATIVE, Plane
+
+    wav = np.zeros((1, 16000), dtype=np.float32)
+    out = run_vectors({NATIVE: Plane(NATIVE, wav, 16000),
+                       CHAIN: Plane(CHAIN, wav, 16000)})
+    assert not isinstance(out["mel_bands_flat_native"], np.ndarray)
+    assert out["mel_bands_flat_native"] == 128
+
+
+def test_a_vector_extractor_must_declare_which_columns_are_arrays():
+    """🔴 The only call that has no values to inspect is the one that needs the
+    answer: a decode failure. Inferring "array" from "not a flag" put a
+    128-wide NaN array into `mel_bands_flat` and broke the part writer three
+    frames later, on a KeyError that named neither the column nor the file.
+    """
+    from eda.extract import ExtractorError, VectorRegistry
+
+    reg = VectorRegistry("V", 2, ("wav", "sample_rate"))
+    with pytest.raises(ExtractorError, match="non-empty subset"):
+        reg.add("novectors", ("a", "ok"), "ok",
+                lambda wav, sample_rate: {}, width=4)
+    with pytest.raises(ExtractorError, match=r"\['b'\] are not among them"):
+        reg.add("wrong", ("a", "ok"), "ok", lambda wav, sample_rate: {},
+                width=4, vectors=("b",))
+
+
+def test_a_decode_failure_emits_every_vector_column_on_every_plane():
+    """Mutation: `_failed_vectors` narrowed back to the arrays only. The
+    scalar `mel_bands_flat_*` then vanishes for failed rows, and a part where
+    every row failed writes a `signal.parquet` missing the column entirely."""
+    from eda.driver import _failed_vectors, _split_vectors
+
+    flags, arrays = _split_vectors(_failed_vectors())
+    for plane in ("native", "chain"):
+        assert flags[f"vector_ok_{plane}"] is False
+        assert flags[f"mel_bands_flat_{plane}"] is None
+        assert arrays[f"ltas_{plane}"].shape == (128,)
+    assert not any(isinstance(v, np.ndarray) for v in flags.values())

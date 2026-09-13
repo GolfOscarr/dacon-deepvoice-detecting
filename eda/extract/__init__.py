@@ -29,8 +29,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-__all__ = ["Extractor", "ExtractorError", "METADATA", "SIGNAL", "Registry",
-           "register_metadata", "register_signal", "run_metadata", "run_signal"]
+__all__ = ["Extractor", "ExtractorError", "METADATA", "SIGNAL", "VECTOR",
+           "Registry", "VectorRegistry", "register_metadata", "register_signal",
+           "register_vector", "run_metadata", "run_signal", "run_vectors"]
 
 
 class ExtractorError(ValueError):
@@ -100,10 +101,85 @@ class Registry(dict):
         return ex
 
 
+@dataclass(frozen=True)
+class VectorExtractor(Extractor):
+    """An `Extractor` whose non-flag columns are `width`-wide float arrays."""
+
+    width: int = 0
+    #: 🔴 Which of `columns` are arrays. Declared rather than inferred, because
+    #: the only way to infer it is to look at a value -- and the one call that
+    #: has no values is exactly the one that needs the answer: a decode failure.
+    #: Inferring it from "not a flag" put a 128-wide NaN array in an integer
+    #: column and broke the part writer three frames later.
+    vectors: tuple[str, ...] = ()
+
+    def failed(self, error: str) -> dict[str, Any]:
+        """NaNs of the declared width for the vector columns, not `None`.
+
+        🔴 The base class fills `None`, which parquet tolerates and `np.stack`
+        does not: one `None` among 500 arrays makes the part an object array,
+        and the merge fails on dtype rather than reporting the decode error
+        that caused it.
+        """
+        import numpy as np                           # local: the base tier has no numpy
+
+        # Built on the base's row so the `*_ok` / `*_error` convention has one
+        # implementation; only the declared vector columns become arrays.
+        row = super().failed(error)
+        for column in self.vectors:
+            row[column] = np.full(self.width, np.nan, dtype=np.float32)
+        return row
+
+
+class VectorRegistry(Registry):
+    """`Registry` for extractors whose columns are fixed-width arrays.
+
+    🔴 The width is declared, and it is not decoration. A vector extractor that
+    fails must emit arrays of the **right shape**, because the parts are
+    stacked at merge time: one ragged row turns a 91,765 x 128 matrix into an
+    object array, and the failure surfaces as a dtype three modules away rather
+    than as the decode error it is.
+    """
+
+    def add(self, name, columns, ok_column, fn, *, width: int = 0,
+            vectors: tuple[str, ...] = ()):
+        if width < 1:
+            raise ExtractorError(
+                f"{name!r} declares width={width}; a vector extractor must say "
+                f"how wide its arrays are so a failure can emit NaNs of that "
+                f"shape rather than a ragged row")
+        unknown = sorted(set(vectors) - set(columns))
+        if not vectors or unknown:
+            raise ExtractorError(
+                f"{name!r} declares vectors={sorted(vectors)}, which must be a "
+                f"non-empty subset of its columns {sorted(columns)}"
+                + (f"; {unknown} are not among them" if unknown else ""))
+        super().add(name, columns, ok_column, fn)
+        # Re-registered as the vector flavour: `Registry.add` has already run
+        # every arity and declaration check, and this replaces the instance
+        # with one that knows how wide a failure has to be.
+        ex = VectorExtractor(name=name, tier=self.tier, columns=tuple(columns),
+                             ok_column=ok_column, fn=fn, width=width,
+                             vectors=tuple(vectors))
+        self[name] = ex
+        self.widths[name] = width
+        return ex
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.widths: dict[str, int] = {}
+
+
 #: `(path, probe_cfg) -> dict`. No decode.
 METADATA = Registry("M", 2, ("path", "probe"))
 #: `(wav, sample_rate) -> dict`. Runs once per plane; never told which.
 SIGNAL = Registry("S", 2, ("wav", "sample_rate"))
+#: The same contract, emitting fixed-width arrays instead of scalars. Its own
+#: registry rather than a flag on `SIGNAL` because the two are written to
+#: different artifacts -- `signal.parquet` and `vectors.npz` -- and a single
+#: registry would make "which file does this column go to?" a runtime question
+#: about the value's type (docs/EDA/00 section 1).
+VECTOR = VectorRegistry("V", 2, ("wav", "sample_rate"))
 
 
 def register_metadata(name: str, columns: tuple[str, ...], ok_column: str):
@@ -116,6 +192,14 @@ def register_metadata(name: str, columns: tuple[str, ...], ok_column: str):
 def register_signal(name: str, columns: tuple[str, ...], ok_column: str):
     def deco(fn):
         SIGNAL.add(name, columns, ok_column, fn)
+        return fn
+    return deco
+
+
+def register_vector(name: str, columns: tuple[str, ...], ok_column: str, *,
+                    width: int, vectors: tuple[str, ...]):
+    def deco(fn):
+        VECTOR.add(name, columns, ok_column, fn, width=width, vectors=vectors)
         return fn
     return deco
 
@@ -166,6 +250,39 @@ def run_signal(planes: Mapping[str, Any], names: tuple[str, ...] | None = None
     and not the other, and collapsing both to a single `*_ok` would hide which.
     """
     chosen = SIGNAL.values() if names is None else [SIGNAL[n] for n in names]
+    row: dict[str, Any] = {}
+    for plane_name, plane in planes.items():
+        for ex in chosen:
+            try:
+                out = ex(plane.wav, plane.sample_rate)
+            except Exception as exc:                 # noqa: BLE001 -- a row, not a raise
+                out = ex.failed(f"{type(exc).__name__}: {exc}")
+            suffixed = {f"{k}_{plane_name}": v for k, v in out.items()}
+            clash = set(suffixed) & set(row)
+            if clash:
+                raise ExtractorError(
+                    f"extractor {ex.name!r} emits column(s) {sorted(clash)} on "
+                    f"plane {plane_name!r} already written by an earlier extractor")
+            row.update(suffixed)
+    return row
+
+
+def run_vectors(planes: Mapping[str, Any], names: tuple[str, ...] | None = None
+                ) -> dict[str, Any]:
+    """Every registered V-tier extractor over every plane, suffixed by plane.
+
+    The same shape as `run_signal` and deliberately so: `ltas` becomes
+    `ltas_native` and `ltas_chain`, so R1's question stays a subtraction. The
+    extractor is handed `(plane.wav, plane.sample_rate)` and nothing else, for
+    the same reason and enforced by the same arity check.
+
+    ⚠️ The `*_ok` and `*_error` columns come back too, and the caller writes
+    them into `signal.parquet` rather than into `vectors.npz`. A row whose
+    vectors are NaN and whose scalars are fine is a real state -- an 18-sample
+    file has an LTAS and no time series -- and it has to be explicable from the
+    table a reader actually opens.
+    """
+    chosen = VECTOR.values() if names is None else [VECTOR[n] for n in names]
     row: dict[str, Any] = {}
     for plane_name, plane in planes.items():
         for ex in chosen:
