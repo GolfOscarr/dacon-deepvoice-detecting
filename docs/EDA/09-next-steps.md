@@ -66,53 +66,49 @@ which are not artists. `eda keys` says so on every run.
 
 ---
 
-## 2 — The S tier over everything else
+## 2 + 3 — The S tier, both halves, over everything else 🔄 running
 
 ```bash
-$V -m eda.cli sample          # draws every partition that has none -- ✅ drawn 2026-09-13
-$V -m eda.cli signal          # ~143 min, resumable at 500-file parts
+$V -m eda.cli sample          # ✅ drawn 2026-09-13, fingerprinted
+$V -m eda.cli signal          # scalars + vectors, resumable at 500-file parts
 ```
 
-**The draw is recorded.** A 6,426 · B 6,000 · C 2,660 · D 27,605 (full) · cell8 49,074 (full), each
-with its fingerprint in `<partition>/sample.json`. ⚠️ Redrawing now invalidates every S-tier number
-taken from it, and `Sample.fingerprint` refuses to let that happen silently.
+🔴 **They are one step, not two.** Step 3 was written as a separate item and it
+cannot be one: `vectors.npz` comes out of the same decode as `signal.parquet`, so
+running it afterwards means opening every file twice. This was learned by doing it
+— the scalar-only pass was launched, and stopped four minutes in.
 
-**91,765 files to decode, about 2 h 25 min.** Measured rate: pool E's 14,102-row pass took
-**21 m 04 s** on 32 threads — **11.2 files/s**. The table below is computed at a deliberately
-conservative 10.7, so it over-estimates by ~5%. `user + sys` was 41 minutes against 21 of wall
-clock, so the GIL holds the speedup near 2× and this is I/O- and decode-bound, not parallel-bound.
+### 🔴 The estimate was in files, and the cost is in audio hours
 
-| partition | population | to decode | how | est |
-|---|--:|--:|---|--:|
-| cell8 | 49,074 | **49,074** | full | 76 min |
-| D | 27,605 | **27,605** | full | 43 min |
-| A | 74,846 | 6,426 | 2000/source | 10 min |
-| B | 207,689 | 6,000 | 2000/source | 9 min |
-| C | 8,660 | 2,660 | 2000/source | 4 min |
-| E | 14,194 | — | **done** | — |
+The plan said 91,765 files, 2 h 25 min. The files were right and the time was
+wrong by an order of magnitude, because a cell8 file is 131 s and a pool-E file
+is 4 s. **Measured on 32 threads: 1.33 audio-hours per minute.**
 
-🔴 **`cell8` is measured in full**, decided 2026-09-13 and now in `configs/eda.yaml`. Same argument
-as pool D and a stronger version of it: 49,074 rows from **one publisher and five generators**, 19%
-of the corpus, and the only partition that is `1` on *all four heads*. A 2,000-file sample would
-draw from a single `source_name` stratum and let five generators whose durations run 32.90 s to
-240.08 s land in whatever proportion the draw happened to pick. (Step 1's `spread_by` would now
-even that out — but a 4% sample of the only all-four-heads partition is still a 4% sample.)
+| partition | files | audio hours | est |
+|---|--:|--:|--:|
+| A | 6,426 | 71.7 | 54 min ✅ **done**, 0 decode failures |
+| B | 6,000 | 10.0 | 8 min |
+| C | 2,660 | 59.3 | 45 min |
+| D | 27,605 | 77.3 | 58 min |
+| E | 14,194 | 21.6 | 16 min |
+| cell8 | 2,000 | 62.4 | 47 min |
+| | **64,885** | **302.3** | **~3 h 48 min** |
 
-**Done when** every partition has a `signal.parquet`, `load_signal(cfg)` joins them to the M tier
-one-to-one, and the decode-failure count is reported per partition (it is printed even when zero).
+🔴 **`cell8` left `full_pools` on the strength of that measurement.** In full it is
+1,970.6 audio hours — **~25 hours**, 90% of the S tier's cost for 19% of its rows.
+The argument for full coverage was that a 2,000-file sample "would draw from a
+single `source_name` stratum and let five generators land in whatever proportion
+the draw happened to pick"; `spread_by: [group_key]` from step 1 is exactly that
+fix, and the redrawn sample is **400 per generator, exactly**. The reason and the
+reversal are both in `configs/eda.yaml`.
 
----
+⚠️ Pool E is re-run rather than reused: its 29 parts were written by the
+scalar-only pass and have no vectors beside them. `_merge_vectors` refuses them by
+name rather than writing a short table.
 
-## 3 — The vector half
-
-`ltas[128]`, `mel_band_skew[128]`, `mel_band_kurt[128]` → `<partition>/vectors.npz`, keyed by
-`file_id`. The scalar half shipped in `a0f4b70`; this is the other half of the same pass and the
-reason `vectors.npz` is a separate artifact from `signal.parquet` ([00 §1](00-harness.md)).
-
-These are the TISMIR music features, *recorded because they are expected to die at 16 kHz*. The
-method for testing that is now established rather than hypothetical: the paired round-trip
-experiment in [00 §4c](00-harness.md#4c---r1s-premise-measured-on-pool-e-it-holds) holds content
-constant and measures what the chain removes. Run the same design on the mel statistics.
+**Done when** every partition has a `signal.parquet` **and** a `vectors.npz` whose
+`file_id` matches it position for position, `load_signal(cfg)` joins one-to-one to
+the M tier, and the decode-failure count is reported per partition.
 
 ---
 
