@@ -162,22 +162,40 @@ def _g_eda2(cfg: EdaConfig, audit: pd.DataFrame | None) -> GateResult:
 
 
 def _g_eda3(cfg: EdaConfig, groups: pd.DataFrame | None) -> GateResult:
-    """Groups. Enough independent grouping atoms per source."""
+    """Groups. Enough independent grouping atoms per source.
+
+    🔴 The detail separates **two kinds of shortfall**, because only one of them
+    is work. A source whose key was read from the publisher and still falls
+    short has as many atoms as exist; a source with no key might have plenty and
+    nobody has looked. Reporting them in one list is what made SONICS -- 5 real
+    generators, reported as 1 -- indistinguishable from LJSpeech, which is 1 and
+    always will be.
+    """
     if groups is None or groups.empty:
         return GateResult("G-EDA3", NA, "grouping report has not run")
     short = groups[~groups["meets_floor"]]
-    return GateResult(
-        "G-EDA3", FAIL if len(short) else PASS,
-        f"{len(short)} of {len(groups)} source(s) below "
-        f"{cfg.gates.min_groups_per_role} path-derived groups"
+    kinds = (short["group_key_kind"] if "group_key_kind" in short.columns
+             else pd.Series("path", index=short.index))
+    stated = short[kinds != "path"]
+    unkeyed = short[kinds == "path"]
+
+    def names(frame: pd.DataFrame) -> str:
         # 🔴 `.head(5)` silently truncated. The 6th source to fail was SONICS
         # and the detail read "6 of 9 source(s) below 6 ... : <five names>",
         # which reads as a transcription error rather than a cut list -- and
         # the missing name is the one the reader has not thought about yet.
-        + (f": {', '.join(short['source_name'].head(5))}"
-           + (f" (+{len(short) - 5} more)" if len(short) > 5 else "")
-           if len(short) else "")
-        + ". Caveat: path depth is a suggestion -- LJSpeech is one speaker at any depth")
+        listed = ", ".join(frame["source_name"].head(5))
+        return listed + (f" (+{len(frame) - 5} more)" if len(frame) > 5 else "")
+
+    parts = [f"{len(short)} of {len(groups)} source(s) below "
+             f"{cfg.gates.min_groups_per_role} groups"]
+    if len(unkeyed):
+        parts.append(f"{len(unkeyed)} with no publisher key, path depth only: "
+                     f"{names(unkeyed)}")
+    if len(stated):
+        parts.append(f"{len(stated)} keyed and genuinely short -- this is the "
+                     f"count, not a gap: {names(stated)}")
+    return GateResult("G-EDA3", FAIL if len(short) else PASS, "; ".join(parts))
 
 
 def _g_eda5(cfg: EdaConfig, dupes: dict | None) -> GateResult:

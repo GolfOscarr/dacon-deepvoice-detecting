@@ -54,6 +54,9 @@ class Sample:
     seed: int
     per_stratum: int
     stratify_by: tuple[str, ...]
+    #: How the budget was divided inside a stratum. Recorded because it changes
+    #: which files are measured, which is the whole reason this file exists.
+    spread_by: tuple[str, ...]
     full: bool
     n_population: int
     file_ids: tuple[str, ...]
@@ -83,7 +86,8 @@ class Sample:
         return {"partition": self.partition, "seed": self.seed,
                 "fingerprint": self.fingerprint,
                 "per_stratum": self.per_stratum,
-                "stratify_by": list(self.stratify_by), "full": self.full,
+                "stratify_by": list(self.stratify_by),
+                "spread_by": list(self.spread_by), "full": self.full,
                 "n_population": self.n_population, "n_drawn": self.n_drawn,
                 "file_ids": list(self.file_ids)}
 
@@ -91,7 +95,8 @@ class Sample:
     def from_json(cls, d: dict) -> "Sample":
         return cls(partition=d["partition"], seed=int(d["seed"]),
                    per_stratum=int(d["per_stratum"]),
-                   stratify_by=tuple(d["stratify_by"]), full=bool(d["full"]),
+                   stratify_by=tuple(d["stratify_by"]),
+                   spread_by=tuple(d.get("spread_by", ())), full=bool(d["full"]),
                    n_population=int(d["n_population"]),
                    file_ids=tuple(d["file_ids"]))
 
@@ -104,6 +109,65 @@ def _is_full(cfg: EdaConfig, partition: str) -> bool:
     cost a corpus rebuild (docs/EDA/00 section 5).
     """
     return partition in cfg.sample.full_pools
+
+
+def _take(ids: np.ndarray, n: int, rng: np.random.Generator) -> list[str]:
+    """`n` ids without replacement, left in `files.parquet`'s own order."""
+    if len(ids) <= n:
+        return ids.tolist()
+    idx = rng.choice(len(ids), size=n, replace=False)
+    return ids[np.sort(idx)].tolist()
+
+
+def _spread(cfg: EdaConfig, rows: pd.DataFrame,
+            rng: np.random.Generator) -> list[str]:
+    """One stratum's `per_stratum` files, divided evenly over `spread_by`.
+
+    🔴 `stratify_by` sets the budget; this decides how it is spent inside one.
+    With `spread_by` empty the stratum is one uniform draw, which is what every
+    S-tier number before docs/EDA/09 was taken from.
+
+    The allocation is water-filling: each group gets
+    `ceil(remaining_budget / remaining_groups)` capped by what it holds, walked
+    **smallest group first** so that a group too small for its share hands the
+    rest to groups that can still absorb it.
+
+    ⚠️ Smallest-first is not cosmetic. Walking in key order instead spends the
+    remainder only forwards, and it runs out: measured on `fma`, 2,000 over 156
+    shard directories drew **1,953** -- 47 files quietly unmeasured because the
+    groups that could have taken them had already been passed.
+
+    ⚠️ Counts are decided before the RNG is touched, and the files are then
+    drawn in sorted **key** order. The allocation therefore cannot depend on
+    frame order, and the draw is reproducible for the same reason the strata are
+    sorted.
+    """
+    budget = cfg.sample.per_stratum
+    if not cfg.sample.spread_by:
+        return _take(rows["file_id"].to_numpy(), budget, rng)
+
+    missing = [c for c in cfg.sample.spread_by if c not in rows.columns]
+    if missing:
+        raise KeyError(
+            f"cannot spread the draw over {missing}: not in files.parquet. Its "
+            f"columns are {sorted(rows.columns)}. `group_key` is written by "
+            f"`consolidate`; re-run it (no re-probe, nothing decodes)")
+
+    groups = {key: g["file_id"].to_numpy()
+              for key, g in rows.groupby(list(cfg.sample.spread_by), sort=True)}
+    quota: dict[object, int] = {}
+    left, remaining = budget, len(groups)
+    # Smallest first, then by key so equal sizes break deterministically.
+    for key in sorted(groups, key=lambda k: (len(groups[k]), str(k))):
+        share = -(-left // remaining)               # ceil, integer-only
+        quota[key] = min(len(groups[key]), share)
+        left -= quota[key]
+        remaining -= 1
+
+    picked: list[str] = []
+    for key, ids in groups.items():                 # sorted key order: see above
+        picked.extend(_take(ids, quota[key], rng))
+    return picked
 
 
 def draw(cfg: EdaConfig, files: pd.DataFrame, partition: str, *,
@@ -144,18 +208,13 @@ def draw(cfg: EdaConfig, files: pd.DataFrame, partition: str, *,
         # sequence on every machine -- `groupby(sort=True)` is the default, and
         # it is load-bearing here rather than cosmetic.
         for _, rows in ordered.groupby(list(cfg.sample.stratify_by), sort=True):
-            ids = rows["file_id"].to_numpy()
-            if len(ids) <= cfg.sample.per_stratum:
-                picked.extend(ids.tolist())
-            else:
-                idx = rng.choice(len(ids), size=cfg.sample.per_stratum,
-                                 replace=False)
-                picked.extend(ids[np.sort(idx)].tolist())
+            picked.extend(_spread(cfg, rows, rng))
         chosen = picked
 
     sample = Sample(partition=partition, seed=cfg.sample.seed,
                     per_stratum=cfg.sample.per_stratum,
-                    stratify_by=tuple(cfg.sample.stratify_by), full=full,
+                    stratify_by=tuple(cfg.sample.stratify_by),
+                    spread_by=tuple(cfg.sample.spread_by), full=full,
                     n_population=len(files), file_ids=tuple(chosen))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(sample.to_json(), indent=2), encoding="utf-8")

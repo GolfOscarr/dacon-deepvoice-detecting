@@ -11,16 +11,21 @@ can fail.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 import pytest
 import soundfile as sf
 import torch
 
+from eda.config import EdaConfig, SampleConfig
 from eda.extract import SIGNAL, ExtractorError, run_signal
 from eda.extract.level import DB_FLOOR, level_row
 from eda.extract.spectral import spectral_row
 from eda.extract.timing import SILENCE_DBFS, timing_row
 from eda.planes import CHAIN, NATIVE, NativeRateError, Plane, load_planes, native_rate
+from eda.sample import _spread
 from models.audio import prepare_waveform
 from models.config import AudioConfig
 from training.render import load_audio
@@ -631,9 +636,63 @@ def test_the_draw_fingerprint_follows_the_ids_not_the_count():
 
     def s(ids):
         return Sample(partition="A", seed=0, per_stratum=2, stratify_by=("source_name",),
-                      full=False, n_population=9, file_ids=ids)
+                      spread_by=(), full=False, n_population=9, file_ids=ids)
 
     assert s(("a", "b")).fingerprint == s(("a", "b")).fingerprint
     assert s(("a", "b")).fingerprint != s(("a", "c")).fingerprint
     # and order matters, because the parts are indexed by it
     assert s(("a", "b")).fingerprint != s(("b", "a")).fingerprint
+
+
+# --------------------------------------------------------------------------- #
+# spreading the budget inside a stratum (docs/EDA/09 step 1)
+# --------------------------------------------------------------------------- #
+
+def test_the_spread_draw_covers_every_group_and_spends_the_whole_budget():
+    """🔴 Measured on `fma`: walking the groups in key order rather than
+    smallest-first drew **1,953** of a 2,000 budget over 156 shard directories,
+    because the remainder only ever flowed forwards and the groups that could
+    have absorbed it had already been passed.
+
+    Mutation: `sorted(groups, key=lambda k: (len(groups[k]), str(k)))` ->
+    `sorted(groups)`. The budget silently under-fills and every other assertion
+    about the draw still holds.
+    """
+    import dataclasses
+
+
+    # Twelve groups of 1 and one of 100: the shape that breaks a forward-only
+    # remainder, since eleven shares are wasted before the big group is reached.
+    rows = pd.DataFrame(
+        [{"file_id": f"s:small{i}/f.wav", "group_key": f"small{i}"}
+         for i in range(12)]
+        + [{"file_id": f"s:big/f{i}.wav", "group_key": "big"} for i in range(100)])
+    cfg = EdaConfig(root=Path("."), out=Path("."),
+                    sample=SampleConfig(per_stratum=50, spread_by=("group_key",)))
+    got = _spread(cfg, rows, np.random.default_rng(0))
+    assert len(got) == 50
+    counts = rows.set_index("file_id").loc[got, "group_key"].value_counts()
+    assert counts.size == 13                       # every group represented
+    assert counts["big"] == 38                     # 50 - 12 singletons
+
+
+def test_an_empty_spread_by_is_the_old_uniform_draw():
+    """The default stays exactly what every S-tier number so far was taken
+    from, so enabling the spread is a visible config change and never a silent
+    one."""
+
+    rows = pd.DataFrame([{"file_id": f"s:g{i % 3}/f{i}.wav", "group_key": f"g{i % 3}"}
+                         for i in range(30)])
+    cfg = EdaConfig(root=Path("."), out=Path("."),
+                    sample=SampleConfig(per_stratum=10, spread_by=()))
+    got = _spread(cfg, rows, np.random.default_rng(0))
+    assert len(got) == 10
+
+
+def test_spreading_over_a_column_the_census_lacks_names_the_fix():
+
+    rows = pd.DataFrame([{"file_id": "s:a.wav"}])
+    cfg = EdaConfig(root=Path("."), out=Path("."),
+                    sample=SampleConfig(spread_by=("group_key",)))
+    with pytest.raises(KeyError, match="written by `consolidate`"):
+        _spread(cfg, rows, np.random.default_rng(0))

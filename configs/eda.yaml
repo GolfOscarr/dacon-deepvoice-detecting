@@ -44,6 +44,13 @@ sample:
   seed: 0
   per_stratum: 2000
   stratify_by: [source_name]
+  # 🔴 How that per-source budget is divided inside one source, decided
+  # 2026-09-13 (docs/EDA/09 step 1). `stratify_by` alone left 2,000 files from
+  # `cfad-fake` spread 17..108 over its 27 generator directories and gave one
+  # `zeroth-korean` speaker a single file; the same 2,000 spread evenly is
+  # 74..75 and 3..18, at exactly the same decode cost -- 15,086 sampled files
+  # either way. `group_key` is written by `consolidate` from `eda.groupkeys`.
+  spread_by: [group_key]
   # Pool D because five generator families are too few to sample from and it
   # carries 0.27; pool E because it is small and its last surprise cost a
   # corpus rebuild.
@@ -148,10 +155,26 @@ sources:
     root: mlaad/v9/payload
     suffixes: [.wav, .flac, .mp3]
 
+  # ⚠️ 117,983 files, not the 134,266 a naive walk finds. The archive ships its
+  # Common-Voice-prompt half **twice**: every one of the 16,283 files in
+  # `common_voices_prompts_from_conformer_fastspeech2_pwg_ljspeech/` appears
+  # again, byte-identical, under a nested `generated/` inside it (measured
+  # 2026-09-13: 16,283 top-level, 16,283 nested, 16,283 names in common, and
+  # 16,283 sha256 pairs in the E1 sweep). Counting both would weight those
+  # prompts double in pool B and put an identical pair on either side of a fold.
+  #
+  # `exclude` matches whole path components, so this cannot touch the
+  # `generated_audio/` root above it (docs/EDA/00; `eda.ids.under_any`).
   - name: wavefake
     pool: B
     root: wavefake/zenodo-5642694
     suffixes: [.wav]
+    exclude: [generated]
+    exclude_reason: >-
+      the archive's own duplicate copy of its Common-Voice-prompt half: 16,283
+      byte-identical files repeated under a nested `generated/`. A
+      deduplication of a packaging defect, the same shape as FakeMusicCaps'
+      `__MACOSX` sidecars -- not a licence or distribution decision.
 
   # ⚠️ Fake SUNG voice, and therefore pool B -- not a fake-music source.
   # docs/data/02: "Voice includes spoken and sung (the rules classify vocals as

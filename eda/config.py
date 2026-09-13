@@ -263,6 +263,18 @@ class SampleConfig:
     seed: int = 0
     per_stratum: int = 2000
     stratify_by: tuple[str, ...] = ("source_name",)
+    #: 🔴 Within each stratum, spread the budget **evenly** over these columns
+    #: instead of letting the RNG pick a proportion. Empty keeps the old
+    #: behaviour: one uniform draw per stratum.
+    #:
+    #: `stratify_by` sets the *budget* -- `per_stratum` files per source --
+    #: and this sets how that budget is divided inside it. They are two
+    #: questions and were one field: with `("source_name",)` alone, 2,000 drawn
+    #: from `cfad-fake` leaves its 27 generator directories in whatever
+    #: proportion the draw happened to pick, and widening `stratify_by` instead
+    #: would multiply the budget by the group count -- 54,000 files from
+    #: `cfad-fake` alone, against a whole-corpus budget of 90,000.
+    spread_by: tuple[str, ...] = ()
     #: Pools measured at 100% rather than sampled: D because five generator
     #: families are too few to sample from and it carries 0.27, E because it is
     #: small and its last surprise cost a corpus rebuild (docs/EDA/00 section 5).

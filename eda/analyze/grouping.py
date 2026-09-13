@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from eda import groupkeys
 from eda.config import AnalysisConfig, GateConfig
 from eda.ids import relpath_of
 
@@ -90,27 +91,58 @@ def grouping_report(files: pd.DataFrame, cfg: AnalysisConfig | None = None,
     """
     min_groups = (gates or GateConfig()).min_groups_per_role
     prof = depth_profile(files, cfg)
+    keyed = _keys_by_source(files)
     out = []
     for source, g in prof.groupby("source_name"):
         g = g.sort_values("depth")
         n_files = int(g["files"].iloc[0])
-        usable = g[(g["distinct_prefixes"] >= min_groups)
-                   & (g["distinct_prefixes"] < n_files)]
-        if len(usable):
-            pick = usable.iloc[0]
-            reason = f"shallowest depth with >= {min_groups} distinct prefixes"
+        kind, n_keys = keyed.get(source, (groupkeys.PATH, 0))
+        if kind != groupkeys.PATH:
+            # 🔴 The publisher's key wins over path depth whenever one exists,
+            # and it is allowed to *lower* the count: FakeMusicCaps' path finds
+            # five generator directories and its real atom is the MusicCaps
+            # clip, which those five each render once. Taking the larger number
+            # would be taking the wrong one.
+            depth, groups = None, n_keys
+            reason = ("the publisher's own key -- `eda keys` names the evidence"
+                      if kind == groupkeys.PUBLISHER
+                      else "one grouping atom by the publisher's own "
+                           "description; no key can split it")
         else:
-            pick = g.iloc[-1] if len(g) else None
-            reason = "no depth reaches the floor -- needs the publisher's own key"
+            usable = g[(g["distinct_prefixes"] >= min_groups)
+                       & (g["distinct_prefixes"] < n_files)]
+            pick = usable.iloc[0] if len(usable) else (g.iloc[-1] if len(g) else None)
+            depth = None if pick is None else int(pick["depth"])
+            groups = 0 if pick is None else int(pick["distinct_prefixes"])
+            reason = (f"shallowest depth with >= {min_groups} distinct prefixes"
+                      if len(usable)
+                      else "no depth reaches the floor -- needs the publisher's "
+                           "own key")
         out.append({
             "source_name": source,
             "files": n_files,
             "max_depth": int(g["depth"].max()) + 1 if len(g) else 0,
-            "candidate_depth": None if pick is None else int(pick["depth"]),
-            "candidate_groups": None if pick is None else int(pick["distinct_prefixes"]),
-            "meets_floor": bool(pick is not None
-                                and pick["distinct_prefixes"] >= min_groups
-                                and pick["distinct_prefixes"] < n_files),
+            "group_key_kind": kind,
+            "candidate_depth": depth,
+            "candidate_groups": groups,
+            "meets_floor": bool(min_groups <= groups < n_files),
             "candidate_reason": reason,
         })
     return pd.DataFrame(out).sort_values("source_name").reset_index(drop=True)
+
+
+def _keys_by_source(files: pd.DataFrame) -> dict[str, tuple[str, int]]:
+    """Per source: the `group_key_kind` the census carries, and how many keys.
+
+    ⚠️ A census written before `eda.groupkeys` existed has neither column. It is
+    read as `path` for every source -- the pre-existing behaviour -- rather than
+    raising, because `consolidate` is what adds them and it is cheap to re-run.
+    """
+    if (groupkeys.KIND_COLUMN not in files.columns
+            or groupkeys.KEY_COLUMN not in files.columns):
+        return {}
+    out: dict[str, tuple[str, int]] = {}
+    for source, g in files.groupby("source_name"):
+        kind = str(g[groupkeys.KIND_COLUMN].iloc[0])
+        out[str(source)] = (kind, int(g[groupkeys.KEY_COLUMN].dropna().nunique()))
+    return out

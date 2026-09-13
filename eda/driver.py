@@ -29,6 +29,7 @@ import pandas as pd
 
 from eda.config import EdaConfig, SourceSpec
 from eda.extract import run_metadata, run_signal
+from eda.groupkeys import attach_group_keys
 from eda.ids import file_id_for
 from eda.planes import load_planes
 from eda.sample import SAMPLE_FILE, load_sample, sampled_rows
@@ -242,6 +243,11 @@ def consolidate(cfg: EdaConfig, partition: str) -> Path:
             f"partition {partition}: {int(dupes.sum())} duplicate file_id(s), e.g. "
             f"{df.loc[dupes, 'file_id'].iloc[0]!r}. Two sources claim the same "
             f"path, or a source root overlaps another")
+    # The publisher's own grouping key, joined in here rather than at analysis
+    # time so that every consumer of `files.parquet` -- the sample draw included
+    # -- sees the same key. Nothing here reads audio, so refreshing it is a
+    # `consolidate`, never a re-probe.
+    df = attach_group_keys(cfg, df)
     part_dir.mkdir(parents=True, exist_ok=True)
     out = part_dir / "files.parquet"
     df.to_parquet(out, index=False)

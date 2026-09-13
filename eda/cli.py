@@ -18,7 +18,9 @@ import pandas as pd
 from eda.analyze import duplicates as dup
 from eda.analyze import grouping as grp
 from eda.analyze import shortcut as sc
+from eda import groupkeys
 from eda.config import load_eda_config
+from eda.groupkeys import key_report
 from eda.driver import (BlockedSource, NotProbed, consolidate, load_files,
                         load_signal, probe_source, signal_partition)
 from eda.sample import SampleExists, draw, load_sample
@@ -168,7 +170,12 @@ def cmd_sample(cfg, args) -> int:
               f"{sample.n_population}"
               + (" (measured in full)" if sample.full
                  else f" at {sample.per_stratum}/stratum by "
-                      f"{list(sample.stratify_by)}, seed {sample.seed}"))
+                      f"{list(sample.stratify_by)}"
+                      # The spread decides *which* files, so it belongs in the
+                      # line a reader copies into a note, not only in the JSON.
+                      + (f" spread evenly over {list(sample.spread_by)}"
+                         if sample.spread_by else "")
+                      + f", seed {sample.seed}"))
     print(f"\n{drawn} partition(s) drawn")
     return 0
 
@@ -197,6 +204,26 @@ def cmd_signal(cfg, args) -> int:
     print(f"\n{done} partition(s) measured, {len(skipped)} skipped"
           + (f": {', '.join(skipped)}" if skipped else ""))
     return 0 if done else 1
+
+
+def cmd_keys(cfg, args) -> int:
+    """Per source: the grouping key, how many there are, and the evidence.
+
+    Its own verb rather than more output on `analyze` because it is the thing a
+    reader checks when a fold table looks wrong, and `analyze` is a three-minute
+    run over the whole census. This reads `files.parquet` and the publishers'
+    metadata; nothing here decodes.
+    """
+    files = load_files(cfg, args.partition)
+    report = key_report(cfg, files)
+    with pd.option_context("display.width", 200, "display.max_colwidth", 88,
+                           "display.max_rows", None):
+        print(report.to_string(index=False))
+    short = report[report["group_key_kind"] != groupkeys.PATH]
+    print(f"\n{len(short)} of {len(report)} source(s) carry a key of the "
+          f"publisher's own; the rest fall back to path depth "
+          f"(`eda analyze` prints which depth)")
+    return 0
 
 
 def cmd_analyze(cfg, args) -> int:
@@ -311,6 +338,10 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("signal", help="S tier: decode the draw on both planes")
     s.add_argument("--partition", help=part_help)
     s.set_defaults(fn=cmd_signal)
+
+    s = sub.add_parser("keys", help="the publisher's own grouping key, per source")
+    s.add_argument("--partition", help=part_help)
+    s.set_defaults(fn=cmd_keys)
 
     s = sub.add_parser("analyze", help="X1 + E1 + grouping, then the gates")
     s.set_defaults(fn=cmd_analyze)
