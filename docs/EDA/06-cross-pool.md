@@ -290,6 +290,75 @@ which is [A3](01-pool-a-real-voice.md), [B2](02-pool-b-fake-voice.md), [C3](03-p
 
 ---
 
+## 🔴 X6b — the publisher's key, joined: what path depth was hiding
+
+Run 2026-09-13 (`eda.groupkeys`, `eda keys`). X6 asks where the grouping key lives; `eda analyze`
+had been answering with **path depth** and saying on every run that seven of thirteen sources
+*"need the publisher's own key"*. That single sentence was covering three different situations, and
+only one of them was work.
+
+| | before | after | what it was |
+|---|--:|--:|---|
+| `sonics` | 1 | **5** | `algorithm` in `fake_songs.csv`; 49,074 of 49,074 join |
+| `fakemusiccaps` | 5 | **5,521** | the MusicCaps clip, not the generator |
+| `musan-music` | 5 | **82** | `ANNOTATIONS` field 4, the artist |
+| `rirs-isotropic-noise` | 0 | **10** | the room in the filename, channels merged |
+| `wavefake` | — | **2** | the voice, not the vocoder ([02 B0b](02-pool-b-fake-voice.md)) |
+| `ljspeech` | 1 | **1** | one speaker. No key exists, and none can |
+| `musan-noise` / `musan-speech` | 2 / 2 | 2 / 2 | collection only; MUSAN publishes no finer key |
+
+**G-EDA3 went from 7 of 13 short to 5 of 14**, and — more useful than the count — it now separates
+two clauses that were one list: *"2 with no publisher key, path depth only"* against *"3 keyed and
+genuinely short — this is the count, not a gap"*. SONICS reported as 1 group read exactly like
+LJSpeech reported as 1 group, and they are opposite problems.
+
+### Two of these are corrections, not refinements
+
+🔴 **FakeMusicCaps' atom is the clip, and path depth found the generator.** The pool is 5,521
+MusicCaps clips rendered by five models — 5,521 files in each of the five directories, 5,521
+distinct stems in their union, exactly. Grouping by generator therefore puts the *same clip* in all
+five groups: hold out `musicldm` and its 5,521 clips are still in the training fold four times
+over, rendered by the other four models. The publisher's key here **lowers** the count from 5 to
+5,521 groups of five, and taking the larger number would have been taking the wrong one. This is
+the 0.27-weight pool.
+
+🔴 **WaveFake is two voices wearing ten vocoders**, and it shares its key with `ljspeech` across
+the source boundary — 137,366 files in one group, spanning pools A and B. See
+[02 B0b](02-pool-b-fake-voice.md).
+
+### The key is on every row, including the path-derived ones
+
+⚠️ An earlier revision left `group_key` null wherever no provider existed, which read as tidy and
+was useless for the case that motivated the work: `cfad-fake`'s eleven generators live in the path
+and nowhere else. Every row now carries a key; `group_key_kind` says whether it came from the
+publisher, from a declared single atom, or from the path — and for the last, `eda keys` prints the
+depth and the reason that depth is the publisher's key.
+
+⚠️ **A path key is the directory prefix, never the name at that depth.** With `train/spk1` and
+`test/spk1`, keying on `spk1` merges two speakers the publisher kept apart — the trap this
+document's X6 names, and the one place it could have been walked into.
+
+### What it changed about the draw
+
+`sample.spread_by: [group_key]`, decided 2026-09-13. `stratify_by` still sets the budget — 2,000
+files per source — and the spread decides how that budget is spent inside one. Same 15,086 sampled
+files either way; what changes is which:
+
+| | before | after |
+|---|---|---|
+| `cfad-fake`, 27 generators | 17–108 each | **74–75** |
+| `zeroth-korean`, 115 speakers | 1–66, and 114 covered | **3–18, all 115** |
+| `fma`, 156 shards | — | 2,000 over all 156 |
+
+⚠️ Widening `stratify_by` instead would have multiplied the budget by the group count: 54,000
+files from `cfad-fake` alone, against a whole-corpus decode budget of ~92,000.
+
+⚠️ The allocation is water-filling, **smallest group first**. Walking in key order spends the
+remainder only forwards and runs out — measured on `fma`, 1,953 of a 2,000 budget, 47 files
+quietly unmeasured because the groups that could have absorbed them had already been passed.
+
+---
+
 ## X7 — The data memo (E-S3) ⚠️ Tier S, the exit condition
 
 **Compute.** One page: file inventory, schema, label counts per cell, suspected leakage variables,

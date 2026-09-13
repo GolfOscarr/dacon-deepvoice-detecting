@@ -1,6 +1,6 @@
 # 02 — Pool B: Fake Voice
 
-**50.9 GiB, 3 sources.** `wavefake` (26.9, 7 vocoders over LJSpeech + JSUT), `mlaad` v9
+**50.9 GiB, 3 sources.** `wavefake` (26.9, 9 vocoder directories over **two** voices — LJSpeech and JSUT — 117,983 files; see B0b), `mlaad` v9
 (5.1, 175 TTS families across 535 `language × generator` directories, capped at 30 files/dir =
 16,025 files ≈ 30.1 h), and `ctrsvdd` (18.9, 260 h of **sung** fake voice from 14 SVS/SVC methods).
 Target ~70 h, **maximizing generator count** ([data/04](../data/04-sources.md)).
@@ -62,6 +62,46 @@ generated throughout, and those files contain bona fide segments. They belong to
 
 ---
 
+
+## B0b — 🔴 WaveFake fetched: 117,983 files, **two** grouping atoms, and a duplicated half
+
+Fetched, extracted and probed 2026-09-13. 26.9 GB, 3 objects, sha256 verified.
+
+**The census reads 117,983 — WaveFake's published count — and a naive walk finds 134,266.**
+The difference is an archive defect the E1 duplicate sweep named on the first run: the
+`common_voices_prompts_from_conformer_fastspeech2_pwg_ljspeech/` directory holds 16,283 files and
+repeats **all 16,283 byte-identical** under a nested `generated/` inside itself. Measured three
+independent ways — 16,283 top-level `.wav`, 16,283 nested, 16,283 names in common, and 16,283
+sha256 pairs in the sweep. Counting both weights those prompts double in pool B and puts an
+identical pair on either side of any fold.
+
+It is excluded in `configs/eda.yaml` with its reason, as a **deduplication of a packaging defect**
+— the same shape as FakeMusicCaps' `__MACOSX` sidecars, and deliberately not a licence decision
+(R2: every exclusion names which kind it is).
+
+| directory | files | voice |
+|---|--:|---|
+| `ljspeech_*` × 7 — melgan, melgan_large, multi_band_melgan, full_band_melgan, parallel_wavegan, hifiGAN, waveglow | 13,100 each | LJSpeech |
+| `common_voices_prompts_from_conformer_fastspeech2_pwg_ljspeech` | 16,283 | LJSpeech |
+| `jsut_*` × 2 — multi_band_melgan, parallel_wavegan | 5,000 each | JSUT |
+
+🔴 **Nine of the ten directories are one speaker, so WaveFake has two grouping atoms, not ten.**
+The vocoder is a stratification axis; the voice is the grouping one. `eda.groupkeys` gives the nine
+LJSpeech directories **`ljspeech`'s own key**, so 137,366 files across two sources and two pools
+share one group — 13,100 real recordings in pool A and 124,266 vocoded ones in pool B.
+
+That sharing is B1's precondition rather than a nicety. The whole value of this pool is that we
+hold the real counterpart; a fold table that puts `LJ001-0001` in train and
+`ljspeech_melgan/LJ001-0001_gen` in validation measures a model recognising an utterance it has
+already heard, and reports it as vocoder detection. Grouping by vocoder directory would do exactly
+that, seven times over.
+
+⚠️ And the honest consequence: **2 atoms from 117,983 files.** WaveFake cannot supply fold
+rotation however large it is, and `G-EDA3` now says so in the clause reserved for sources whose key
+was read and is genuinely short — beside `ljspeech` and `sonics`, and apart from the sources nobody
+has looked at yet.
+
+---
 
 ## B1 — 🔴 WaveFake ↔ LJSpeech pair reconstruction — Tier S, and the highest-value item in this pool
 

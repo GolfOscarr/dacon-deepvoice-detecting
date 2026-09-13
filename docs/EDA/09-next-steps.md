@@ -15,19 +15,23 @@ V=/data/project/private/dacon-venvs/dacon311/bin/python
 $V -m eda.cli gates            # re-read the saved analyses; no decode
 ```
 
-**M tier: complete.** 264,085 files, 19 runnable sources, 6 partitions, `probe_ok` 264,082 — the 3
-failures are known-unreadable files in pool C, recorded rather than dropped.
+**M tier: complete.** 382,068 files, 14 probed sources, 6 partitions, `probe_ok`
+382,065 — the 3 failures are known-unreadable files in pool C, recorded rather than dropped. Updated 2026-09-13 when
+WaveFake landed (step 5) — 117,983 files after its duplicated half was excluded
+([02 B0b](02-pool-b-fake-voice.md)).
 
 | A | B | C | D | E | cell8 | mixed |
 |--:|--:|--:|--:|--:|--:|--:|
-| 74,846 | 89,706 | 8,660 | 27,605 | 14,194 | 49,074 | not probed |
+| 74,846 | 207,689 | 8,660 | 27,605 | 14,194 | 49,074 | not probed |
 
-**S tier: pool E only** — 14,194 rows of 264,085, **5.4%**. Every S-tier claim in these documents is
-a pool-E claim until step 2 lands.
+**S tier: pool E only** — 14,194 rows, **3.7%** — until the step-2 pass lands. Every S-tier claim in
+these documents is a pool-E claim until then.
 
-**Gates**: `G-EDA5` pass · `G-EDA1/exclude` ×4 pass · `G-EDA1/allowlist/fma` fail (a licence
+**Gates**: `G-EDA5` pass · `G-EDA1/exclude` ×5 pass · `G-EDA1/allowlist/fma` fail (a licence
 partition, not a defect) · `G-EDA1/allowlist/mtg-jamendo` `na` (unfetched) · `G-EDA2` fail
-(structural — see below) · `G-EDA3` fail, 7 of 13 sources · `G-EDA4`, `G-EDA6`, `G-EDA7` `na`.
+(structural — see below) · `G-EDA3` fail, **5 of 14** sources, in two separated clauses
+([06 X6b](06-cross-pool.md#-x6b--the-publishers-key-joined-what-path-depth-was-hiding)) ·
+`G-EDA4`, `G-EDA6`, `G-EDA7` `na`.
 
 **6 sources blocked**, each with a measured reason: `ctrsvdd`, `rirs-pointsource`,
 `rirs-isotropic-rir`, `cfad-codec`, `cfad-noisy`, `codecfake`.
@@ -39,63 +43,41 @@ stream (X5, Phase 2).
 
 ---
 
-## 1 — Publisher keys into the census ⚠️ do this first
+## 1 — Publisher keys into the census ✅ done 2026-09-13
 
-**What.** Join each publisher's own group key into `files.parquet` as a column, starting with
-SONICS' `algorithm` from `payload/fake_songs.csv`.
+Landed in `cc79913`. `eda.groupkeys` joins each publisher's own key into `files.parquet` at
+`consolidate` time — no re-probe, nothing decodes — and `grouping_report` prefers it over path
+depth. The measured result, and the two corrections it produced, are
+[06 X6b](06-cross-pool.md#-x6b--the-publishers-key-joined-what-path-depth-was-hiding).
 
-**Why it is first, and not a tidy-up.** Two reasons, and the second is the load-bearing one.
+```bash
+$V -m eda.cli keys             # per source: the key, its count, and the evidence
+```
 
-It is what `G-EDA3` has asked for in every run — *"no depth reaches the floor, needs the publisher's
-own key"* — for **7 of 13** sources: `fakemusiccaps`, `ljspeech`, `musan-music`, `musan-noise`,
-`musan-speech`, `rirs-isotropic-noise`, `sonics`.
+**The `stratify_by` decision, recorded.** It does **not** widen. `stratify_by: [source_name]` keeps
+the per-source budget and a new `sample.spread_by: [group_key]` divides that budget evenly inside
+each source. Same 15,086 sampled files; `cfad-fake` goes from 17–108 per generator to 74–75 and
+`zeroth-korean` covers 115 speakers instead of 114. Widening `stratify_by` instead would have
+multiplied the budget by the group count — 54,000 files from `cfad-fake` alone.
 
-And it decides **the draw** for the three sampled partitions. `sample.stratify_by` is
-`("source_name",)`, so at 2,000 per source:
-
-| partition | source | rows | real groups inside it |
-|---|---|--:|--:|
-| B | `cfad-fake` | 73,700 | **11 generators** |
-| B | `mlaad` | 16,006 | 54 language×generator |
-| A | `cfad-real` | 38,600 | **6 corpora** |
-| A | `zeroth-korean` | 22,720 | 115 path groups |
-
-2,000 drawn from `cfad-fake` as one stratum leaves eleven generators in whatever proportion the draw
-happened to pick. Widening `stratify_by` to the group key fixes that — and it **must** be decided
-before step 2, because the draw is part of the corpus definition: redrawing after a decode
-invalidates every S-tier number taken from the old draw, and `Sample.fingerprint` now refuses to let
-that happen silently.
-
-⚠️ This argument does **not** apply to `cell8` or `D`. Both are measured in full, so `stratify_by`
-does not touch them. An earlier draft of this plan justified step 1's ordering by cell8's draw;
-the full-coverage decision below made that reason obsolete, and the reason above replaces it.
-
-**Verified already**: the SONICS join matches **49,074 of 49,074** rows, with the CSV's own
-`duration` agreeing with ffprobe to **0.000 s**. It yields 5 generator groups —
-chirp-v3.5 (19,057), udio-120s (18,745), udio-30s (4,903), chirp-v3 (4,285),
-chirp-v2-xxl-alpha (2,084) — against the 1 that path depth finds.
-
-**Also check for a key**: MLAAD (generator is already in the path), FMA (`genre`, `artist` in its
-metadata), MTG-Jamendo (when fetched). CFAD needs nothing — its key *is* the path.
-
-**Done when** `eda analyze`'s grouping report stops saying *"needs the publisher's own key"* for
-SONICS, `G-EDA3` counts 5 groups there instead of 1, and a decision is recorded on whether
-`stratify_by` widens to the new column.
-
-⚠️ `eda sample` and `eda signal` both skip a partition with no `files.parquet` and exit 0 —
-`mixed` is unprobed and will print one line to stderr on every run. That is the expected state, not
-a failure.
+Still open, and deliberately: **FMA's artist key.** Its `tracks.csv` has `artist` and `album`; the
+metadata archive is not fetched, so pool C currently groups on FMA's numbered shard directories,
+which are not artists. `eda keys` says so on every run.
 
 ---
 
 ## 2 — The S tier over everything else
 
 ```bash
-$V -m eda.cli sample          # draws every partition that has none
-$V -m eda.cli signal          # ~139 min, resumable at 500-file parts
+$V -m eda.cli sample          # draws every partition that has none -- ✅ drawn 2026-09-13
+$V -m eda.cli signal          # ~143 min, resumable at 500-file parts
 ```
 
-**89,765 files to decode, about 2 h 20 min.** Measured rate: pool E's 14,102-row pass took
+**The draw is recorded.** A 6,426 · B 6,000 · C 2,660 · D 27,605 (full) · cell8 49,074 (full), each
+with its fingerprint in `<partition>/sample.json`. ⚠️ Redrawing now invalidates every S-tier number
+taken from it, and `Sample.fingerprint` refuses to let that happen silently.
+
+**91,765 files to decode, about 2 h 25 min.** Measured rate: pool E's 14,102-row pass took
 **21 m 04 s** on 32 threads — **11.2 files/s**. The table below is computed at a deliberately
 conservative 10.7, so it over-estimates by ~5%. `user + sys` was 41 minutes against 21 of wall
 clock, so the GIL holds the speedup near 2× and this is I/O- and decode-bound, not parallel-bound.
@@ -105,7 +87,7 @@ clock, so the GIL holds the speedup near 2× and this is I/O- and decode-bound, 
 | cell8 | 49,074 | **49,074** | full | 76 min |
 | D | 27,605 | **27,605** | full | 43 min |
 | A | 74,846 | 6,426 | 2000/source | 10 min |
-| B | 89,706 | 4,000 | 2000/source | 6 min |
+| B | 207,689 | 6,000 | 2000/source | 9 min |
 | C | 8,660 | 2,660 | 2000/source | 4 min |
 | E | 14,194 | — | **done** | — |
 
@@ -113,7 +95,8 @@ clock, so the GIL holds the speedup near 2× and this is I/O- and decode-bound, 
 as pool D and a stronger version of it: 49,074 rows from **one publisher and five generators**, 19%
 of the corpus, and the only partition that is `1` on *all four heads*. A 2,000-file sample would
 draw from a single `source_name` stratum and let five generators whose durations run 32.90 s to
-240.08 s land in whatever proportion the draw happened to pick.
+240.08 s land in whatever proportion the draw happened to pick. (Step 1's `spread_by` would now
+even that out — but a 4% sample of the only all-four-heads partition is still a 4% sample.)
 
 **Done when** every partition has a `signal.parquet`, `load_signal(cfg)` joins them to the M tier
 one-to-one, and the decode-failure count is reported per partition (it is printed even when zero).
@@ -144,19 +127,13 @@ tag is evidence, never a label.
 
 ---
 
-## 5 — WaveFake, to unblock B1
+## 5 — WaveFake, to unblock B1 ✅ done 2026-09-13
 
-26.9 GB, already in the store, not on disk. [07 §Phase 1](07-order-and-gates.md) names **B1 first**
-for this phase: the WaveFake↔LJSpeech join is the only unconfounded real/fake comparison in the
-corpus — same speaker, same utterances, one vocoder apart.
+26.9 GB fetched, sha256 verified, extracted and probed. **117,983 files**, and the 16,283-file
+duplicate half it ships is excluded with its reason — [02 B0b](02-pool-b-fake-voice.md) has the
+measurement and what it means for B1's pairing.
 
-The fetch is I/O-bound and independent of steps 1–4, so it can run in the background from the start.
-
-```bash
-python3 scripts/fetch_from_s3.py wavefake \
-    --dest /data/project/private/dacon-corpus/raw \
-    --extract /data/project/private/dacon-corpus/interim
-```
+B1 itself is still to run: it is an S-tier analysis and waits on step 2's decode.
 
 ---
 
