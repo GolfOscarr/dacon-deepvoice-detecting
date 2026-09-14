@@ -98,9 +98,16 @@ def head_labels(files: pd.DataFrame, head: str) -> pd.Series:
     return pd.to_numeric(out, errors="coerce")
 
 
-def build_design(files: pd.DataFrame, *, top_k: int = 20
+def build_design(files: pd.DataFrame, *, top_k: int = 20,
+                 features: dict[str, tuple[str, ...]] | None = None
                  ) -> tuple[np.ndarray, list[str]]:
-    """Metadata columns to a dense float matrix.
+    """Named columns to a dense float matrix. Metadata by default.
+
+    ⚠️ `features` is a parameter because the same audit has to run over two
+    different question sets: the M tier's metadata, and the S tier's per-plane
+    acoustics (`eda.analyze.signal.plane_features`). Copying the function to
+    change one dict is how the two would drift -- and the drift that matters is
+    the missingness handling below, which is the subtle half.
 
     🔴 **Missingness is a feature, and deliberately so.** `bit_rate` is null for
     every wav and present for every mp3, so an imputation that hid that would
@@ -111,8 +118,15 @@ def build_design(files: pd.DataFrame, *, top_k: int = 20
     folded into `__other__`, which keeps `encoder` -- effectively a corpus
     fingerprint -- usable without exploding the design.
     """
+    features = METADATA_FEATURES if features is None else features
+    unknown = sorted(set(features) - set(METADATA_FEATURES))
+    if unknown:
+        raise KeyError(
+            f"feature spec has unknown group(s) {unknown}; it takes exactly "
+            f"{sorted(METADATA_FEATURES)}, and a typo'd key would silently "
+            f"contribute no columns at all")
     blocks, names = [], []
-    for col in METADATA_FEATURES["numeric"]:
+    for col in features.get("numeric", ()):
         raw = pd.to_numeric(files.get(col), errors="coerce") if col in files else pd.Series(
             np.nan, index=files.index)
         isna = raw.isna().to_numpy(dtype=float)
@@ -120,14 +134,14 @@ def build_design(files: pd.DataFrame, *, top_k: int = 20
         filled = raw.fillna(0.0 if pd.isna(med) else med).to_numpy(dtype=float)
         blocks += [filled[:, None], isna[:, None]]
         names += [col, f"{col}_isna"]
-    for col in METADATA_FEATURES["boolean"]:
+    for col in features.get("boolean", ()):
         raw = files.get(col)
         if raw is None:
             raw = pd.Series(np.nan, index=files.index)
         blocks.append(raw.map({True: 1.0, False: 0.0}).fillna(MISSING_BOOL)
                       .to_numpy(dtype=float)[:, None])
         names.append(col)
-    for col in METADATA_FEATURES["categorical"]:
+    for col in features.get("categorical", ()):
         raw = (files[col] if col in files else pd.Series(np.nan, index=files.index))
         raw = raw.astype("object").where(raw.notna(), "__missing__").astype(str)
         keep = list(raw.value_counts().head(top_k).index)
@@ -154,9 +168,28 @@ def univariate_auc(x: np.ndarray, y: np.ndarray) -> float:
     return float(max(auc, 1.0 - auc))
 
 
-def shortcut_audit(files: pd.DataFrame, cfg: AnalysisConfig | None = None
-                   ) -> pd.DataFrame:
-    """One row per head: ungrouped AUC, source-grouped AUC, top features.
+def shortcut_audit(files: pd.DataFrame, cfg: AnalysisConfig | None = None, *,
+                   features: dict[str, tuple[str, ...]] | None = None,
+                   group_column: str = "source_name") -> pd.DataFrame:
+    """One row per head: ungrouped AUC, grouped AUC, top features.
+
+    🔴 `group_column` is the holdout axis, and the two available ones answer
+    **different questions** -- neither is the stricter one, and reading them as
+    a single "grouped AUC" is a mistake this docstring exists to prevent:
+
+    * ``source_name`` -- the **archive** holdout. "Does this survive an unseen
+      publisher?" It is what [06 X1c](../../docs/EDA/06-cross-pool.md) used and
+      is the default for comparability. Harsh, and often unmeasurable: with four
+      music sources, holding one out leaves a single-class fold.
+    * ``group_key`` -- the **content** holdout. "Does this survive an unseen
+      clip or speaker *from a publisher already in training*?" A held-out
+      FakeMusicCaps clip leaves 5,520 others behind, so an archive-level
+      confound is still fully available. Measured: it scores **higher**, not
+      lower, exactly because it removes less.
+
+    `group_key` is what makes `music_fake` measurable at all -- 5,764 groups
+    against 4 sources -- and that number must never be quoted as though it were
+    an archive holdout.
 
     Caveat: a head with fewer than two classes present, or with a source on only
     one side, reports `nan` rather than a number. That is the honest answer and
@@ -180,8 +213,13 @@ def shortcut_audit(files: pd.DataFrame, cfg: AnalysisConfig | None = None
                          "auc": float("nan"), "auc_source_grouped": float("nan"),
                          "top_features": "", "note": "fewer than two classes present"})
             continue
-        x, names = build_design(sub, top_k=cfg.top_k)
-        groups = sub["source_name"].to_numpy()
+        x, names = build_design(sub, top_k=cfg.top_k, features=features)
+        if group_column not in sub.columns:
+            raise KeyError(
+                f"cannot group the audit by {group_column!r}: not in the frame. "
+                f"`group_key` is written by `consolidate` and reaches the signal "
+                f"table through `load_signal`\'s join")
+        groups = sub[group_column].to_numpy()
 
         def cv_auc(splitter, use_groups: bool) -> float:
             scores = []
@@ -214,7 +252,7 @@ def shortcut_audit(files: pd.DataFrame, cfg: AnalysisConfig | None = None
         # fold is skipped. All of them skipped is not "no shortcut"; it is "not
         # measurable this way".
         note = ("" if grouped == grouped else
-                f"source-grouped AUC unmeasurable: {n_groups} source group(s), "
+                f"grouped AUC unmeasurable: {n_groups} {group_column} group(s), "
                 f"and holding one out leaves a single-class fold")
         if n_splits != cfg.n_splits:
             note = "; ".join(filter(None, [

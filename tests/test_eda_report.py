@@ -173,3 +173,59 @@ def test_clipping_counts_files_not_samples():
     signal = _signal([{f"clipping_ratio_{CHAIN}": 0.0001},
                       {f"clipping_ratio_{CHAIN}": 0.0}])
     assert sg.level_report(signal).iloc[0]["frac_clipping"] == 0.5
+
+
+# --------------------------------------------------------------------------- #
+# X1 re-run on the decoded audio
+# --------------------------------------------------------------------------- #
+
+def test_the_signal_audit_runs_on_the_chain_plane_by_default():
+    """🔴 The chain plane is the only one a model ever sees. A native-plane
+    result is an R1 measurement, not a statement about exploitable leakage.
+
+    Mutation: `plane: str = CHAIN` -> `NATIVE`. Every number still computes and
+    every one of them describes audio the competition never hands the model.
+    """
+    import inspect
+
+    assert inspect.signature(sg.signal_audit).parameters["plane"].default == CHAIN
+
+
+def test_the_audit_refuses_a_group_column_the_frame_lacks():
+    """Mutation: the `group_column not in sub.columns` guard removed -- numpy
+    raises a KeyError from inside the CV loop instead, naming neither the
+    column nor the fix."""
+    from eda.analyze.shortcut import shortcut_audit
+
+    frame = pd.DataFrame({
+        "file_id": ["a", "b"], "row_kind": ["component"] * 2,
+        "pool": ["A", "B"], "cell": [None, None],
+        "duration_s": [1.0, 2.0], "source_name": ["x", "y"]})
+    with pytest.raises(KeyError, match="cannot group the audit by"):
+        shortcut_audit(frame, group_column="group_key")
+
+
+def test_a_feature_spec_with_an_unknown_group_is_refused():
+    """🔴 `build_design` reads three fixed keys. A typo'd one contributes no
+    columns at all, and the audit then reports a confidently low AUC over a
+    design that is missing half its features.
+
+    Mutation: the `unknown` check removed.
+    """
+    from eda.analyze.shortcut import build_design
+
+    frame = pd.DataFrame({"duration_s": [1.0, 2.0]})
+    with pytest.raises(KeyError, match="unknown group"):
+        build_design(frame, features={"numerics": ("duration_s",)})
+
+
+def test_the_default_feature_spec_is_still_the_metadata_one():
+    """`shortcut_audit` gained a parameter and must not have changed what X1
+    measures. Mutation: the default swapped for a signal spec -- G-EDA2 then
+    reports a different quantity under the same name."""
+    from eda.analyze.shortcut import build_design
+
+    frame = pd.DataFrame({"orig_sr": [16000.0, 44100.0],
+                          "duration_s": [1.0, 2.0]})
+    _, names = build_design(frame)
+    assert "orig_sr" in names and "orig_sr_isna" in names

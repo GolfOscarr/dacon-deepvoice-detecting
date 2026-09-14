@@ -30,7 +30,7 @@ from eda.planes import CHAIN, NATIVE, PLANES
 
 __all__ = ["CHAIN_EXCLUDED", "SIGNAL_SCALARS", "TEST_MAX_S", "TEST_MIN_S",
            "bandwidth_report", "duration_report", "level_report",
-           "plane_features", "paired"]
+           "plane_features", "paired", "signal_audit"]
 
 #: The competition's test set: 1,200 files, **4-60 s, 16 kHz**
 #: (docs/competition/01). Every duration statistic here is read against it,
@@ -209,3 +209,37 @@ def level_report(signal: pd.DataFrame) -> pd.DataFrame:
             "frac_clipping": float((g["clipping_ratio"].fillna(0) > 0).mean()),
         })
     return pd.DataFrame(rows).sort_values("source_name").reset_index(drop=True)
+
+
+def signal_audit(signal: pd.DataFrame, cfg=None, *, plane: str = CHAIN,
+                 group_column: str = "source_name") -> pd.DataFrame:
+    """X1, re-run on what the decoder actually produced. **The decisive number.**
+
+    X1 asks whether the label is predictable from metadata; every fix for that
+    is a render-time transform, and [06 X1b](../../docs/EDA/06-cross-pool.md)
+    settled it -- tags stripped, one identical encode, the confound is gone from
+    the file. This asks the harder version: **is the label still predictable
+    from the audio itself, after the chain the competition mandates?**
+
+    🔴 Run on the `chain` plane by default, because that is the only plane a
+    model ever sees. A native-plane result is interesting for R1 and is not a
+    statement about leakage the model can exploit.
+
+    ⚠️ A high AUC here is *not* automatically a defect. Real audio and vocoded
+    audio genuinely differ, and a detector is supposed to find that. What makes
+    a number here a **shortcut** is surviving the *archive* holdout: duration
+    separating pool C from pool D at 30 s against 10 s is a property of how the
+    two archives were built, not of whether music is generated, and the test
+    set is 4-60 s for both.
+
+    ⚠️ `group_column` decides which question is being asked, and
+    `shortcut_audit`\'s docstring has the difference. `source_name` holds out an
+    archive; `group_key` holds out a clip or a speaker and leaves the archive in
+    training, so it scores **higher**. Measured on the chain plane:
+    `music_present` is 0.852 source-grouped and 0.894 group-keyed, and only the
+    first is evidence about publisher generalisation.
+    """
+    from eda.analyze.shortcut import shortcut_audit
+
+    return shortcut_audit(signal, cfg, features=plane_features(plane),
+                          group_column=group_column)
