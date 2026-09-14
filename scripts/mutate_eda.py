@@ -236,8 +236,8 @@ MUTANTS = [
      'the signal pass will not improvise a sample',
      'tests/test_eda_signal.py::test_the_signal_pass_refuses_to_improvise_a_sample'),
     ('eda/driver.py',
-     '    except Exception as exc:                         # noqa: BLE001 -- a row, not a raise\n        return {**fixed, "signal_ok": False,',
-     '    except Exception as exc:                         # noqa: BLE001 -- a row, not a raise\n        raise\n        return {**fixed, "signal_ok": False,',
+     '    except Exception as exc:                         # noqa: BLE001 -- a row, not a raise\n        # 🔴 The vectors still get a row',
+     '    except Exception as exc:                         # noqa: BLE001 -- a row, not a raise\n        raise\n        # 🔴 The vectors still get a row',
      'a decode failure is a row, not a lost census',
      'tests/test_eda_signal.py::test_a_file_that_cannot_be_decoded_is_a_row_not_a_lost_census'),
     ('eda/driver.py',
@@ -260,6 +260,105 @@ MUTANTS = [
      '        if False:',
      'a filename glob must say why',
      'tests/test_eda.py::test_a_filename_glob_must_say_why'),
+    # --- docs/EDA/09 step 1: the publisher's grouping key -------------------
+    ('eda/groupkeys.py',
+     '    missing = [f for f in files["file_id"] if f not in keys.index\n               or pd.isna(keys.get(f))]',
+     '    missing = [f for f in files["file_id"] if False]',
+     'a partial key is refused',
+     'tests/test_eda_groupkeys.py::test_a_key_that_misses_a_row_raises_rather_than_writing_a_null'),
+    ('eda/groupkeys.py',
+     '               or pd.isna(keys.get(f))]',
+     ']',
+     'a null key counts as missing',
+     'tests/test_eda_groupkeys.py::test_a_key_present_but_null_counts_as_missing'),
+    ('eda/groupkeys.py',
+     '        return pd.Series(["/".join(p[:d + 1]) if p else "" for p in parts],',
+     '        return pd.Series([p[d] if p else "" for p in parts],',
+     'a path key is the prefix, not the name',
+     'tests/test_eda_groupkeys.py::test_a_path_key_is_the_prefix_not_the_name_at_that_depth'),
+    ('eda/groupkeys.py',
+     '        out.loc[rows.index, KEY_COLUMN] = (',
+     '        if result.kind == PATH:\n            continue\n        out.loc[rows.index, KEY_COLUMN] = (',
+     'a source with no provider still gets a path key',
+     'tests/test_eda_groupkeys.py::test_a_source_with_no_provider_still_gets_a_key_from_its_path'),
+    ('eda/groupkeys.py',
+     '        return f"{source.name}/" + "_".join(parts[:4])',
+     '        return f"{source.name}/" + "_".join(parts[:5])',
+     'the room key merges its channels',
+     'tests/test_eda_groupkeys.py::test_the_room_key_merges_channels_of_one_recording'),
+    ('eda/groupkeys.py',
+     '        return JSUT_SPEAKER if vocoder.startswith("jsut_") else LJ_SPEAKER',
+     '        return f"{source.name}/{vocoder}"',
+     'wavefake shares ljspeech\'s key',
+     'tests/test_eda_groupkeys.py::test_wavefake_and_ljspeech_share_a_key_because_they_share_a_speaker'),
+    ('eda/analyze/grouping.py',
+     '        if kind != groupkeys.PATH:',
+     '        if False:',
+     'the publisher key beats path depth',
+     'tests/test_eda_groupkeys.py::test_the_publisher_key_replaces_path_depth_even_when_it_lowers_the_count'),
+    ('eda/gates.py',
+     '    stated = short[kinds != "path"]',
+     '    stated = short[kinds == "path"]',
+     'G-EDA3 separates the two shortfalls',
+     'tests/test_eda_groupkeys.py::test_the_gate_separates_a_keyed_shortfall_from_an_unlooked_at_one'),
+    ('eda/driver.py',
+     '    df = attach_group_keys(cfg, df)',
+     '    df = df',
+     'consolidate writes the key columns',
+     'tests/test_eda_groupkeys.py::test_consolidate_writes_the_key_columns'),
+    # --- docs/EDA/09 step 1: the draw ---------------------------------------
+    ('eda/sample.py',
+     '    for key in sorted(groups, key=lambda k: (len(groups[k]), str(k))):',
+     '    for key in sorted(groups):',
+     'the spread draw spends its whole budget',
+     'tests/test_eda_signal.py::test_the_spread_draw_covers_every_group_and_spends_the_whole_budget'),
+    # --- docs/EDA/09 step 3: the vector half --------------------------------
+    ('eda/extract/vectors.py',
+     '    if power.shape[1] < 2:',
+     '    if False:',
+     'one STFT frame fails the vectors',
+     'tests/test_eda_signal.py::test_a_single_frame_file_fails_the_vectors_rather_than_emitting_nan_skew'),
+    ('eda/extract/vectors.py',
+     '    flat = int((log_mel.max(axis=1) - log_mel.min(axis=1) <= 0.0).sum())',
+     '    flat = 0',
+     'flat bands are counted, not hidden',
+     'tests/test_eda_signal.py::test_a_band_that_never_moves_keeps_its_nan_and_is_counted'),
+    ('eda/extract/vectors.py',
+     '                                   N_MELS + 2))',
+     '                                   N_MELS + 2)) * (sample_rate / 16000.0)',
+     'the mel bank is the same Hz on both planes',
+     'tests/test_eda_signal.py::test_the_mel_bank_is_the_same_absolute_hz_on_both_planes'),
+    ('eda/extract/__init__.py',
+     '        for column in self.vectors:\n            row[column] = np.full(self.width, np.nan, dtype=np.float32)',
+     '        pass',
+     'a vector failure has the declared width',
+     'tests/test_eda_signal.py::test_a_vector_failure_has_the_declared_width_not_none'),
+    ('eda/extract/__init__.py',
+     '        if not vectors or unknown:',
+     '        if False:',
+     'a vector extractor declares its arrays',
+     'tests/test_eda_signal.py::test_a_vector_extractor_must_declare_which_columns_are_arrays'),
+    ('eda/driver.py',
+     '    if list(keys) != list(file_ids):',
+     '    if len(keys) != len(file_ids):',
+     'vectors are keyed to the signal table',
+     'tests/test_eda_signal.py::test_a_vector_table_that_does_not_key_like_the_signal_table_is_refused'),
+    ('eda/driver.py',
+     'from eda.extract import vectors as _vectors          # noqa: F401',
+     '',
+     'the driver registers the vector tier',
+     'tests/test_eda.py::test_importing_the_driver_populates_the_signal_and_vector_registries'),
+    # --- the stage, which is a config property ------------------------------
+    ('eda/driver.py',
+     '    path = roots[source_name] / row["path"]',
+     '    path = (cfg.root if row.get("stage", "interim") == "interim" else cfg.raw) / row["path"]',
+     'a raw-stage source decodes from raw',
+     'tests/test_eda_signal.py::test_a_raw_stage_source_decodes_from_the_sync_tree'),
+    ('eda/cli.py',
+     '             "exists": cfg.source_root(s).exists(),',
+     '             "exists": (cfg.root / s.root).exists(),',
+     '`sources` resolves the stage',
+     'tests/test_eda.py::test_sources_reports_a_raw_stage_source_as_present'),
     ('eda/driver.py',
      '                if marker.get("fingerprint") != sample.fingerprint:',
      '                if False:',
@@ -268,10 +367,20 @@ MUTANTS = [
 ]
 
 py = sys.argv[1]
-alive = []
+alive: list[str] = []
+stale: list[str] = []
 for path, old, new, label, test in MUTANTS:
     p = pathlib.Path(path); orig = p.read_text()
-    assert old in orig, f"pattern not found for {label}"
+    if old not in orig:
+        # 🔴 Not an assert. This harness edits files in place, and a bare
+        # raise here aborts the run with whichever mutant is currently applied
+        # still on disk. Measured: a `_signal_row` edit made one pattern stale,
+        # the assert fired, and the run stopped after 50 of 57 with nothing
+        # saying which mutants had not been tried. Report it and keep going --
+        # a stale pattern is a mutant that needs rewriting, and the rest of the
+        # suite is still evidence.
+        stale.append(label)
+        continue
     p.write_text(orig.replace(old, new, 1))
     try:
         # A bare test name means `tests/test_eda.py`; the S tier carries its own
@@ -286,5 +395,13 @@ for path, old, new, label, test in MUTANTS:
     print(f"{'KILLED ' if killed else 'ALIVE  '} {label:40s} <- {test.rsplit('::', 1)[-1]}")
     if not killed:
         alive.append(label)
-print(f"\n{len(MUTANTS) - len(alive)}/{len(MUTANTS)} mutants killed")
-sys.exit(1 if alive else 0)
+tried = len(MUTANTS) - len(stale)
+print(f"\n{tried - len(alive)}/{tried} mutants killed"
+      + (f"; {len(stale)} not tried" if stale else ""))
+for label in stale:
+    # 🔴 Reported as loudly as a survivor. A mutant whose pattern has drifted
+    # is an invariant with **no** paired mutation any more -- the same state
+    # the harness exists to refuse -- and a silent skip would let the count
+    # keep reading green while coverage quietly shrank.
+    print(f"STALE   {label:40s} <- pattern no longer in the source; rewrite it")
+sys.exit(1 if alive or stale else 0)

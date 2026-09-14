@@ -93,18 +93,24 @@ def test_a_path_key_is_the_prefix_not_the_name_at_that_depth(tmp_path):
     Mutation: `"/".join(p[:d + 1])` -> `p[d]`. Reports 1 group where there are 2,
     with `spk1` under `train/` and `spk1` under `test/` merged into one.
 
-    ⚠️ Two files per directory on purpose. `path_key` refuses a depth whose
-    distinct count equals the file count -- a key that gives every file its own
-    group grants no protection at all -- so a one-file-per-directory fixture
-    would exercise that guard instead of the prefix rule.
+    ⚠️ Two files per directory, and a floor of **3**, both on purpose. Two
+    files per directory because `path_key` refuses a depth whose distinct count
+    equals the file count -- a key giving every file its own group protects
+    nothing -- so a one-file-per-directory fixture exercises that guard instead
+    of the prefix rule. A floor of 3 because no depth then reaches it, so the
+    fallback picks depth **1**; at depth 0 `train` and `test` are their own
+    prefixes and the mutation is invisible. Measured: with a floor of 2 the
+    mutant survived.
     """
     cfg = EdaConfig(root=tmp_path, out=tmp_path / "out",
                     sources=(SourceSpec(name="src-y", pool="A", root="y"),),
-                    gates=GateConfig(min_groups_per_role=2))
+                    gates=GateConfig(min_groups_per_role=3))
     files = _census([("src-y", f"{split}/spk1/{name}.wav")
                      for split in ("train", "test") for name in ("a", "b")])
     out = gk.attach_group_keys(cfg, files)
     assert out[gk.KEY_COLUMN].nunique() == 2
+    assert sorted(out[gk.KEY_COLUMN].unique()) == ["src-y/test/spk1",
+                                                   "src-y/train/spk1"]
 
 
 def test_one_speaker_is_declared_single_not_reported_as_a_missing_key(tmp_path):

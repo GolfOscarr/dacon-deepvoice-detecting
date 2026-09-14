@@ -843,10 +843,20 @@ def test_a_band_that_never_moves_keeps_its_nan_and_is_counted():
     assert np.isnan(silent["mel_band_skew"]).all()
 
     rng = np.random.default_rng(0)
-    noisy = mel_vectors(rng.standard_normal((1, 16000)).astype(np.float32) * 0.1,
-                        16000)
+    noise = rng.standard_normal((1, 16000)).astype(np.float32) * 0.1
+    noisy = mel_vectors(noise, 16000)
     assert noisy["mel_bands_flat"] == 0
     assert not np.isnan(noisy["mel_band_skew"]).any()
+
+    # 🔴 The case the docstring names, and the only one that discriminates:
+    # an 8 kHz file has no STFT bin above 4 kHz, so the mel bands covering
+    # 4-8 kHz are identically zero, floored, and constant. Measured: 30 of 128.
+    # Without it both the silent short-circuit and the all-moving case report
+    # the same count the mutation does, and `flat = 0` survives.
+    narrow = mel_vectors(noise[:, :8000], 8000)
+    assert narrow["vector_ok"] is True
+    assert narrow["mel_bands_flat"] == 30
+    assert int(np.isnan(narrow["mel_band_skew"]).sum()) == 30
 
 
 def test_the_flat_band_count_lands_in_the_table_not_the_npz():
