@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 
 from eda.config import EdaConfig, SourceSpec
-from eda.extract import VECTOR, run_metadata, run_signal, run_vectors
+from eda.extract import CONTENT, VECTOR, run_content, run_metadata, run_signal, run_vectors
 from eda.groupkeys import attach_group_keys
 from eda.ids import file_id_for
 from eda.planes import PLANES, load_planes
@@ -43,6 +43,7 @@ from eda.extract import level as _level              # noqa: F401
 from eda.extract import spectral as _spectral        # noqa: F401
 from eda.extract import timing as _timing            # noqa: F401
 from eda.extract import vectors as _vectors          # noqa: F401
+from eda.extract import content as _content          # noqa: F401
 
 __all__ = ["BlockedSource", "FIXED_COLUMNS", "NotProbed", "SIGNAL_TABLE",
            "SignalResult", "VECTOR_TABLE", "consolidate", "enumerate_source",
@@ -350,7 +351,8 @@ def _signal_row(cfg: EdaConfig, row: pd.Series, partition: str,
         return ({**fixed, "signal_ok": False,
                  "signal_error": f"source {source_name!r} is not in the config, "
                                  f"so the tree its path is relative to is "
-                                 f"unknown", **flags}, arrays)
+                                 f"unknown",
+                 **flags, **_failed_content()}, arrays)
     path = roots[source_name] / row["path"]
     declared = row.get("orig_sr")
     declared = None if declared is None or pd.isna(declared) else int(declared)
@@ -363,10 +365,15 @@ def _signal_row(cfg: EdaConfig, row: pd.Series, partition: str,
         # would shift every file after it onto somebody else's spectrum.
         flags, arrays = _split_vectors(_failed_vectors())
         return ({**fixed, "signal_ok": False,
-                 "signal_error": f"{type(exc).__name__}: {exc}", **flags},
+                 "signal_error": f"{type(exc).__name__}: {exc}",
+                 **flags, **_failed_content()},
                 arrays)
+    # 🔴 The content tier rides the **same decode**. Running it as a second
+    # pass would mean opening every file twice -- the mistake that cost this
+    # repo a run when the vector half was nearly shipped separately
+    # (docs/EDA/09 section 2+3).
     scalars = {**fixed, "signal_ok": True, "signal_error": None,
-               **run_signal(planes)}
+               **run_signal(planes), **run_content(planes)}
     # The flags belong in the table a reader opens, the arrays in the npz.
     flags, arrays = _split_vectors(run_vectors(planes))
     return {**scalars, **flags}, arrays
@@ -379,6 +386,15 @@ def _failed_vectors() -> dict[str, Any]:
         for ex in VECTOR.values():
             for column, value in ex.failed("decode failed").items():
                 out[f"{column}_{plane}"] = value
+    return out
+
+
+def _failed_content() -> dict[str, Any]:
+    """Every C-tier column as a decode failure would emit it. Unsuffixed: the
+    content tier runs on one plane (`run_content`)."""
+    out: dict[str, Any] = {}
+    for ex in CONTENT.values():
+        out.update(ex.failed("decode failed"))
     return out
 
 

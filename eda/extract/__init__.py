@@ -29,9 +29,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-__all__ = ["Extractor", "ExtractorError", "METADATA", "SIGNAL", "VECTOR",
-           "Registry", "VectorRegistry", "register_metadata", "register_signal",
-           "register_vector", "run_metadata", "run_signal", "run_vectors"]
+__all__ = ["CONTENT", "Extractor", "ExtractorError", "METADATA", "SIGNAL",
+           "VECTOR", "Registry", "VectorRegistry", "register_content",
+           "register_metadata", "register_signal", "register_vector",
+           "run_content", "run_metadata", "run_signal", "run_vectors"]
 
 
 class ExtractorError(ValueError):
@@ -180,6 +181,11 @@ SIGNAL = Registry("S", 2, ("wav", "sample_rate"))
 #: registry would make "which file does this column go to?" a runtime question
 #: about the value's type (docs/EDA/00 section 1).
 VECTOR = VectorRegistry("V", 2, ("wav", "sample_rate"))
+#: 🔴 The content tier: what a model *hears*, as opposed to what the signal
+#: measures. Same `(wav, sample_rate)` contract, and run on the **chain plane
+#: only** -- see `run_content`. A separate registry rather than more entries in
+#: SIGNAL precisely because that one-plane rule is a property of the tier.
+CONTENT = Registry("C", 2, ("wav", "sample_rate"))
 
 
 def register_metadata(name: str, columns: tuple[str, ...], ok_column: str):
@@ -192,6 +198,13 @@ def register_metadata(name: str, columns: tuple[str, ...], ok_column: str):
 def register_signal(name: str, columns: tuple[str, ...], ok_column: str):
     def deco(fn):
         SIGNAL.add(name, columns, ok_column, fn)
+        return fn
+    return deco
+
+
+def register_content(name: str, columns: tuple[str, ...], ok_column: str):
+    def deco(fn):
+        CONTENT.add(name, columns, ok_column, fn)
         return fn
     return deco
 
@@ -297,4 +310,45 @@ def run_vectors(planes: Mapping[str, Any], names: tuple[str, ...] | None = None
                     f"extractor {ex.name!r} emits column(s) {sorted(clash)} on "
                     f"plane {plane_name!r} already written by an earlier extractor")
             row.update(suffixed)
+    return row
+
+
+def run_content(planes: Mapping[str, Any], names: tuple[str, ...] | None = None
+                ) -> dict[str, Any]:
+    """Every registered C-tier extractor, on the **chain plane only**.
+
+    🔴 One plane, and unsuffixed columns. Every other tier runs twice and
+    suffixes, because R1 asks what the 16 kHz chain removes and the answer is a
+    subtraction. The content tier asks a different question -- *what is in this
+    audio?* -- whose answer is a property of the recording, not of the transform,
+    and whose models are trained at one rate. Silero VAD wants exactly 16 kHz;
+    running it on a 44.1 kHz native plane would mean resampling inside an
+    extractor, which is the render chain's job, or measuring a different thing
+    per source.
+
+    ⚠️ So `vad_speech_ratio` has no `_native` twin, and that asymmetry is
+    deliberate. A reader who expects one should read this docstring, not file a
+    bug.
+    """
+    from eda.planes import CHAIN
+
+    if CHAIN not in planes:
+        raise KeyError(
+            f"the content tier runs on the {CHAIN!r} plane and it is not in "
+            f"{sorted(planes)}. See this function's docstring for why it is "
+            f"one plane rather than two")
+    chosen = CONTENT.values() if names is None else [CONTENT[n] for n in names]
+    plane = planes[CHAIN]
+    row: dict[str, Any] = {}
+    for ex in chosen:
+        try:
+            out = ex(plane.wav, plane.sample_rate)
+        except Exception as exc:                     # noqa: BLE001 -- a row, not a raise
+            out = ex.failed(f"{type(exc).__name__}: {exc}")
+        clash = set(out) & set(row)
+        if clash:
+            raise ExtractorError(
+                f"extractor {ex.name!r} emits column(s) {sorted(clash)} already "
+                f"written by an earlier content extractor")
+        row.update(out)
     return row
