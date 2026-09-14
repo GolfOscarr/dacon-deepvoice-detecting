@@ -155,6 +155,38 @@ stage is the implementation and `_PAD_TOL = 576` already handles LAME's trailing
 
 ---
 
+## 🔴 C8 — S tier: 30 s against pool D's 10 s, and the only source the chain really cuts
+
+Measured 2026-09-14 over 2,660 decoded files (`eda report`).
+
+| | p05 | median | p95 | in 4–60 s | over 60 s |
+|---|--:|--:|--:|--:|--:|
+| pool C | 29.977 | **30.003** | 296.06 | 0.757 | **0.242** |
+
+FMA ships 30 s excerpts and MUSAN's music partition ships whole tracks, so a quarter of this pool is
+longer than anything the test set contains. Against pool D's flat **10.000 s**
+([04 D8](04-pool-d-fake-instrumental.md)) that makes duration a near-perfect real/fake separator for
+the music heads — the finding
+[06 X1d](06-cross-pool.md#-x1d--x1-on-the-decoded-audio-the-duration-shortcut-survives-the-chain)
+quantifies and the one the crop policy has to answer.
+
+🔴 **`fma` is the source the 16 kHz chain cuts hardest**, and by a wide margin:
+
+| source | native bandwidth | chain | lost | `hf_ratio_8k_native` |
+|---|--:|--:|--:|--:|
+| `fma` | 18,389 Hz | 8,000 Hz | **10,389 Hz** | 2.8e-03 |
+| `musan-music` | 7,766 Hz | 7,766 Hz | 0 | 9.4e-12 |
+
+So within one pool, one source loses more than half its spectrum to the chain and the other loses
+nothing — which is a *domain* split inside pool C, not only a cross-pool one.
+
+⚠️ And `fma` is the corpus's loudest, most clipped source: median peak **−0.63 dBFS**, median RMS
+**−15.0 dBFS**, **24.7%** of files with at least one clipped sample, and a DC offset reaching 0.553.
+`musan-music` is peak-normalised to full scale (median peak −0.000265 dBFS, **88.5%** clipping),
+which is a publisher fingerprint rather than a property of music.
+
+---
+
 ## C7 — MUSAN `music/` as pool C, not pool E ⚠️ Tier S (a correctness check)
 
 **Compute.** Confirm every `musan/music/*` row is assigned pool **C** and every `musan/noise/*` row

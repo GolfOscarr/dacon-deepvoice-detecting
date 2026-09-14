@@ -232,6 +232,67 @@ fold. Verified on the built folds, not asserted.
 
 ---
 
+## 🔴 E1b — E1 pass 2: the method fell short, and following it found a real leak
+
+Run 2026-09-14 over the chain-plane `ltas` vectors of all 58,883 usable S-tier rows
+(`eda.analyze.signal`, blocked cosine, ~2 min).
+
+### The method is weaker than E1 asked for, and the number says so
+
+E1 pass 1 compares sha256. Pass 2 was meant to be the **content** fingerprint that catches a file
+re-encoded or republished at another rate. Measured, the long-term average spectrum is not that:
+
+| quantile of each file's *best* match | cosine |
+|---|--:|
+| median | **0.965** |
+| p90 | 0.993 |
+| p99 | 0.998 |
+
+A median file already matches *some* other file at 0.965. At a 0.999 threshold the sweep returns
+**868 pairs, none cross-source** — and decoding the top hits shows why that number cannot be read as
+868 duplicates: `bus-helsinki-20-789-a_0` against `bus-vienna-38-1134-a_0` differ by up to **0.61 in
+amplitude** and agree spectrally because buses sound like buses.
+
+⚠️ So it is a **timbre** fingerprint, not an identity one. It shortlists candidates; it does not
+confirm duplicates. A real pass 2 needs a landmark/chromaprint-style fingerprint or waveform
+cross-correlation over the shortlist. `G-EDA5` stays honest about this: it passes on byte identity
+and says so in its own detail line.
+
+### What following the shortlist found
+
+The hits pointed at CompSpoof, and the publisher's own filenames settled it exactly — no threshold
+involved.
+
+🔴 **CompSpoof is segmented, and its two splits share parent recordings.** One parent becomes many
+4 s files, and over the full 13,172-file census:
+
+* **292 parent recordings appear in both `eval_source` and `test_source`, across 1,060 files** —
+  8.1% of the source, all under `EnvSDD`;
+* **17 stems are byte-identical across the split**, e.g. `a001_11` filed under `TUTSED2017Dev` on
+  one side and `TUTSED2016Dev` on the other, same sha256.
+
+Our grouping key was the path's own answer — `<split>/env_sources/<Dataset>`, six tidy groups that
+meet the floor. That key puts segment 0 of a Helsinki bus in train and segment 1 in validation.
+
+**Fixed**: `compspoof-env-bonafide` now groups by the **parent recording**, one rule per subtree,
+each read off the files rather than assumed —
+
+| subtree | stem | parent |
+|---|---|---|
+| `AudioCapsEnv` | `Y-4B1PkgXOMI_80_seg000` | the YouTube id |
+| `VGGSoundEnv` | `-3z5mFRgbxc_000030.mp4_chunk1` | the YouTube id |
+| `TUTASC2019Dev` | `airport-barcelona-0-12-a_0` | the clip |
+| `TUTSED*` | `a001_33` | the recording |
+| `UrbanSound8K` | `100263-2-0-137` | the Freesound id |
+
+**6 groups → 10,710**, and all 292 straddling parents are now exactly one group each — verified by
+re-measurement, not asserted. The split is deliberately *not* in the key: it is what the path offers
+and it is the wrong atom.
+
+⚠️ Pool E is in `full_pools`, so there is no draw to invalidate and no S-tier number changed.
+
+---
+
 ## E2 — Content-kind classification: noise recordings vs impulse responses ⚠️ Tier S
 
 **Compute.** Per file: duration, and the shape of the energy-decay envelope — an impulse response

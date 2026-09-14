@@ -306,6 +306,11 @@ MUTANTS = [
      '    if False:\n        raise KeyError(',
      'a typo\'d feature group is refused',
      'tests/test_eda_report.py::test_a_feature_spec_with_an_unknown_group_is_refused'),
+    ('eda/cli.py',
+     '    scope = f"_{args.partition}" if args.partition else ""',
+     '    scope = ""',
+     'a scoped report keeps its own filename',
+     'tests/test_eda_report.py::test_a_partition_scoped_report_does_not_overwrite_the_corpus_wide_one'),
     # --- docs/EDA/09 step 1: the publisher's grouping key -------------------
     ('eda/groupkeys.py',
      '    missing = [f for f in files["file_id"] if f not in keys.index\n               or pd.isna(keys.get(f))]',

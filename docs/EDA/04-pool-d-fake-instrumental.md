@@ -171,6 +171,39 @@ manufacturing a cue.**
 
 ---
 
+## 🔴 D8 — S tier: **every file is exactly 10.000 s**, and that is the corpus's sharpest shortcut
+
+Measured 2026-09-14 over all 27,605 decoded files (`eda report`).
+
+| p05 | median | p95 | in 4–60 s | under 4 s | over 60 s |
+|--:|--:|--:|--:|--:|--:|
+| **10.000** | **10.000** | 10.242 | 1.000 | 0.000 | 0.000 |
+
+Not "about ten seconds" — p05, median and p95 agree to three decimals, because the five text-to-music
+models were each asked for 10 s clips. Pool C, the real instrumental it is scored against, has a
+median of **30.003 s** ([03 C8](03-pool-c-real-instrumental.md)).
+
+🔴 **So `music_fake` is readable off duration with no audio at all**, and
+[06 X1d](06-cross-pool.md#-x1d--x1-on-the-decoded-audio-the-duration-shortcut-survives-the-chain)
+measures it: `duration_s_decoded` scores **0.946** univariate on the chain plane, and the pooled
+`music_present` head holds 0.852 even after a whole publisher is held out. This pool carries
+**0.27** of the metric.
+
+⚠️ Resampling cannot touch it. The 16 kHz chain changes a file's rate, not its length, so this is a
+shortcut that survives every render-time fix the harness has. It is a **sampler** problem — the
+crop policy has to make pool C and pool D indistinguishable in length — and the test set is 4–60 s
+for both.
+
+Two smaller findings from the same pass:
+
+* **Native bandwidth is already 8,000 Hz**, so the chain removes nothing (`bandwidth_lost_hz`
+  0.000, `hf_ratio_8k_native` 6.7e-07). Whatever generator fingerprint exists here is inside the
+  band the model sees — which is the good news.
+* **DC offset reaches 0.356** and 5.7% of files clip. Worth a render-time high-pass, and worth
+  checking before any level normalisation is chosen.
+
+---
+
 ## D7 — 🔴 SONICS: the corpus's first whole-file source — Tier S
 
 **30.4 GiB, 49,074 tracks, 1,971 h, CC BY-NC 4.0.** Suno (25,426) and Udio (23,648). Acquired

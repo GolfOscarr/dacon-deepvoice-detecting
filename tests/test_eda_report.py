@@ -229,3 +229,41 @@ def test_the_default_feature_spec_is_still_the_metadata_one():
                           "duration_s": [1.0, 2.0]})
     _, names = build_design(frame)
     assert "orig_sr" in names and "orig_sr_isna" in names
+
+
+def test_a_partition_scoped_report_does_not_overwrite_the_corpus_wide_one(tmp_path):
+    """🔴 Measured, during this verb's own smoke test: `report --partition D`
+    replaced `signal_duration.parquet` with a one-row pool-D table, and every
+    number read from it afterwards was a pool-D number wearing a corpus label.
+    It was caught by re-checking the documented figures against the artifact.
+
+    Mutation: `scope` hardcoded to `""`.
+    """
+    import argparse
+
+    from eda.cli import cmd_report
+    from eda.config import EdaConfig, SourceSpec
+
+    out = tmp_path / "out"
+    (out / "A").mkdir(parents=True)
+    (out / "B").mkdir(parents=True)
+    for part in ("A", "B"):
+        frame = _signal([{"partition": part, "file_id": f"s:{part}.wav",
+                          f"duration_s_decoded_{CHAIN}": 10.0}])
+        frame.to_parquet(out / part / "signal.parquet", index=False)
+        # `load_signal` joins the S tier to the M tier on file_id.
+        pd.DataFrame([{"file_id": f"s:{part}.wav", "source_name": "s",
+                       "row_kind": "component", "pool": part, "cell": None,
+                       "probe_ok": True}]).to_parquet(
+            out / part / "files.parquet", index=False)
+    cfg = EdaConfig(root=tmp_path, out=out,
+                    sources=(SourceSpec(name="s", pool="A", root="a"),
+                             SourceSpec(name="t", pool="B", root="b")))
+
+    assert cmd_report(cfg, argparse.Namespace(partition=None)) == 0
+    assert cmd_report(cfg, argparse.Namespace(partition="A")) == 0
+
+    shared = pd.read_parquet(out / "_shared" / "signal_duration.parquet")
+    scoped = pd.read_parquet(out / "_shared" / "signal_duration_A.parquet")
+    assert len(shared) == 2, "the corpus-wide table must still cover both"
+    assert len(scoped) == 1

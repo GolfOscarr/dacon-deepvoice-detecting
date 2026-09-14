@@ -24,8 +24,9 @@ WaveFake landed (step 5) — 117,983 files after its duplicated half was exclude
 |--:|--:|--:|--:|--:|--:|--:|
 | 74,846 | 207,689 | 8,660 | 27,605 | 14,194 | 49,074 | not probed |
 
-**S tier: pool E only** — 14,194 rows, **3.7%** — until the step-2 pass lands. Every S-tier claim in
-these documents is a pool-E claim until then.
+**S tier: complete.** 58,885 rows over six partitions, **0 decode failures**, scalars and
+`[128]`-wide vectors on both planes. The sampled partitions are A 6,426 · B 6,000 · C 2,660 ·
+cell8 2,000; D and E are measured in full.
 
 **Gates**: `G-EDA5` pass · `G-EDA1/exclude` ×5 pass · `G-EDA1/allowlist/fma` fail (a licence
 partition, not a defect) · `G-EDA1/allowlist/mtg-jamendo` `na` (unfetched) · `G-EDA2` fail
@@ -66,60 +67,26 @@ which are not artists. `eda keys` says so on every run.
 
 ---
 
-## 2 + 3 — The S tier, both halves, over everything else 🔄 running
+## 2 + 3 — The S tier, both halves ✅ done 2026-09-14
 
-```bash
-$V -m eda.cli sample          # ✅ drawn 2026-09-13, fingerprinted
-$V -m eda.cli signal          # scalars + vectors, resumable at 500-file parts
-```
+**58,885 rows over six partitions, 0 decode failures**, scalars in `signal.parquet` and
+`[128]`-wide vectors in `vectors.npz`, keyed position for position. 302 audio hours at a measured
+1.33 audio-hours/min on 32 threads.
 
-🔴 **They are one step, not two.** Step 3 was written as a separate item and it
-cannot be one: `vectors.npz` comes out of the same decode as `signal.parquet`, so
-running it afterwards means opening every file twice. This was learned by doing it
-— the scalar-only pass was launched, and stopped four minutes in.
+Two things the run corrected about the plan itself:
 
-### 🔴 The estimate was in files, and the cost is in audio hours
+* 🔴 **The estimate was in files and the cost is in audio hours.** A cell8 file is 131 s and a
+  pool-E file is 4 s. Measured in full, cell8 alone is 1,970.6 audio hours — **~25 hours**, 90% of
+  the S tier's cost for 19% of its rows. It left `full_pools`; its 2,000-file draw is now **400 per
+  generator exactly**, which `spread_by` makes safe and which was the whole reason full coverage had
+  been chosen.
+* Steps 2 and 3 are **one pass**. `vectors.npz` comes out of the same decode, so running them apart
+  means opening every file twice. Learned by doing it and stopping four minutes in.
 
-The plan said 91,765 files, 2 h 25 min. The files were right and the time was
-wrong by an order of magnitude, because a cell8 file is 131 s and a pool-E file
-is 4 s. **Measured on 32 threads: 1.33 audio-hours per minute.**
-
-| partition | files | audio hours | est |
-|---|--:|--:|--:|
-| A | 6,426 | 71.7 | 54 min ✅ **done**, 0 decode failures |
-| B | 6,000 | 10.0 | 8 min |
-| C | 2,660 | 59.3 | 45 min |
-| D | 27,605 | 77.3 | 58 min |
-| E | 14,194 | 21.6 | 16 min |
-| cell8 | 2,000 | 62.4 | 47 min |
-| | **64,885** | **302.3** | **~3 h 48 min** |
-
-🔴 **`cell8` left `full_pools` on the strength of that measurement.** In full it is
-1,970.6 audio hours — **~25 hours**, 90% of the S tier's cost for 19% of its rows.
-The argument for full coverage was that a 2,000-file sample "would draw from a
-single `source_name` stratum and let five generators land in whatever proportion
-the draw happened to pick"; `spread_by: [group_key]` from step 1 is exactly that
-fix, and the redrawn sample is **400 per generator, exactly**. The reason and the
-reversal are both in `configs/eda.yaml`.
-
-⚠️ Pool E is re-run rather than reused: its 29 parts were written by the
-scalar-only pass and have no vectors beside them. `_merge_vectors` refuses them by
-name rather than writing a short table.
-
-**Done when** every partition has a `signal.parquet` **and** a `vectors.npz` whose
-`file_id` matches it position for position, `load_signal(cfg)` joins one-to-one to
-the M tier, and the decode-failure count is reported per partition.
-
----
-
-## 4 — The content tier: VAD + PANNs
-
-The largest remaining build, and the only thing **`G-EDA6`** waits on. Silero VAD at thresholds 0.5
-and 0.4, PANNs top-10 tags with scores.
-
-⚠️ **Both must be vendored, not `torch.hub.load`ed** — the eval server is offline
-([competition/02](../competition/02-submission.md)). And PANNs conflates singing with Music, so the
-tag is evidence, never a label.
+⚠️ And one defect it exposed: `stage` is a config property that `files.parquet` does not carry, so
+every `stage: raw` source resolved against `interim/`. MLAAD is the only one, so pool B silently
+lost a third of its S tier while the other five partitions looked perfect. Fixed in `7dadab4`;
+pool B re-run clean.
 
 ---
 
@@ -130,6 +97,55 @@ duplicate half it ships is excluded with its reason — [02 B0b](02-pool-b-fake-
 measurement and what it means for B1's pairing.
 
 B1 itself is still to run: it is an S-tier analysis and waits on step 2's decode.
+
+---
+
+## 6 — Reading the S tier ✅ done 2026-09-14
+
+```bash
+$V -m eda.cli report           # duration, bandwidth, level -- no decode
+```
+
+The S tier had been measured and unread: `analyze` stops at `files.parquet`. Three findings, each
+written up where it belongs:
+
+| finding | where | what it decides |
+|---|---|---|
+| 🔴 **Duration survives the chain.** `music_present` holds **0.852** after a whole-publisher holdout, against a 0.60 gate. Pool D is *every file exactly 10.000 s*, pool C is 30 s | [06 X1d](06-cross-pool.md#-x1d--x1-on-the-decoded-audio-the-duration-shortcut-survives-the-chain), [03 C8](03-pool-c-real-instrumental.md), [04 D8](04-pool-d-fake-instrumental.md) | the crop policy |
+| **The voice heads are clean** — 0.586 and 0.401 grouped, collapsing as X1c predicted | [06 X1d](06-cross-pool.md#-x1d--x1-on-the-decoded-audio-the-duration-shortcut-survives-the-chain) | — |
+| **Ten of fourteen sources lose nothing to the chain**; only `fma`, `wavefake`, `ljspeech`, `mlaad` have content above 8 kHz at all | [00 §4d](00-harness.md#4d---r1-on-the-whole-corpus-ten-of-fourteen-sources-lose-nothing) | whether any >8 kHz feature is worth engineering |
+| **22.6 dB of median-RMS spread**, and all three MUSAN partitions peak-normalised to full scale | [01 A9](01-pool-a-real-voice.md) | normalise, and at which stage |
+| **41% of pool B is under 4 s**; only 10.3% hold a 4 s non-silent span | [02 B0c](02-pool-b-fake-voice.md) | usable material for the sampler |
+| **E1 pass 2 fell short** — LTAS is a timbre fingerprint, not an identity one — but following it found CompSpoof sharing **292 parent recordings across its two splits** | [05 E1b](05-pool-e-noise.md) | grouping; now fixed, 6 → 10,710 groups |
+
+---
+
+## 7 — The content tier: VAD + PANNs ⬅ the largest remaining build
+
+The largest remaining build, and the only thing **`G-EDA6`** waits on. Silero VAD at thresholds 0.5
+and 0.4, PANNs top-10 tags with scores.
+
+⚠️ **Both must be vendored, not `torch.hub.load`ed** — the eval server is offline
+([competition/02](../competition/02-submission.md)). And PANNs conflates singing with Music, so the
+tag is evidence, never a label.
+
+---
+
+⚠️ **It needs a second decode pass, ~4 h.** The models were not vendored when step 2 ran, so the
+scalars and vectors came out of a decode that could not also run them. Scope it to the partitions
+that need it -- C for [C2](03-pool-c-real-instrumental.md), E for
+[E2](05-pool-e-noise.md), then A and B -- rather than all six.
+
+---
+
+## 8 — X7, the data memo: the exit condition
+
+One page with the numbers from X1-X6 inline: file inventory, schema, label counts per cell,
+suspected leakage variables, risk list. `docs/EDA/data_memo.md`, regenerated on every corpus change
+([06 X7](06-cross-pool.md)).
+
+It is also the **input document for the processing-strategy phase**, which is what the whole EDA has
+been for. The six findings in step 6 are its spine.
 
 ---
 

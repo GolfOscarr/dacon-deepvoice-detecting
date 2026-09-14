@@ -170,6 +170,67 @@ leaves a column that still can.
 
 ---
 
+## 🔴 X1d — X1 on the **decoded audio**: the duration shortcut survives the chain
+
+Run 2026-09-14 over all 58,885 S-tier rows (`eda.analyze.signal.signal_audit`).
+X1, X1b and X1c all read `files.parquet` — metadata, which every fix is a render-time
+transform against. This asks the version that cannot be transformed away: **is the label still
+predictable from the audio itself, after the 16 kHz chain the competition mandates?**
+
+Run on the `chain` plane, because that is the only plane a model ever sees.
+
+| head | n | ungrouped | **source-grouped** | |
+|---|--:|--:|--:|---|
+| `voice_present` | 58,885 | 0.933 | **0.586** | collapses |
+| `music_present` | 58,885 | 0.902 | **0.852** | 🔴 **survives** |
+| `voice_fake` | 14,426 | 0.884 | **0.401** | collapses |
+| `music_fake` | 32,265 | 0.898 | unmeasurable | 4 source groups |
+
+**`music_present` holds 0.852 after a whole publisher is held out**, against a gate of 0.60 — and
+its top features name the cause: `longest_valid_span_s` **0.943**, `duration_s_decoded` **0.922**.
+[X1c](#-x1c--with-13-sources-grouped-auc-becomes-measurable-and-one-head-refuses-to-collapse)
+found duration at 0.933 grouped on the M tier and predicted exactly this: resampling does not
+change how long a file is, so nothing in the render chain touches it.
+
+The two voice heads collapse — 0.586 and 0.401, the second below chance — which is the same
+answer X1c gave and is the good news in this table.
+
+### What the chain *does* remove
+
+| head | native | chain | |
+|---|--:|--:|---|
+| `music_fake` | **0.999** | 0.898 | −0.10 |
+| `voice_present` | 0.956 | 0.933 | −0.02 |
+| `music_present` | 0.931 | 0.902 | −0.03 |
+| `voice_fake` | 0.894 | 0.884 | −0.01 |
+
+The 0.10 the chain takes off `music_fake` is visible in which features leave the top five:
+`mel_bands_flat_native` (0.876) and `effective_bandwidth_hz_native` (0.795), both of which are the
+**native sample rate** wearing an acoustic name. That is R1's premise confirmed a second way —
+[00 §4d](00-harness.md#4d---r1-on-the-whole-corpus-ten-of-fourteen-sources-lose-nothing) has the
+per-source version. `duration_s_decoded` sits at 0.946 on *both* planes.
+
+### ⚠️ Two holdouts, and they answer different questions
+
+| holdout | asks | `music_present` |
+|---|---|--:|
+| `source_name` | does this survive an **unseen publisher**? | 0.852 |
+| `group_key` | does this survive an unseen **clip or speaker** from a publisher already in training? | 0.894 |
+
+`group_key` is **not** the stricter one, and reading it as such is the mistake to avoid. Holding
+out one FakeMusicCaps clip leaves 5,520 others in training, so an archive-level confound is still
+fully available — which is why it scores *higher*. It is what makes `music_fake` measurable at all
+(5,764 groups against 4 sources, giving **0.892**), and that number must never be quoted as an
+archive holdout.
+
+⚠️ A high AUC here is not automatically a defect — real and vocoded audio genuinely differ, and a
+detector is supposed to find that. What makes a number a **shortcut** is surviving the archive
+holdout on a feature the test set does not share: pool C is 30 s and pool D is 10 s
+([03 C8](03-pool-c-real-instrumental.md), [04 D8](04-pool-d-fake-instrumental.md)) while the test
+set is 4–60 s for both.
+
+---
+
 ## X2 — 🔴 The metadata-leak question (A5) — Tier A, and the one genuinely open feature question
 
 **Compute.** X1's model, but treated as a **candidate submission feature** rather than as a

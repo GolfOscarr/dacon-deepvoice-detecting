@@ -266,6 +266,42 @@ whose sign depends on the plane cannot be quoted without naming the plane.
 
 ---
 
+## 4d — 🔴 R1 on the whole corpus: ten of fourteen sources lose nothing
+
+[§4c](#4c---r1s-premise-measured-on-pool-e-it-holds) measured the chain on pool E. This is the same
+question over all 58,885 S-tier rows, paired per file (`eda report`, 2026-09-14).
+
+**Only four of fourteen sources are natively above 16 kHz.** For the other ten, `bandwidth_lost_hz`
+is **0.000** and `hf_ratio_8k_native` sits between 1e-09 and 1e-12 — there is nothing above 8 kHz
+to lose, because there was nothing there to begin with.
+
+| source | pool | native | lost to the chain | `hf_ratio_8k_native` |
+|---|---|--:|--:|--:|
+| `fma` | C | 18,389 Hz | **10,389 Hz** | 2.8e-03 |
+| `wavefake` | B | 11,220 Hz | 3,220 Hz | 2.9e-03 |
+| `ljspeech` | A | 10,853 Hz | 2,853 Hz | **2.4e-02** |
+| `mlaad` | B | 10,508 Hz | 2,530 Hz | 5.7e-04 |
+| *the other ten* | A–E, cell8 | ≤ 8,000 Hz | **0** | ~1e-09 … 1e-12 |
+
+🔴 **The consequence is a domain split, not a shortcut.** "Was this file resampled?" is answerable,
+and it tracks *source identity* rather than any label: `fma` is real instrumental, `wavefake` and
+`mlaad` are fake voice, `ljspeech` is real voice. So the resampler's signature does not align with
+a head — which is [§4c](#4c---r1s-premise-measured-on-pool-e-it-holds)'s conclusion (AUC 0.940
+paired, 0.611 unpaired) reproduced at corpus scale.
+
+And it is measurable from the other direction:
+[06 X1d](06-cross-pool.md#-x1d--x1-on-the-decoded-audio-the-duration-shortcut-survives-the-chain)
+shows `music_fake` falling from **0.999 native to 0.898 chain**, with
+`effective_bandwidth_hz` and `mel_bands_flat` — both proxies for the native rate — dropping out of
+the top features as it goes. The chain removes the rate fingerprint. It does not remove duration.
+
+⚠️ **What this costs the music strategy.** The hoped-for generator fingerprint above 8 kHz is
+unavailable for ten of fourteen sources *at the source*, not merely destroyed in transit. Any
+feature engineered up there can only work on the four sources that have content there, and those
+four are split across three pools.
+
+---
+
 ## 5 — Cost estimate
 
 | Pool | Files (est.) | M tier | S tier (sampled) |

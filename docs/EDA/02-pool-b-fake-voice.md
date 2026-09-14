@@ -103,6 +103,26 @@ has looked at yet.
 
 ---
 
+## 🔴 B0c — S tier: **41% of pool B is shorter than the test set's minimum**
+
+Measured 2026-09-14 over 6,000 decoded files (`eda report`).
+
+| p05 | median | p95 | in 4–60 s | **under 4 s** | has a 4 s span |
+|--:|--:|--:|--:|--:|--:|
+| 2.03 | 4.725 | 13.76 | 0.586 | **0.414** | 0.103 |
+
+The test set is 4–60 s. Two fifths of this pool cannot fill its minimum window at all, and only
+10.3% contain a non-silent span of 4 s — the lowest of any pool, and a direct constraint on the
+sampler rather than a curiosity. Pool A's equivalents are 0.174 and 0.182
+([01 A9](01-pool-a-real-voice.md)).
+
+This is the pool's own version of the duration problem: where pools C and D differ from each other
+([06 X1d](06-cross-pool.md#-x1d--x1-on-the-decoded-audio-the-duration-shortcut-survives-the-chain)),
+pool B differs from the **test set**. The voice heads themselves stay clean — `voice_fake` collapses
+to 0.401 under an archive holdout — so what this costs is usable material, not label integrity.
+
+---
+
 ## B1 — 🔴 WaveFake ↔ LJSpeech pair reconstruction — Tier S, and the highest-value item in this pool
 
 **Compute.** WaveFake is LJSpeech re-synthesized by 7 vocoders (MelGAN, Parallel WaveGAN,

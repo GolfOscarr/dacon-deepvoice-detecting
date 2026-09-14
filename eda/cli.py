@@ -245,6 +245,12 @@ def cmd_report(cfg, args) -> int:
         return 1
     out = cfg.out / "_shared"
     out.mkdir(parents=True, exist_ok=True)
+    # 🔴 A partition-scoped run writes partition-scoped files. Sharing one name
+    # means `report --partition D` silently replaces the corpus-wide table with
+    # a one-row version, and every number quoted from it afterwards is a pool-D
+    # number wearing a corpus label. Measured: it happened, during the smoke
+    # test for this verb.
+    scope = f"_{args.partition}" if args.partition else ""
 
     ok = signal["signal_ok"].fillna(False)
     print(f"=== S tier: {len(signal)} rows, {int(ok.sum())} decoded, "
@@ -260,7 +266,7 @@ def cmd_report(cfg, args) -> int:
                   "loudness, headroom, DC and clipping on the chain plane"),
     }
     for name, (table, caption) in tables.items():
-        table.to_parquet(out / f"signal_{name}.parquet", index=False)
+        table.to_parquet(out / f"signal_{name}{scope}.parquet", index=False)
         print(f"\n=== {name}: {caption}")
         _show(table)
     print(f"\nwrote {len(tables)} table(s) to {out}")

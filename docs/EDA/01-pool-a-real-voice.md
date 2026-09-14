@@ -35,6 +35,39 @@ it is to *equalize the chain*: push every pool through the same codec round-trip
 
 ---
 
+## 🔴 A9 — S tier: duration, and a 22.6 dB level spread across the corpus
+
+Measured 2026-09-14 over 6,426 decoded files (`eda report`).
+
+| p05 | median | p95 | in 4–60 s | under 4 s | has a 4 s span |
+|--:|--:|--:|--:|--:|--:|
+| 2.47 | 6.96 | 411.27 | 0.761 | 0.174 | 0.182 |
+
+17% is shorter than the test set's floor and the p95 is nearly seven minutes — `musan-speech` ships
+whole LibriVox recordings while `cfad-real` ships utterances. Only 18% hold a non-silent 4 s span.
+
+🔴 **Level is a second confound, and no metadata audit could have seen it.** Across the whole
+corpus, median RMS on the chain plane spans **22.6 dB** — `fma` at −15.0 dBFS, `rirs-isotropic-noise`
+at −37.6 — and the pattern is per-publisher rather than per-pool:
+
+| source | median peak | median RMS | files with clipping |
+|---|--:|--:|--:|
+| `musan-speech` | **−0.000265 dBFS** | −21.3 | **87.1%** |
+| `musan-music` | −0.000265 | −16.2 | 88.5% |
+| `musan-noise` | −0.000265 | −19.8 | 86.0% |
+| `ljspeech` | −5.32 | −23.95 | 0.0% |
+| `zeroth-korean` | −13.46 | −31.46 | 0.8% |
+| `cfad-real` | −11.76 | −30.21 | 5.8% |
+
+All three MUSAN partitions sit at the same peak to six decimals: **peak-normalised to full scale**,
+which is a fingerprint of how MUSAN was published and has nothing to do with what the audio is. A
+model given un-normalised level can read the publisher off it.
+
+⚠️ This is an argument for normalising, and for choosing the stage deliberately — the numbers above
+are *after* the 16 kHz chain, which is the only level a normalisation decision can act on.
+
+---
+
 ## A2 — Near-Nyquist rolloff profile 🔴 Tier S
 
 **Compute.** At the `chain` plane (16 kHz), per source: mean energy in 7.0–7.5, 7.5–7.8 and
