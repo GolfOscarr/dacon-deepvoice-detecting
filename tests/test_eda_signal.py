@@ -892,3 +892,56 @@ def test_a_decode_failure_emits_every_vector_column_on_every_plane():
         assert flags[f"mel_bands_flat_{plane}"] is None
         assert arrays[f"ltas_{plane}"].shape == (128,)
     assert not any(isinstance(v, np.ndarray) for v in flags.values())
+
+
+def test_a_raw_stage_source_decodes_from_the_sync_tree(tmp_path):
+    """🔴 The stage is a property of the config, not of the census row.
+    `FIXED_COLUMNS` does not carry it, so `row.get("stage", "interim")` was
+    always "interim" and every `stage: raw` source resolved against the wrong
+    tree: all 2,000 sampled `mlaad` rows failed the S tier against a path under
+    `interim/` that does not exist, while the file sat in `raw/`.
+
+    Mutation: `roots[source_name]` put back to
+    `row.get("stage", "interim")`. Pools A, C, D, E and cell8 still measure
+    perfectly -- every source in them is `interim` -- and pool B loses a third
+    of itself to an error that says the file is unreadable.
+    """
+    from eda.config import ProbeConfig, SourceSpec
+    from eda.driver import consolidate, probe_source, signal_partition
+    from eda.sample import draw
+
+    raw = tmp_path / "raw"
+    for i in range(2):
+        path = raw / "src-r/v1/payload" / f"r{i}.wav"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sf.write(path, np.zeros(16000, dtype=np.float32) + 0.01, 16000,
+                 subtype="PCM_16")
+    cfg = EdaConfig(
+        root=tmp_path / "interim", raw=raw, out=tmp_path / "out",
+        sources=(SourceSpec(name="src-r", pool="A", root="src-r/v1/payload",
+                            stage="raw", suffixes=(".wav",)),),
+        probe=ProbeConfig(workers=1, shard_size=2),
+        sample=SampleConfig(per_stratum=10, shard_size=2))
+    probe_source(cfg, cfg.source("src-r"))
+    files = pd.read_parquet(consolidate(cfg, "A"))
+    draw(cfg, files, "A")
+    result = signal_partition(cfg, "A")
+
+    assert result.failures == 0, "a raw-stage source must decode from cfg.raw"
+    signal = pd.read_parquet(result.table)
+    assert signal["signal_ok"].all()
+
+
+def test_a_census_row_whose_source_left_the_config_is_a_row_not_a_crash():
+    """R2: a failure is a row. Mutation: the `source_name not in roots` guard
+    removed -- a KeyError then kills the whole part, losing 499 good rows with
+    it."""
+    from eda.driver import _signal_row
+
+    cfg = EdaConfig(root=Path("."), out=Path("."))
+    row = pd.Series({"file_id": "gone:a.wav", "source_name": "gone",
+                     "path": "a.wav", "orig_sr": 16000})
+    scalars, arrays = _signal_row(cfg, row, "A")
+    assert scalars["signal_ok"] is False
+    assert "not in the config" in scalars["signal_error"]
+    assert arrays["ltas_native"].shape == (128,)

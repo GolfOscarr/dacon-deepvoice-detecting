@@ -28,6 +28,7 @@ below 16 kHz simply has empty top bands, which is true and visible.
 
 from __future__ import annotations
 
+import warnings
 from functools import lru_cache
 from typing import Any
 
@@ -171,7 +172,15 @@ def mel_vectors(wav: np.ndarray, sample_rate: int) -> dict[str, Any]:
     # with 0.0 instead would put a perfectly symmetric, perfectly Gaussian band
     # in the table wherever there was no audio at all.
     flat = int((log_mel.max(axis=1) - log_mel.min(axis=1) <= 0.0).sum())
-    with np.errstate(invalid="ignore", divide="ignore"):
+    # ⚠️ scipy warns "catastrophic cancellation ... the data are nearly
+    # identical" for exactly the bands `mel_bands_flat` counts. It is the
+    # expected state, not a surprise, and left unsuppressed it prints once per
+    # near-flat band -- tens of thousands of lines across a full pass, which
+    # buries anything that is genuinely worth reading in the log.
+    with np.errstate(invalid="ignore", divide="ignore"), \
+            warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning,
+                                message=".*catastrophic cancellation.*")
         band_skew = skew(log_mel, axis=1, bias=False)
         band_kurt = kurtosis(log_mel, axis=1, fisher=True, bias=False)
 

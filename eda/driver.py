@@ -47,7 +47,7 @@ from eda.extract import vectors as _vectors          # noqa: F401
 __all__ = ["BlockedSource", "FIXED_COLUMNS", "NotProbed", "SIGNAL_TABLE",
            "SignalResult", "VECTOR_TABLE", "consolidate", "enumerate_source",
            "load_files", "load_signal", "load_vectors", "probe_source", "shards",
-           "signal_partition"]
+           "signal_partition", "stage_roots"]
 
 
 class NotProbed(RuntimeError):
@@ -313,7 +313,27 @@ class SignalResult:
     table: Path
 
 
-def _signal_row(cfg: EdaConfig, row: pd.Series, partition: str) -> dict:
+def stage_roots(cfg: EdaConfig) -> dict[str, Path]:
+    """`source_name` -> the tree its `path` column is relative to.
+
+    🔴 The stage is a property of the **config**, not of the census row.
+    `FIXED_COLUMNS` does not carry it, so `row.get("stage", "interim")` was
+    always "interim" and every `stage: raw` source resolved against the wrong
+    tree. Measured: all 2,000 sampled `mlaad` rows failed the S tier with
+    `NativeRateError` against a path under `interim/` that does not exist,
+    while the file sat in `raw/` the whole time.
+
+    ⚠️ It failed the way it was designed to -- a row with `signal_ok = False`
+    and the error text, counted and printed as "2000 decode failure(s)" (R2).
+    Nothing was silently wrong. But the message named an unreadable file, which
+    is the wrong diagnosis, so the guard below names the stage instead.
+    """
+    return {s.name: (cfg.root if s.stage == "interim" else cfg.raw)
+            for s in cfg.sources}
+
+
+def _signal_row(cfg: EdaConfig, row: pd.Series, partition: str,
+                roots: dict[str, Path] | None = None) -> dict:
     """One file, both planes. A decode failure is a row, not an exception.
 
     ⚠️ `declared_sr` comes from the M tier's `orig_sr`, and `native_rate` will
@@ -323,7 +343,15 @@ def _signal_row(cfg: EdaConfig, row: pd.Series, partition: str) -> dict:
     """
     fixed = {"file_id": row["file_id"], "source_name": row["source_name"],
              "partition": partition}
-    path = (cfg.root if row.get("stage", "interim") == "interim" else cfg.raw) / row["path"]
+    roots = stage_roots(cfg) if roots is None else roots
+    source_name = str(row["source_name"])
+    if source_name not in roots:
+        flags, arrays = _split_vectors(_failed_vectors())
+        return ({**fixed, "signal_ok": False,
+                 "signal_error": f"source {source_name!r} is not in the config, "
+                                 f"so the tree its path is relative to is "
+                                 f"unknown", **flags}, arrays)
+    path = roots[source_name] / row["path"]
     declared = row.get("orig_sr")
     declared = None if declared is None or pd.isna(declared) else int(declared)
     try:
@@ -378,6 +406,7 @@ def signal_partition(cfg: EdaConfig, partition: str, *, progress=None
             f"The draw is part of the corpus definition, not a step this pass "
             f"may improvise")
     rows = sampled_rows(files, sample)
+    roots = stage_roots(cfg)
 
     parts_dir = cfg.out / partition / "signal_parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
@@ -415,7 +444,8 @@ def signal_partition(cfg: EdaConfig, partition: str, *, progress=None
                 skipped += 1
                 continue
             out = list(pool.map(
-                lambda i: _signal_row(cfg, rows.iloc[i], partition), batch))
+                lambda i: _signal_row(cfg, rows.iloc[i], partition, roots),
+                batch))
             scalars = [row for row, _ in out]
             frame = pd.DataFrame(scalars)
             frame.to_parquet(part, index=False)
