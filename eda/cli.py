@@ -37,8 +37,12 @@ def _show(df: pd.DataFrame, max_rows: int = 60) -> None:
 
 def cmd_sources(cfg, args) -> int:
     rows = [{"name": s.name, "row_kind": s.row_kind, "pool": s.pool, "cell": s.cell,
-             "partition": s.partition, "root": s.root,
-             "exists": (cfg.root / s.root).exists(),
+             "partition": s.partition, "root": s.root, "stage": s.stage,
+             # ⚠️ `cfg.source_root`, not `cfg.root / root`. A `stage: raw`
+             # source lives in the sync tree, and hardcoding the interim one
+             # reported `mlaad` as absent while 16,006 of its files were in the
+             # census and 2,000 had just been decoded.
+             "exists": cfg.source_root(s).exists(),
              "excludes": len(s.exclude), "allowlist": bool(s.allowlist)}
             for s in cfg.sources_in(args.partition)]
     _show(pd.DataFrame(rows))

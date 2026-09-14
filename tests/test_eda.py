@@ -1139,3 +1139,24 @@ def test_an_allowlist_over_zero_rows_is_na_not_a_vacuous_pass(tmp_path):
                           "row_kind": ["component"]})
     g = run_gates(cfg, files).set_index("gate")
     assert g.loc["G-EDA1/allowlist/c", "verdict"] == PASS
+
+
+def test_sources_reports_a_raw_stage_source_as_present(tmp_path, capsys):
+    """⚠️ `eda sources` is the verb a reader trusts to say what is on disk.
+    Hardcoding `cfg.root / s.root` reported `mlaad` as absent while 16,006 of
+    its files were already in the census -- the same stage confusion that cost
+    pool B a third of its S tier.
+
+    Mutation: `cfg.source_root(s)` put back to `cfg.root / s.root`.
+    """
+    raw = tmp_path / "raw"
+    (raw / "src-r/v1/payload").mkdir(parents=True)
+    cfg = EdaConfig(
+        root=tmp_path / "interim", raw=raw, out=tmp_path / "out",
+        sources=(SourceSpec(name="src-r", pool="A", root="src-r/v1/payload",
+                            stage="raw"),))
+    from eda.cli import cmd_sources
+
+    cmd_sources(cfg, argparse.Namespace(partition=None))
+    out = capsys.readouterr().out
+    assert "True" in out, out
