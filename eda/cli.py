@@ -18,6 +18,7 @@ import pandas as pd
 from eda.analyze import duplicates as dup
 from eda.analyze import grouping as grp
 from eda.analyze import shortcut as sc
+from eda.analyze import signal as sig
 from eda import groupkeys
 from eda.config import load_eda_config
 from eda.groupkeys import key_report
@@ -230,6 +231,42 @@ def cmd_keys(cfg, args) -> int:
     return 0
 
 
+def cmd_report(cfg, args) -> int:
+    """The S tier, read: docs/EDA/09 step 6.
+
+    Its own verb rather than more output on `analyze`, for the reason `keys` is:
+    `analyze` is a multi-minute pass over 382,068 census rows, and this reads a
+    58,885-row table that is already on disk. Nothing here decodes.
+    """
+    try:
+        signal = load_signal(cfg, args.partition)
+    except RuntimeError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+    out = cfg.out / "_shared"
+    out.mkdir(parents=True, exist_ok=True)
+
+    ok = signal["signal_ok"].fillna(False)
+    print(f"=== S tier: {len(signal)} rows, {int(ok.sum())} decoded, "
+          f"{len(signal) - int(ok.sum())} failure(s); "
+          f"partitions {sorted(signal['partition'].unique())}")
+
+    tables = {
+        "duration": (sig.duration_report(signal),
+                     "duration and silence, against the test set's 4-60 s window"),
+        "bandwidth": (sig.bandwidth_report(signal),
+                      "what the 16 kHz chain removes, paired per file"),
+        "level": (sig.level_report(signal),
+                  "loudness, headroom, DC and clipping on the chain plane"),
+    }
+    for name, (table, caption) in tables.items():
+        table.to_parquet(out / f"signal_{name}.parquet", index=False)
+        print(f"\n=== {name}: {caption}")
+        _show(table)
+    print(f"\nwrote {len(tables)} table(s) to {out}")
+    return 0
+
+
 def cmd_analyze(cfg, args) -> int:
     files = load_files(cfg)
     out = cfg.out / "_shared"
@@ -346,6 +383,10 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("keys", help="the publisher's own grouping key, per source")
     s.add_argument("--partition", help=part_help)
     s.set_defaults(fn=cmd_keys)
+
+    s = sub.add_parser("report", help="read the S tier: duration, bandwidth, level")
+    s.add_argument("--partition", help=part_help)
+    s.set_defaults(fn=cmd_report)
 
     s = sub.add_parser("analyze", help="X1 + E1 + grouping, then the gates")
     s.set_defaults(fn=cmd_analyze)
