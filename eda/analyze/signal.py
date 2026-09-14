@@ -31,7 +31,8 @@ from eda.planes import CHAIN, NATIVE, PLANES
 __all__ = ["CHAIN_EXCLUDED", "SIGNAL_SCALARS", "TEST_MAX_S", "TEST_MIN_S",
            "DUPLICATE_COSINE", "bandwidth_report", "content_fingerprints",
            "content_similarity_profile", "duration_report", "level_report",
-           "near_duplicates", "plane_features", "paired", "signal_audit"]
+           "VOICE_EVIDENCE_RATIO", "content_report", "near_duplicates",
+           "plane_features", "paired", "signal_audit"]
 
 #: The competition's test set: 1,200 files, **4-60 s, 16 kHz**
 #: (docs/competition/01). Every duration statistic here is read against it,
@@ -387,3 +388,70 @@ def content_similarity_profile(fingerprints: np.ndarray, *, block: int = 1024,
     return pd.DataFrame({"quantile": list(quantiles),
                          "top1_cosine": [float(series.quantile(q))
                                          for q in quantiles]})
+
+
+# --------------------------------------------------------------------------- #
+# The content tier, read: G-EDA6's evidence
+# --------------------------------------------------------------------------- #
+
+#: A pool asserting `voice_present = 1` wants speech found in most of its files;
+#: one asserting 0 wants it found in few. Deliberately loose -- this is evidence
+#: against an assertion, not a classifier, and a tight threshold would turn
+#: every borderline file into a contradiction.
+VOICE_EVIDENCE_RATIO = 0.20
+
+
+def content_report(signal: pd.DataFrame, files: pd.DataFrame) -> pd.DataFrame:
+    """Per source: what the VAD found, against what the pool **asserts**.
+
+    🔴 This is `G-EDA6`'s input. A pool-C row asserts `voice_present = 0`; if
+    Silero finds speech in 40% of its duration, either the row is mislabelled or
+    the pool is. The gate does not decide which -- it reports the disagreement
+    and [07](../../docs/EDA/07-order-and-gates.md) says reassign (F-A1) before
+    dropping.
+
+    ⚠️ `contradicted` counts **files**, not duration. A source whose median
+    speech ratio is 0 can still have 200 files full of singing, and the median
+    would never show it.
+    """
+    from eda.analyze.shortcut import head_labels
+
+    asserted = head_labels(files.set_index("file_id"), "voice_present")
+    joined = signal.set_index("file_id")
+    voice = asserted.reindex(joined.index)
+    ratio = pd.to_numeric(joined.get("vad_speech_ratio_50"), errors="coerce")
+    ratio40 = pd.to_numeric(joined.get("vad_speech_ratio_40"), errors="coerce")
+    ok = joined.get("vad_ok")
+    frame = pd.DataFrame({
+        "source_name": joined["source_name"], "asserts_voice": voice,
+        "ratio": ratio, "ratio40": ratio40,
+        "ok": ok.fillna(False) if ok is not None else False,
+    })
+
+    rows = []
+    for source, g in frame.groupby("source_name"):
+        measured = g[g["ok"]]
+        claim = measured["asserts_voice"].dropna()
+        asserts = float(claim.mean()) if len(claim) else float("nan")
+        if len(measured) and asserts == asserts:
+            # Which direction counts as a contradiction depends on the claim.
+            contra = (measured["ratio"] < VOICE_EVIDENCE_RATIO if asserts >= 0.5
+                      else measured["ratio"] >= VOICE_EVIDENCE_RATIO)
+            n_contra = int(contra.sum())
+        else:
+            n_contra = 0
+        rows.append({
+            "source_name": source, "n": int(len(g)),
+            "measured": int(len(measured)),
+            "asserts_voice": asserts,
+            "ratio_median": _q(measured["ratio"].dropna(), 0.5),
+            "ratio_p90": _q(measured["ratio"].dropna(), 0.9),
+            # 🔴 The threshold sensitivity docs/EDA/03 C2 asks for. A source
+            # whose answer moves a lot between 0.5 and 0.4 is a source the VAD
+            # is unsure about, and that is itself the finding.
+            "ratio_shift_50_to_40": (_q(measured["ratio40"].dropna(), 0.5)
+                                     - _q(measured["ratio"].dropna(), 0.5)),
+            "contradicted": n_contra,
+            "contradicted_frac": (n_contra / len(measured)) if len(measured) else float("nan"),
+        })
+    return pd.DataFrame(rows).sort_values("source_name").reset_index(drop=True)

@@ -267,3 +267,81 @@ def test_a_partition_scoped_report_does_not_overwrite_the_corpus_wide_one(tmp_pa
     scoped = pd.read_parquet(out / "_shared" / "signal_duration_A.parquet")
     assert len(shared) == 2, "the corpus-wide table must still cover both"
     assert len(scoped) == 1
+
+
+# --------------------------------------------------------------------------- #
+# the content tier read as G-EDA6's evidence
+# --------------------------------------------------------------------------- #
+
+def _content(rows):
+    """A signal frame carrying the VAD columns, plus its census twin."""
+    sig = _signal([{**r, "signal_ok": True} for r in rows])
+    for i, r in enumerate(rows):
+        sig.loc[i, "vad_ok"] = r.get("vad_ok", True)
+        sig.loc[i, "vad_speech_ratio_50"] = r.get("ratio", 0.0)
+        sig.loc[i, "vad_speech_ratio_40"] = r.get("ratio40", r.get("ratio", 0.0))
+    files = pd.DataFrame([{"file_id": fid, "source_name": s, "row_kind": "component",
+                           "pool": p, "cell": None}
+                          for fid, s, p in zip(sig["file_id"], sig["source_name"],
+                                               [r["pool"] for r in rows])])
+    return sig, files
+
+
+def test_a_pool_that_denies_voice_is_contradicted_by_speech(tmp_path):
+    """🔴 G-EDA6's whole point. A pool-C row asserts `voice_present = 0`; if the
+    VAD finds speech in 40% of it, either the row is mislabelled or the pool is.
+
+    Mutation: the direction of the contradiction test inverted -- a source that
+    asserts voice and has none then reads as clean, and vice versa.
+    """
+    sig, files = _content([
+        {"pool": "C", "ratio": 0.90},   # denies voice, full of speech
+        {"pool": "C", "ratio": 0.00},
+        {"pool": "C", "ratio": 0.00},
+        {"pool": "C", "ratio": 0.00},
+    ])
+    got = sg.content_report(sig, files).iloc[0]
+    assert got["asserts_voice"] == 0.0
+    assert got["contradicted"] == 1
+    assert got["contradicted_frac"] == 0.25
+
+
+def test_a_pool_that_asserts_voice_is_contradicted_by_silence():
+    sig, files = _content([
+        {"pool": "A", "ratio": 0.80},
+        {"pool": "A", "ratio": 0.01},   # asserts voice, none found
+    ])
+    got = sg.content_report(sig, files).iloc[0]
+    assert got["asserts_voice"] == 1.0
+    assert got["contradicted"] == 1
+
+
+def test_contradictions_count_files_not_duration():
+    """⚠️ A source whose median speech ratio is 0 can still have many files full
+    of singing, and the median would never show it.
+
+    Mutation: `contradicted` computed from the median instead of per row.
+    """
+    sig, files = _content([{"pool": "C", "ratio": 0.0}] * 6
+                          + [{"pool": "C", "ratio": 0.95}] * 4)
+    got = sg.content_report(sig, files).iloc[0]
+    assert got["ratio_median"] == 0.0, "the median hides them"
+    assert got["contradicted"] == 4, "the count does not"
+
+
+def test_a_row_whose_vad_failed_is_not_evidence_either_way():
+    """Mutation: the `g['ok']` filter dropped -- an unmeasured row then counts
+    as a contradiction, because its null ratio compares as below threshold."""
+    sig, files = _content([{"pool": "C", "ratio": 0.0},
+                           {"pool": "C", "ratio": np.nan, "vad_ok": False}])
+    got = sg.content_report(sig, files).iloc[0]
+    assert got["n"] == 2 and got["measured"] == 1
+    assert got["contradicted"] == 0
+
+
+def test_the_threshold_shift_is_reported():
+    """docs/EDA/03 C2 asks for 0.5 and 0.4 together: a source whose answer moves
+    between them is one the VAD is unsure about, and that is the finding."""
+    sig, files = _content([{"pool": "C", "ratio": 0.02, "ratio40": 0.60}])
+    got = sg.content_report(sig, files).iloc[0]
+    assert got["ratio_shift_50_to_40"] == pytest.approx(0.58)
