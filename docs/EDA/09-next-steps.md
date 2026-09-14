@@ -138,14 +138,20 @@ that need it -- C for [C2](03-pool-c-real-instrumental.md), E for
 
 ---
 
-## 8 — X7, the data memo: the exit condition
+## 8 — X7, the data memo ✅ done 2026-09-14
 
-One page with the numbers from X1-X6 inline: file inventory, schema, label counts per cell,
-suspected leakage variables, risk list. `docs/EDA/data_memo.md`, regenerated on every corpus change
-([06 X7](06-cross-pool.md)).
+**[`docs/EDA/data_memo.md`](data_memo.md)** — inventory, schema, class imbalance, domain shift, the
+leakage hypothesis, and the risk list, every figure measured and named with the command that
+reproduces it. It is the EDA's exit condition ([06 X7](06-cross-pool.md)) and the input document for
+the processing-strategy phase.
 
-It is also the **input document for the processing-strategy phase**, which is what the whole EDA has
-been for. The six findings in step 6 are its spine.
+The three things it asks you to carry forward:
+
+1. **Duration is the shortcut, and only the sampler can fix it** — nothing in the render chain
+   changes a file's length.
+2. **Above 8 kHz is not available** — ten of fourteen sources have nothing there to begin with.
+3. **Level and metadata are publisher fingerprints** — metadata is already handled by the render
+   chain; level is not, yet.
 
 ---
 
