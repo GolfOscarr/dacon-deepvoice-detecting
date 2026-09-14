@@ -77,14 +77,18 @@ def test_the_vendored_model_is_verified_against_its_digest():
 
     assert vendor.MODEL_PATH.exists()
     real = vendor.MODEL_SHA256
-    vendor._MODEL = None
+    # ⚠️ Both the per-thread cache and the once-only verify flag have to be
+    # cleared, or the check is skipped and this passes for the wrong reason.
+    vendor._LOCAL = vendor.threading.local()
+    vendor._VERIFIED = False
     vendor.MODEL_SHA256 = "0" * 64
     try:
         with pytest.raises(RuntimeError, match="expected 000000000000"):
             vendor.load_vad()
     finally:
         vendor.MODEL_SHA256 = real
-        vendor._MODEL = None
+        vendor._LOCAL = vendor.threading.local()
+        vendor._VERIFIED = False
 
 
 def test_the_vad_refuses_a_rate_it_was_not_vendored_for():
@@ -196,3 +200,38 @@ def test_a_decode_failure_emits_every_content_column_unsuffixed(tmp_path):
     assert scalars["signal_ok"] is False
     assert set(COLUMNS) <= set(scalars), "every content column, on a failed row"
     assert scalars["vad_ok"] is False and scalars["vad_error"] == "decode failed"
+
+
+def test_batching_the_chunks_is_not_the_same_as_streaming_them():
+    """🔴 The model takes `(batch, 512)` and returns `(batch, 1)`, which looks
+    like a free speed-up. It is not: the batch dimension is independent
+    streams, so batching one file's chunks throws away the recurrent state.
+
+    This test does not guard our code -- it guards a *temptation*. Measured on
+    this clip: sequential mean 0.0186 against batched 0.0467, max absolute
+    difference 0.107. Both are plausible numbers and only one is the model used
+    as designed, which is why the difference is asserted here rather than left
+    in a comment.
+    """
+    import torch
+
+    from models.vendor.silero_vad import load_vad, speech_probabilities
+
+    rng = np.random.default_rng(1)
+    x = np.concatenate([rng.standard_normal(SR * 2) * 0.005,
+                        rng.standard_normal(SR * 2) * 0.20,
+                        rng.standard_normal(SR * 2) * 0.005]).astype(np.float32)
+    sequential = speech_probabilities(x, SR)
+
+    model = load_vad()
+    n = len(sequential)
+    chunks = torch.stack([torch.from_numpy(x[i * CHUNK:(i + 1) * CHUNK])
+                          for i in range(n)])
+    model.reset_states()
+    with torch.no_grad():
+        batched = model(chunks, SR).numpy().ravel()
+
+    assert np.abs(sequential - batched).max() > 0.05, (
+        "if these ever agree, re-read the upstream model: this test encodes "
+        "that they must not, and a version that batches correctly would change "
+        "what `speech_probabilities` should do")
