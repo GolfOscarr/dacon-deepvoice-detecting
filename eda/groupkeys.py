@@ -39,6 +39,7 @@ gate can see. Every fallback here errs toward merging.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Callable
@@ -293,6 +294,66 @@ def _wavefake(cfg: EdaConfig, source: SourceSpec, files: pd.DataFrame) -> GroupK
                      "speaker (shared with `ljspeech`) or JSUT's", keys)
 
 
+
+#: 🔴 CompSpoof's environmental half is **segmented**: one parent recording
+#: becomes many 4 s files, and its two splits share parents. Measured on the
+#: full census: **277 parent recordings appear in both `eval_source` and
+#: `test_source`, over 1,070 files -- 8.1% of the source** -- and 17 stems are
+#: byte-identical across the split. Grouping by the split (the path's own
+#: answer, 6 groups) therefore does *not* keep a recording together, and a fold
+#: built on it puts segment 0 of a Helsinki bus in train and segment 1 in
+#: validation.
+#:
+#: One rule per subtree, because each carries a different publisher's naming.
+#: Every rule was read off the files rather than assumed:
+#:
+#: * `AudioCapsEnv`   `Y-4B1PkgXOMI_80_seg000`          -> the YouTube id
+#: * `VGGSoundEnv`    `-3z5mFRgbxc_000030.mp4_chunk1`   -> the YouTube id
+#: * `TUTASC2019Dev`  `airport-barcelona-0-12-a_0`      -> the clip
+#: * `TUTSED*`        `a001_33`                         -> the recording
+#: * `UrbanSound8K`   `100263-2-0-137`                  -> the Freesound id
+_COMPSPOOF_PARENT = (
+    ("AudioCapsEnv", re.compile(r"^(.+?)_\d+_seg\d+$")),
+    ("VGGSoundEnv", re.compile(r"^(.+?)_\d+\.mp4_chunk\d+$")),
+    ("UrbanSound8K", re.compile(r"^(\d+)-")),
+    ("TUT", re.compile(r"^(.+?)_\d+$")),
+)
+
+
+def _compspoof(cfg: EdaConfig, source: SourceSpec,
+               files: pd.DataFrame) -> GroupKeys:
+    """The parent recording, not the split the publisher filed it under.
+
+    ⚠️ The split is deliberately **not** in the key. It is what the path offers
+    and it is the wrong atom: `eval_source` and `test_source` share 277 parent
+    recordings, so a key containing the split would report 6 tidy groups and
+    leak every one of those parents across the fold boundary it was supposed to
+    prevent.
+
+    A stem that matches no rule keeps its whole self as the parent -- a group of
+    one, which is the safe direction: it can never merge two recordings, only
+    fail to merge segments of one.
+    """
+    def key(file_id: str) -> str:
+        rel = PurePosixPath(relpath_of(file_id))
+        subtree = "/".join(rel.parts[1:-1])
+        stem = rel.stem
+        for marker, pattern in _COMPSPOOF_PARENT:
+            if marker in subtree:
+                match = pattern.match(stem)
+                if match:
+                    return f"{source.name}/{subtree}/{match.group(1)}"
+                break
+        return f"{source.name}/{subtree}/{stem}"
+
+    keys = pd.Series([key(f) for f in files["file_id"]],
+                     index=files["file_id"], dtype="object")
+    keys = _check_total(source.name, files, keys, "the parent recording")
+    return GroupKeys(source.name, PUBLISHER,
+                     "the parent recording behind each 4 s segment, per "
+                     "subtree; the split is deliberately not in the key", keys)
+
+
 #: Source name -> provider. A source absent from this table falls back to path
 #: depth and is reported with kind `path`, so nothing is silent either way.
 PROVIDERS: dict[str, Provider] = {
@@ -302,6 +363,7 @@ PROVIDERS: dict[str, Provider] = {
     "rirs-isotropic-noise": _rirs_isotropic_noise,
     "ljspeech": _ljspeech,
     "wavefake": _wavefake,
+    "compspoof-env-bonafide": _compspoof,
 }
 
 #: Every runnable source without a provider, and why. 🔴 An entry here is a
@@ -318,7 +380,6 @@ NO_PROVIDER = {
     "fma": "FMA's numbered shard directories -- ⚠️ not artist; its own "
            "`tracks.csv` has `artist`/`album` and is the better key once the "
            "metadata archive is fetched",
-    "compspoof-env-bonafide": "CompSpoof's environment directories",
     "musan-noise": "collection only (`free-sound`, `sound-bible`); MUSAN "
                    "publishes no per-recording key for noise, so 2 atoms is "
                    "the count rather than a gap",

@@ -356,3 +356,66 @@ def test_the_shipped_config_drops_wavefakes_duplicate_copy_of_its_own_files():
     assert wavefake.excludes_path(
         "generated_audio/common_voices_prompts_from_conformer_fastspeech2_pwg_"
         "ljspeech/generated/gen_0.wav")
+
+
+def test_compspoof_groups_by_parent_recording_not_by_split(tmp_path):
+    """🔴 CompSpoof is segmented: one parent recording becomes many 4 s files,
+    and its two splits share parents. Measured on the full census: **292 parent
+    recordings appear in both `eval_source` and `test_source`, over 1,060
+    files**. The path's own answer -- split x dataset, 6 tidy groups -- puts
+    segment 0 of a Helsinki bus in train and segment 1 in validation.
+
+    Mutation: the split put back into the key (`rel.parts[0:-1]` instead of
+    `rel.parts[1:-1]`). The group count barely moves and every one of those
+    1,060 files starts leaking again.
+    """
+    cfg = EdaConfig(root=tmp_path, out=tmp_path / "out",
+                    sources=(SourceSpec(name="compspoof-env-bonafide", pool="E",
+                                        root="c"),))
+    files = _census([
+        ("compspoof-env-bonafide",
+         f"{split}/env_sources/EnvSDD/bonafide/TUTASC2019Dev/"
+         f"bus-helsinki-20-789-a_{i}.wav")
+        for split, i in (("eval_source", 0), ("test_source", 1))])
+    out = gk.attach_group_keys(cfg, files)
+    assert out[gk.KEY_COLUMN].nunique() == 1, (
+        "two segments of one recording must be one group whatever split they "
+        "were filed under")
+
+
+def test_each_compspoof_subtree_gets_its_publisher_s_own_parent_rule():
+    """Every rule was read off the files. Mutation: any one pattern loosened to
+    `(.+)`, which makes the parent the whole stem and the segments stop
+    grouping."""
+    from eda.groupkeys import _COMPSPOOF_PARENT
+
+    cases = {
+        "env_sources/AudioCapsEnv/bonafide": ("Y-4B1PkgXOMI_80_seg000",
+                                              "Y-4B1PkgXOMI"),
+        "env_sources/VGGSoundEnv/bonafide": ("-3z5mFRgbxc_000030.mp4_chunk1",
+                                             "-3z5mFRgbxc"),
+        "env_sources/EnvSDD/bonafide/UrbanSound8K": ("100263-2-0-137", "100263"),
+        "env_sources/EnvSDD/bonafide/TUTASC2019Dev": (
+            "airport-barcelona-0-12-a_0", "airport-barcelona-0-12-a"),
+        "env_sources/EnvSDD/bonafide/TUTSED2016Dev": ("a001_33", "a001"),
+    }
+    for subtree, (stem, want) in cases.items():
+        for marker, pattern in _COMPSPOOF_PARENT:
+            if marker in subtree:
+                assert pattern.match(stem).group(1) == want, (subtree, stem)
+                break
+        else:
+            raise AssertionError(f"no rule matched {subtree}")
+
+
+def test_an_unrecognised_compspoof_stem_becomes_its_own_group(tmp_path):
+    """The safe direction: a group of one can never merge two recordings, only
+    fail to merge segments of one."""
+    cfg = EdaConfig(root=tmp_path, out=tmp_path / "out",
+                    sources=(SourceSpec(name="compspoof-env-bonafide", pool="E",
+                                        root="c"),))
+    files = _census([("compspoof-env-bonafide",
+                      "eval_source/env_sources/Unknown/bonafide/odd-name.wav")])
+    out = gk.attach_group_keys(cfg, files)
+    assert out[gk.KEY_COLUMN].notna().all()
+    assert out[gk.KEY_COLUMN].nunique() == 1

@@ -29,8 +29,9 @@ from eda.analyze.shortcut import METADATA_FEATURES
 from eda.planes import CHAIN, NATIVE, PLANES
 
 __all__ = ["CHAIN_EXCLUDED", "SIGNAL_SCALARS", "TEST_MAX_S", "TEST_MIN_S",
-           "bandwidth_report", "duration_report", "level_report",
-           "plane_features", "paired", "signal_audit"]
+           "DUPLICATE_COSINE", "bandwidth_report", "content_fingerprints",
+           "content_similarity_profile", "duration_report", "level_report",
+           "near_duplicates", "plane_features", "paired", "signal_audit"]
 
 #: The competition's test set: 1,200 files, **4-60 s, 16 kHz**
 #: (docs/competition/01). Every duration statistic here is read against it,
@@ -243,3 +244,146 @@ def signal_audit(signal: pd.DataFrame, cfg=None, *, plane: str = CHAIN,
 
     return shortcut_audit(signal, cfg, features=plane_features(plane),
                           group_column=group_column)
+
+
+# --------------------------------------------------------------------------- #
+# E1 pass 2: duplicates by content rather than by bytes
+# --------------------------------------------------------------------------- #
+
+#: Cosine similarity above which two files are reported as the same content.
+#: 🔴 Calibrated, not guessed -- `content_similarity_profile` reports the
+#: distribution this sits in, and docs/EDA/05 E1b records what it found there.
+#: Deliberately severe: the sweep exists to *name* suspects for a human to
+#: confirm, and a permissive threshold over 58,885 files produces a list nobody
+#: reads.
+DUPLICATE_COSINE = 0.999
+
+
+def content_fingerprints(vectors: dict[str, np.ndarray], meta: pd.DataFrame
+                         ) -> tuple[np.ndarray, pd.DataFrame]:
+    """Chain-plane LTAS as a content fingerprint: z-scored, then L2-normalised.
+
+    🔴 **Chain plane, and z-scored per row.** E1 pass 1 compares sha256 and so
+    cannot see a file that was re-encoded, re-containered or published at a
+    second sample rate. The chain plane puts every file at 16 kHz, so a rate
+    difference stops being a difference; z-scoring each row removes the overall
+    level, so a re-mastered copy still matches its original.
+
+    ⚠️ **It is a timbre fingerprint, not an identity one, and the difference was
+    measured rather than assumed.** The median file's best match among 58,883
+    others is already **cosine 0.965**, and at a 0.999 threshold the top hits
+    include `bus-helsinki-20-789-a_0` against `bus-vienna-38-1134-a_0` -- two
+    different recordings of a bus, whose long-term spectra agree because buses
+    sound like buses. Decoded and compared sample by sample, those pairs differ
+    by up to 0.61 in amplitude.
+
+    So this **shortlists candidates**; it does not confirm duplicates. A hit is
+    a pair worth looking at, and what confirmed the real finding in
+    [05 E1b](../../docs/EDA/05-pool-e-noise.md) was the publisher\'s own
+    filenames, not this number.
+
+    ⚠️ Rows whose vectors failed are dropped and counted on the frame. An
+    all-NaN row L2-normalises to NaN and would match nothing while silently
+    shrinking every denominator.
+    """
+    ltas = np.asarray(vectors[f"ltas_{CHAIN}"], dtype=np.float64)
+    ids = np.asarray(vectors["file_id"], dtype=object)
+    if len(ltas) != len(meta):
+        raise ValueError(
+            f"{len(ltas)} vector row(s) against {len(meta)} metadata row(s); "
+            f"they are joined by position and must be the same table")
+
+    good = ~np.isnan(ltas).any(axis=1)
+    ltas, ids, kept = ltas[good], ids[good], meta[good].reset_index(drop=True)
+
+    centred = ltas - ltas.mean(axis=1, keepdims=True)
+    scale = centred.std(axis=1, keepdims=True)
+    # A row with no spectral variation at all -- digital silence -- would divide
+    # by zero and then match every other silent file at cosine 1.0. It is a real
+    # finding, but it is `mel_bands_flat`'s finding, not a duplicate.
+    flat = (scale.ravel() == 0.0)
+    scale[flat] = 1.0
+    unit = centred / scale
+    norm = np.linalg.norm(unit, axis=1, keepdims=True)
+    norm[norm == 0.0] = 1.0
+    out = (unit / norm).astype(np.float32)
+
+    kept = kept.assign(file_id=ids)
+    kept.attrs["dropped"] = int((~good).sum())
+    kept.attrs["flat"] = int(flat.sum())
+    return out, kept
+
+
+def near_duplicates(fingerprints: np.ndarray, meta: pd.DataFrame, *,
+                    threshold: float = DUPLICATE_COSINE, block: int = 1024
+                    ) -> pd.DataFrame:
+    """Every pair above `threshold`, with both sides' source and partition.
+
+    Blocked matrix multiply rather than a neighbour index: the fingerprint is
+    128-dimensional, so the full 58,885-square product is ~4e11 flops and runs
+    in seconds, while a tree index degrades badly at that dimension and an
+    approximate one would make the answer depend on a random seed.
+
+    Pairs are upper-triangular -- `i < j` -- so a pair is reported once.
+    """
+    n = len(fingerprints)
+    if n != len(meta):
+        raise ValueError(f"{n} fingerprint(s) against {len(meta)} row(s)")
+    source = meta["source_name"].to_numpy()
+    partition = meta["partition"].to_numpy()
+    ids = meta["file_id"].to_numpy()
+    # 🔴 The column this sweep exists for. A near-duplicate pair inside one
+    # group is the grouping working -- ten microphones on one room, two takes by
+    # one speaker -- and costs nothing. A pair that **straddles** two groups is
+    # a fold leak that `group_key` does not catch, because the fold builder will
+    # happily put one side in train and the other in validation.
+    has_group = "group_key" in meta.columns
+    group = (meta["group_key"].to_numpy() if has_group
+             else np.full(len(meta), None, dtype=object))
+    rows = []
+    for start in range(0, n, block):
+        stop = min(start + block, n)
+        sim = fingerprints[start:stop] @ fingerprints.T
+        # Upper triangle only: column index must exceed the absolute row index.
+        cols = np.arange(n)[None, :]
+        sim[cols <= np.arange(start, stop)[:, None]] = -np.inf
+        hit_r, hit_c = np.nonzero(sim >= threshold)
+        for r, c in zip(hit_r, hit_c):
+            i = start + int(r)
+            rows.append({"file_id_a": ids[i], "file_id_b": ids[c],
+                         "source_a": source[i], "source_b": source[c],
+                         "partition_a": partition[i], "partition_b": partition[c],
+                         "cosine": float(sim[r, c]),
+                         "group_a": group[i], "group_b": group[c],
+                         "cross_source": source[i] != source[c],
+                         "cross_partition": partition[i] != partition[c],
+                         "cross_group": (group[i] != group[c]) if has_group
+                         else None})
+    return pd.DataFrame(rows, columns=["file_id_a", "file_id_b", "source_a",
+                                       "source_b", "partition_a", "partition_b",
+                                       "group_a", "group_b", "cosine",
+                                       "cross_source", "cross_partition",
+                                       "cross_group"])
+
+
+def content_similarity_profile(fingerprints: np.ndarray, *, block: int = 1024,
+                               quantiles=(0.5, 0.9, 0.99, 0.999, 1.0)
+                               ) -> pd.DataFrame:
+    """The distribution of each file's **best** match to any other file.
+
+    🔴 This is what makes `DUPLICATE_COSINE` a calibration rather than a guess.
+    A threshold picked without knowing where the bulk of top-1 similarities sit
+    is a number that either reports everything or nothing, and both read as a
+    clean corpus.
+    """
+    n = len(fingerprints)
+    best = np.full(n, -np.inf)
+    for start in range(0, n, block):
+        stop = min(start + block, n)
+        sim = fingerprints[start:stop] @ fingerprints.T
+        np.fill_diagonal(sim[:, start:stop], -np.inf)
+        best[start:stop] = sim.max(axis=1)
+    series = pd.Series(best)
+    return pd.DataFrame({"quantile": list(quantiles),
+                         "top1_cosine": [float(series.quantile(q))
+                                         for q in quantiles]})
