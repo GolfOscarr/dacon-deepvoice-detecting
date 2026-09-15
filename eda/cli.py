@@ -19,6 +19,8 @@ from eda.analyze import duplicates as dup
 from eda.analyze import grouping as grp
 from eda.analyze import shortcut as sc
 from eda.analyze import signal as sig
+from eda.analyze import pairs as prs
+from eda import driver as drv
 from eda import groupkeys
 from eda.config import load_eda_config
 from eda.groupkeys import key_report
@@ -26,6 +28,7 @@ from eda.driver import (BlockedSource, NotProbed, consolidate, load_files,
                         load_signal, probe_source, signal_partition)
 from eda.sample import SampleExists, draw, load_sample
 from eda.gates import FAIL, run_gates
+from eda.planes import CHAIN, NATIVE, PLANES
 
 DEFAULT_CONFIG = "configs/eda.yaml"
 
@@ -371,6 +374,103 @@ def cmd_gates(cfg, args) -> int:
     return 1 if (gates["verdict"] == FAIL).any() else 0
 
 
+def cmd_b1(cfg, args) -> int:
+    """B1, read: the paired vocoder experiment (docs/EDA/02 B1, docs/EDA/10 §2.1).
+
+    Reads the artifacts `pair_signal` wrote and reduces them. Nothing here
+    decodes -- the decode is its own step for the reason `sample` is separate
+    from `signal`: the selection and the measurement decide every number that
+    gets published, and a reader must be able to see them before a reduction
+    reinterprets them.
+    """
+    out = cfg.out / "_shared" / drv.B1_DIR
+    pairs_path, signal_path = out / drv.B1_PAIRS, out / drv.B1_SIGNAL
+    vectors_path = out / drv.B1_VECTORS
+    missing = [p.name for p in (pairs_path, signal_path, vectors_path)
+               if not p.exists()]
+    if missing:
+        print(f"B1 has not been measured: {out} is missing {missing}",
+              file=sys.stderr)
+        return 1
+
+    drawn = pd.read_parquet(pairs_path)
+    signal = pd.read_parquet(signal_path)
+    ok = signal["signal_ok"].fillna(False)
+    print(f"=== B1: {drawn['utterance'].nunique()} utterances x "
+          f"{prs.PAIR_SIZE} files = {len(signal)} rows, "
+          f"{int(ok.sum())} decoded, {int((~ok).sum())} failure(s)")
+
+    # 🔴 A failed decode leaves its pair incomplete, and an incomplete pair must
+    # leave the reduction entirely -- otherwise one vocoder's mean is over 500
+    # utterances and its neighbour's is over 499, and the difference between
+    # them reads as a vocoder effect.
+    whole = signal.loc[ok, "utterance"].value_counts()
+    keep = set(whole[whole == prs.PAIR_SIZE].index)
+    dropped = drawn["utterance"].nunique() - len(keep)
+    if dropped:
+        print(f"    ⚠️  {dropped} utterance(s) dropped: a decode failure leaves "
+              f"the pair incomplete, and a short pair cannot be averaged")
+    usable = drawn[drawn["utterance"].isin(keep)]
+    print(f"    {len(keep)} complete pair(s) enter the reduction")
+
+    images = {}
+    for plane in PLANES:
+        vectors = drv.load_pair_vectors(vectors_path, f"ltas_{plane}")
+        images[plane] = prs.difference_images(vectors, usable)
+
+    survive = prs.surviving_fraction(images[NATIVE], images[CHAIN])
+    print(f"\n=== per vocoder: E[mel(fake) - mel(real)], and what survives "
+          f"16 kHz\n    ⚠️  the bank is 0-8000 Hz on both planes, so this "
+          f"cannot see above the cut; `hf_ratio_8k` below is that half")
+    _show(survive)
+    survive.to_parquet(out / "b1_surviving_fraction.parquet", index=False)
+
+    # The half the mel bank is blind to, paired the same way.
+    hf = _paired_scalar(signal[ok], "hf_ratio_8k_native", keep)
+    print(f"\n=== above the cut: native hf_ratio_8k, fake - real, per pair")
+    _show(hf)
+    hf.to_parquet(out / "b1_hf_ratio.parquet", index=False)
+
+    for plane in PLANES:
+        matrix = prs.family_correlation(images[plane])
+        print(f"\n=== artifact-family correlation, {plane} plane "
+              f"(docs/validation/01 splits on family, not model name)")
+        _show(matrix.round(3).reset_index(names="vocoder"))
+        matrix.to_parquet(out / f"b1_family_correlation_{plane}.parquet")
+
+    frame = pd.DataFrame({v: images[NATIVE][v] for v in prs.VOCODERS
+                          if v in images[NATIVE]})
+    frame.to_parquet(out / "b1_difference_native.parquet", index=False)
+    pd.DataFrame({v: images[CHAIN][v] for v in prs.VOCODERS
+                  if v in images[CHAIN]}).to_parquet(
+        out / "b1_difference_chain.parquet", index=False)
+    print(f"\nwrote B1's tables to {out}")
+    return 0
+
+
+def _paired_scalar(signal: pd.DataFrame, column: str,
+                   keep: set[str]) -> pd.DataFrame:
+    """Per vocoder: the mean of `fake - real` for one scalar, over whole pairs.
+
+    Paired for the same reason `difference_images` is -- the real file is the
+    control for its own fake, and a population difference would carry the
+    content variation with it.
+    """
+    wide = (signal[signal["utterance"].isin(keep)]
+            .pivot(index="utterance", columns="role", values=column))
+    rows = []
+    for vocoder in prs.VOCODERS:
+        if vocoder not in wide.columns:
+            continue
+        delta = wide[vocoder] - wide[prs.REAL_ROLE]
+        rows.append({"vocoder": vocoder, "real_mean": float(wide[prs.REAL_ROLE].mean()),
+                     "fake_mean": float(wide[vocoder].mean()),
+                     "delta_mean": float(delta.mean()),
+                     "delta_std": float(delta.std()),
+                     "n_pairs": int(delta.notna().sum())})
+    return pd.DataFrame(rows)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="eda", description=__doc__)
     p.add_argument("--config", default=DEFAULT_CONFIG, type=Path)
@@ -418,6 +518,9 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("gates", help="re-read the saved analyses and re-run the gates")
     s.set_defaults(fn=cmd_gates)
+
+    s = sub.add_parser("b1", help="B1: the paired vocoder experiment, read")
+    s.set_defaults(fn=cmd_b1)
 
     args = p.parse_args(argv)
     return args.fn(load_eda_config(args.config), args)

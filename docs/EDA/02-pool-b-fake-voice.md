@@ -169,6 +169,130 @@ files are not byte-identical — they are the same content through different syn
 
 ---
 
+## B1b — ✅ Answered 2026-09-16: the artifact does **not** die at 16 kHz
+
+**Population.** 500 utterances drawn at seed 0 from the **13,100 that resolve to all eight files**
+(the real one plus all seven vocoders) — every LJSpeech utterance is completely paired, so the draw
+was unconstrained. 4,000 files decoded on both planes, **0 decode failures**, 7.41 audio-hours in
+10.7 min. Artifacts under `eda/out/_shared/b1/`; re-read with `python -m eda.cli b1`.
+
+⚠️ This is a **separate selection**, not the S-tier draw. Only 128 of 13,100 utterances are
+incidentally pairable inside `sample.json`, which is far too thin for a per-vocoder mean, and the
+recorded draw is part of the corpus definition ([00 §3](00-harness.md)) — so B1 wrote its own
+artifact and left it alone.
+
+🔴 **The trap this experiment nearly fell into.** WaveFake ships **three** filename conventions and
+announces none of them: `_gen.wav` in five directories, `_generated.wav` in `ljspeech_hifiGAN`, and
+a bare `.wav` in `ljspeech_waveglow`. The natural join resolves five of seven and silently drops
+HiFi-GAN and WaveGlow — a five-column table where the plan asked for seven, failing as a *thin
+result* rather than an error. `eda.analyze.pairs` therefore refuses an utterance that does not
+resolve to all eight files, and two mutants hold the two odd suffixes in place.
+
+### B1b-i — What survives the chain: **82–115%**
+
+Energy of the `[128]` difference image, `chain` against `native`. The mel bank is pinned to an
+absolute 0–8000 Hz on both planes ([`eda/extract/vectors.py`](../../eda/extract/vectors.py)), so the
+two images are band-for-band comparable and the ratio subtracts the same thing.
+
+| vocoder | energy native | energy chain | **surviving** | peak band (native) |
+|---|--:|--:|--:|--:|
+| `parallel_wavegan` | 364.97 | 301.36 | **0.826** | 1 (28 Hz) |
+| `waveglow` | 274.37 | 247.95 | **0.904** | 1 |
+| `multi_band_melgan` | 198.02 | 183.20 | **0.925** | **114 (5.9 kHz)** |
+| `hifiGAN` | 163.18 | 134.11 | **0.822** | 1 |
+| `melgan` | 54.74 | 57.22 | **1.045** | 1 |
+| `melgan_large` | 41.85 | 48.18 | **1.151** | 1 |
+| `full_band_melgan` | 26.72 | 22.35 | **0.837** | 1 |
+
+🔴 **This overturns the expectation B1 was written to test.** [B1](#b1---wavefake--ljspeech-pair-reconstruction--tier-s-and-the-highest-value-item-in-this-pool)
+predicted that *"vocoder artifacts are classically concentrated in the upper spectrum"* and that the
+16 kHz cut would therefore be the voice head's central difficulty. It is not. **The artifact lives
+below 8 kHz and arrives at the model essentially intact.** Per-band, the dominant term for five of
+seven vocoders is **sub-speech rumble below 72 Hz** that the vocoder invents and LJSpeech does not
+have — `+5.58 dB` for Parallel WaveGAN, `+5.50 dB` for WaveGlow, `+2.37 dB` for MelGAN. Nothing
+about a 16 kHz resample touches 28 Hz.
+
+⚠️ **Two ratios exceed 1.0 and that is not a bug.** For `melgan` and `melgan_large` the chain
+*deepens* the artifact. The mechanism is visible in the per-band table and corroborated by B1b-ii:
+both vocoders are already short of energy above 8 kHz, so the resampler's near-Nyquist rolloff
+tilts their top bands further negative (`melgan` bands 120–127 go `−0.115 → −0.411 dB`), and energy
+is a sum of squares. The chain does not remove this artifact; it slightly sharpens it.
+
+### B1b-ii — Above the cut, and why the sign matters
+
+`hf_ratio_8k` on the **native** plane, paired `fake − real`, 500 pairs each. Real mean `0.0289`.
+
+| vocoder | fake mean | **Δ mean** | Δ std |
+|---|--:|--:|--:|
+| `parallel_wavegan` | 0.0165 | **−0.0124** | 0.0188 |
+| `melgan_large` | 0.0187 | **−0.0102** | 0.0131 |
+| `full_band_melgan` | 0.0208 | **−0.0081** | 0.0143 |
+| `melgan` | 0.0231 | **−0.0058** | 0.0125 |
+| `hifiGAN` | 0.0263 | **−0.0026** | 0.0171 |
+| `multi_band_melgan` | 0.0272 | **−0.0017** | 0.0149 |
+| `waveglow` | 0.0425 | **+0.0136** | 0.0210 |
+
+There **is** signal above the cut, and the chain throws all of it away. But ⚠️ **the sign is not
+consistent**: six vocoders under-produce high frequency and WaveGlow over-produces it by more than
+any of them under-produce. A "fake audio is missing its top octave" heuristic — which is the
+folk rule this corpus was most likely to absorb — would be **actively wrong on WaveGlow**, and
+every Δ here is smaller than its own standard deviation. This is a population effect, not a
+per-file test.
+
+### B1b-iii — Artifact families: the names are wrong
+
+Correlation between difference images, native plane (chain is in
+`b1_family_correlation_chain.parquet` and tells the same story).
+
+| | fbm | hifi | mel | mel-L | mbm | pwg | wg |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| `full_band_melgan` | 1.000 | 0.705 | 0.418 | 0.375 | 0.659 | 0.633 | 0.714 |
+| `hifiGAN` | 0.705 | 1.000 | 0.268 | 0.291 | 0.508 | 0.641 | 0.688 |
+| `melgan` | 0.418 | 0.268 | 1.000 | **0.895** | **−0.186** | 0.411 | 0.571 |
+| `melgan_large` | 0.375 | 0.291 | **0.895** | 1.000 | **−0.086** | 0.345 | 0.514 |
+| `multi_band_melgan` | 0.659 | 0.508 | **−0.186** | **−0.086** | 1.000 | 0.279 | 0.393 |
+| `parallel_wavegan` | 0.633 | 0.641 | 0.411 | 0.345 | 0.279 | 1.000 | 0.742 |
+| `waveglow` | 0.714 | 0.688 | 0.571 | 0.514 | 0.393 | 0.742 | 1.000 |
+
+🔴 **This is the direct evidence [validation/01](../validation/01-split-scheme.md) was asserting
+without any.** That page splits folds on **artifact family, not model name**, on the argument that
+model names over-count. The measurement says the names are worse than over-counting — they are
+*anti-correlated with the truth* in the one place it matters most:
+
+* `melgan` ↔ `melgan_large` correlate at **0.895** — one family, as the names suggest.
+* `melgan` ↔ `multi_band_melgan` correlate at **−0.186**. They share a name and have **opposite**
+  artifacts: MelGAN's signature is low-frequency rumble (band 1), Multi-band MelGAN's is a
+  mid-high bump at **band 114, 5.9 kHz** — the only vocoder in the set whose peak is not at the
+  bottom, and plausibly its sub-band crossovers. A fold builder that grouped "the MelGANs" by name
+  would put two opposite artifacts in one family and split the one real family it had.
+
+**Working family assignment**, at a 0.70 cut: `{melgan, melgan_large}` · `{multi_band_melgan}` ·
+`{full_band_melgan, hifiGAN, waveglow, parallel_wavegan}` — noting that the third is a weak
+grouping (0.63–0.74) and is the one to revisit when the fold table exists.
+
+### B1b-iv — What this changes
+
+1. **The voice head is more tractable than assumed.** Its artifact survives the competition's own
+   standardization at 82–115%. The pessimism in
+   [X1d](06-cross-pool.md) about voice-head collapse (`voice_fake` 0.401 under an archive holdout)
+   is about *confounding*, not about signal availability — this measurement removes every confound
+   and the signal is there.
+2. 🔴 **A high-pass is not free.** Five of seven vocoder signatures are concentrated below 72 Hz.
+   Any render-time DC-removal or rumble filter would delete the largest single discriminative
+   feature this corpus has for pool B. [`eda/planes.py`](../../eda/planes.py) currently applies
+   neither, and this is now a reason to keep it that way — the question it says is
+   *"answered with the corpus rather than assumed"* is answered here, for the voice side: **do not
+   high-pass.**
+3. **`artifact_family` is measured, not named.** See B1b-iii.
+
+**Still open.** `pair_id` is populated for the 500 drawn utterances in `b1_pairs.parquet`, not for
+all 13,100 in the manifest. **G-EDA4** stays `na` until a fold table exists (Phase 2), and whether
+the full population needs `pair_id` is a fold-builder decision, not an EDA one. ⚠️ The trap B1
+flagged is unchanged and still live: LJSpeech sits in pool A and its re-synthesis sits in pool B, so
+the same underlying recording is on both sides of the label and **hashing cannot catch it**.
+
+---
+
 ## B2 — MLAAD generator and language inventory 🔴 Tier S
 
 **Compute.** Walk the `fake/<language>/<generator>/` tree from `_meta/selection.json` and the S3

@@ -15,7 +15,10 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 | ⛔ **blocked** | needs an input we do not hold |
 | ⏭️ **Phase 2** | out of the EDA's scope by design |
 
-**19 answered · 7 data-exists · 8 runnable · 7 blocked · 2 Phase 2 = 43.**
+**20 answered · 7 data-exists · 7 runnable · 7 blocked · 2 Phase 2 = 43.**
+
+> **B1 closed 2026-09-16** ([02 B1b](02-pool-b-fake-voice.md)). Step 1 of §2 is done;
+> steps 2 and 3 remain, and neither decodes.
 
 ⚠️ `A9`, `C8`, `D8`, `D9` are **result sections**, not tasks, and are not counted here.
 
@@ -41,7 +44,7 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 | | task | status | evidence / blocker |
 |---|---|---|---|
 | B0 | CFAD registered | ✅ | [02 B0](02-pool-b-fake-voice.md) |
-| **B1** | **WaveFake ↔ LJSpeech pairs** | ▶️ | 🔴 **the highest-value item left.** Only **128 of 13,100** utterances are incidentally pairable in the current draw |
+| **B1** | **WaveFake ↔ LJSpeech pairs** | ✅ | **Answered 2026-09-16**, [02 B1b](02-pool-b-fake-voice.md). 500 pairs, 4,000 files, 0 failures. The artifact **survives 16 kHz at 82–115%** and `melgan` ↔ `multi_band_melgan` correlate at **−0.186** |
 | B2 | MLAAD generator / language inventory | 📊 | `group_key` holds 54 language×generator groups; not tabulated |
 | B3 | Format census against pool A | 📊 | same data as A1 |
 | B4 | Degenerate-output screen (F-S4) | ▶️ | inputs measured (`clipping_ratio`, `silence_ratio`, level); no screen applied |
@@ -113,10 +116,10 @@ extra that was not produced, none of which changes a conclusion:
 
 ## 2 — The plan
 
-Everything runnable, in one session. **The only decode is B1's ~15 minutes** — steps 2 and 3 read
+Everything runnable, in one session. **The only decode was B1's, measured at 10.7 min** — steps 2 and 3 read
 columns already on disk. C5 is the one exception and §2.4 says why it is optional.
 
-### Step 1 — B1, the paired vocoder experiment 🔴
+### Step 1 — B1, the paired vocoder experiment ✅ **done 2026-09-16**
 
 The only unconfounded real/fake comparison in the corpus: same speaker, same utterance, same source
 recording, one vocoder apart. Everything else is confounded by speaker, text, archive or chain.
@@ -127,6 +130,9 @@ recording, one vocoder apart. Everything else is confounded by speaker, text, ar
 4. Populate `pair_id` so G-EDA4 has an input when the fold table exists.
 
 **Done when** a per-vocoder mel-difference table is saved and written into [02 B1](02-pool-b-fake-voice.md).
+✅ **Met.** Measured at **0.70 audio-hours/min**, 10.7 min — the `1.33` in [09](09-next-steps.md)
+is optimistic for a tier that runs S + V + C over one decode. ⚠️ Item 4 is only partly met:
+`pair_id` is populated for the 500 drawn utterances, not for all 13,100 (see [02 B1b](02-pool-b-fake-voice.md)).
 
 ### Step 2 — the four free screens
 

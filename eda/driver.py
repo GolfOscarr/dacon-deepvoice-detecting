@@ -593,3 +593,75 @@ def load_signal(cfg: EdaConfig, partitions: Sequence[str] | None = None
                           how="inner", validate="one_to_one")
     merged.attrs["missing_partitions"] = missing
     return merged
+
+
+#: B1's artifacts. Under `_shared/` rather than a partition directory because
+#: the experiment spans two partitions -- pool A's real half and pool B's fake
+#: half -- and filing it under either would make it invisible from the other.
+B1_DIR = "b1"
+B1_PAIRS = "b1_pairs.parquet"
+B1_SIGNAL = "b1_signal.parquet"
+B1_VECTORS = "b1_vectors.npz"
+
+
+def pair_signal(cfg: EdaConfig, drawn: pd.DataFrame, *, progress=None
+                ) -> tuple[pd.DataFrame, dict[str, np.ndarray]]:
+    """Decode B1's drawn pairs on both planes. Returns `(scalars, vectors)`.
+
+    🔴 Goes through `_signal_row`, the **same** function the S tier uses, so
+    B1's numbers are comparable with the corpus-wide ones column for column. A
+    purpose-written decode here would be a second measurement path that agrees
+    with the first until it quietly does not -- and B1's whole value is that its
+    two sides are measured identically.
+
+    ⚠️ `orig_sr` must be joined on from the census before calling this.
+    `_signal_row` passes it to `native_rate` as `declared`, which raises if the
+    decoder disagrees; without the column every row would be measured with no
+    cross-check at all (`eda.planes.native_rate`).
+    """
+    if "orig_sr" not in drawn.columns:
+        raise RuntimeError(
+            "the drawn pairs carry no `orig_sr`. Join it from files.parquet "
+            "first: without it the native plane is measured with no check that "
+            "the census and the decoder are looking at the same file")
+    roots = stage_roots(cfg)
+    rows = drawn.reset_index(drop=True)
+    scalars: list[dict[str, Any]] = []
+    vectors: list[dict[str, np.ndarray]] = []
+    with ThreadPoolExecutor(max_workers=cfg.probe.workers) as pool:
+        for idx, batch in shards(list(range(len(rows))), cfg.sample.shard_size):
+            out = list(pool.map(
+                # `partition` is the label the row carries, not a directory:
+                # B1 writes one table spanning A and B.
+                lambda i: _signal_row(cfg, rows.iloc[i], "b1", roots), batch))
+            scalars.extend(row for row, _ in out)
+            vectors.extend(vec for _, vec in out)
+            if progress is not None:
+                progress("b1", idx, len(out))
+
+    frame = pd.DataFrame(scalars)
+    # The pairing columns travel with the measurements. Without them every
+    # downstream step re-joins on `file_id` and one of them will get it wrong.
+    frame = frame.drop(columns=["partition"]).merge(
+        rows[["pair_id", "utterance", "role", "file_id"]], on="file_id",
+        how="left", validate="one_to_one")
+    stacked = {column: np.stack([vec[column] for vec in vectors]).astype(np.float32)
+               for column in sorted({c for vec in vectors for c in vec})}
+    stacked["file_id"] = np.asarray(frame["file_id"].tolist(), dtype=object)
+    return frame, stacked
+
+
+def load_pair_vectors(path: Path, column: str) -> dict[str, np.ndarray]:
+    """`file_id -> row` for one vector column of B1's npz.
+
+    A dict rather than the raw matrix because `eda.analyze.pairs` joins on
+    `file_id`, and indexing a matrix positionally against a table that was
+    filtered somewhere in between is the defect `_merge_vectors` exists to
+    prevent on the corpus-wide side.
+    """
+    with np.load(path, allow_pickle=True) as data:
+        if column not in data:
+            raise KeyError(
+                f"{path.name} has no {column!r}; it holds {sorted(data)}")
+        matrix, ids = data[column], data["file_id"]
+    return {str(f): matrix[i] for i, f in enumerate(ids)}
