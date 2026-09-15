@@ -15,10 +15,11 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 | ⛔ **blocked** | needs an input we do not hold |
 | ⏭️ **Phase 2** | out of the EDA's scope by design |
 
-**20 answered · 7 data-exists · 7 runnable · 7 blocked · 2 Phase 2 = 43.**
+**25 answered · 7 data-exists · 2 runnable · 7 blocked · 2 Phase 2 = 43.**
 
-> **B1 closed 2026-09-16** ([02 B1b](02-pool-b-fake-voice.md)). Step 1 of §2 is done;
-> steps 2 and 3 remain, and neither decodes.
+> **Steps 1 and 2 closed 2026-09-16.** B1, B4, D6, B6, E5 and X2 all have written answers.
+> **Only step 3 remains** -- `_shared/roles.md` and the six 📊 census write-ups -- and it does
+> not decode. C5 (step 4) is optional and [§2.4](#step-4--c5s-envelope-half-optional-and-probably-unnecessary) recommends closing it on reasoning.
 
 ⚠️ `A9`, `C8`, `D8`, `D9` are **result sections**, not tasks, and are not counted here.
 
@@ -47,9 +48,9 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 | **B1** | **WaveFake ↔ LJSpeech pairs** | ✅ | **Answered 2026-09-16**, [02 B1b](02-pool-b-fake-voice.md). 500 pairs, 4,000 files, 0 failures. The artifact **survives 16 kHz at 82–115%** and `melgan` ↔ `multi_band_melgan` correlate at **−0.186** |
 | B2 | MLAAD generator / language inventory | 📊 | `group_key` holds 54 language×generator groups; not tabulated |
 | B3 | Format census against pool A | 📊 | same data as A1 |
-| B4 | Degenerate-output screen (F-S4) | ▶️ | inputs measured (`clipping_ratio`, `silence_ratio`, level); no screen applied |
+| B4 | Degenerate-output screen (F-S4) | ✅ | **2026-09-16**, [02 B4b](02-pool-b-fake-voice.md). No failure population: pool D flags **0.40%**, the lowest of any pool. ⚠️ the looping detector needs a decode |
 | B5 | Duration / speaker-proxy census | ✅ | [02 B0c](02-pool-b-fake-voice.md) |
-| B6 | Cross-generator separability | ▶️ | over existing S-tier columns |
+| B6 | Cross-generator separability | ✅ | **2026-09-16**, [02 B6b](02-pool-b-fake-voice.md). Pool B median best-AUC **0.904**; pool D's `mustango` at **1.000** on duration alone |
 | B7 | CtrSVDD | ⛔ | source blocked (bonafide label only in train) |
 
 ### Pool C — real instrumental
@@ -73,7 +74,7 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 | D3 | Near-Nyquist per model, both planes | 📊 | `signal_bandwidth.parquet` is per source, not per generator |
 | D4 | Family-count shortfall vs fold builder | ⏭️ | needs a built fold table |
 | D5 | Caption / prompt census vs pool C | ⛔ | MusicCaps captions not fetched |
-| D6 | Degenerate-generation screen (F-S4) | ▶️ | as B4 |
+| D6 | Degenerate-generation screen (F-S4) | ✅ | **2026-09-16**, [04 D6b](04-pool-d-fake-instrumental.md). ⚠️ pool C flags **3.6×** more than D -- a drop would manufacture "clipping means REAL" |
 | D7 | SONICS as a whole-file source | ✅ | `configs/eda.yaml`, [04 D7](04-pool-d-fake-instrumental.md) |
 
 ### Pool E — non-musical sound
@@ -85,14 +86,14 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 | E2 | Noise recordings vs impulse responses | ✅ | [05 E0d](05-pool-e-noise.md) — split by `name_glob`, IRs blocked. ⚠️ Closed by a **different method** than the spec's energy-decay classification, and the per-row classification was never computed. The question it existed for — "are there IRs in pool E?" — is settled |
 | E3 | Duration census vs the sampler floor | ✅ | [05 E0e](05-pool-e-noise.md) — 58.4% |
 | E4 | Independent-group inventory | ✅ | 10,722 groups, `grouping_report.parquet` |
-| E5 | Cell-9 viability, `PRESENT=0` | ▶️ | over existing columns |
+| E5 | Cell-9 viability, `PRESENT=0` | ✅ | **2026-09-16**, [05 E5b](05-pool-e-noise.md). **11,901 viable (83.8%)**; **2,113** assert `PRESENT=0` while carrying voice |
 
 ### Cross-pool
 
 | | task | status | evidence / blocker |
 |---|---|---|---|
 | X1 | The shortcut audit | ✅ | [06 X1b/X1c/X1d](06-cross-pool.md), `shortcut_audit.parquet` |
-| X2 | The metadata-leak question | ▶️ | the doc calls it *"the one genuinely open feature question"* |
+| X2 | The metadata-leak question | ✅ | **2026-09-16**, [06 X2b](06-cross-pool.md). `music_fake` **AUC 1.000** from metadata, **0.209 / 0.0000008** under an archive holdout. **Decision: neutralise** |
 | X3 | Adversarial validation | ⛔ | needs the organizers' test audio |
 | X4 | Dummy-file forensics | ⛔ | 🔴 needs `TEST_0000–0002.wav`. **Not on disk** — searched the corpus, the repo and S3. Marked *blocking*; it leaves `normalize` unparameterized in the render path |
 | X5 | Composition confound, spec stream | ⏭️ | Phase 2 — X1 reads the corpus, this reads the spec stream |
@@ -134,7 +135,7 @@ recording, one vocoder apart. Everything else is confounded by speaker, text, ar
 is optimistic for a tier that runs S + V + C over one decode. ⚠️ Item 4 is only partly met:
 `pair_id` is populated for the 500 drawn utterances, not for all 13,100 (see [02 B1b](02-pool-b-fake-voice.md)).
 
-### Step 2 — the four free screens
+### Step 2 — the four free screens ✅ **done 2026-09-16**
 
 All over columns already on disk. No decode.
 

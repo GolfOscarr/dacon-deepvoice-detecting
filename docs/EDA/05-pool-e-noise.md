@@ -368,3 +368,39 @@ cell 9 a **0.115** share, the third largest.
 in the sampler's `cell_mix` if defensible material is scarcer than the mix assumes.
 ⚠️ Changing `cell_mix` re-triggers the C1/C3 soundness check in `SamplerConfig.__post_init__` —
 a mix that violates either fails at load, by design.
+
+---
+
+## E5b — ✅ Answered 2026-09-16: 11,901 files are defensibly cell 9, and 2,113 are not
+
+Silero VAD over all 14,194 decoded pool-E rows, chain plane
+(`eda.analyze.screens.cell9_viability`). Cell 9 is `(0, 0, None, None)`.
+
+| source | n | ≥ 4 s | unmeasured | **voice-evidenced** | **viable** | share |
+|---|--:|--:|--:|--:|--:|--:|
+| `compspoof-env-bonafide` | 13,172 | 13,172 | 0 | **2,006** | 11,166 | 84.8% |
+| `musan-noise` | 930 | 737 | 1 | 107 | 643 | 69.1% |
+| `rirs-isotropic-noise` | 92 | 92 | 0 | 0 | 92 | 100% |
+| **total** | **14,194** | **14,001** | **1** | **2,113** | **11,901** | **83.8%** |
+
+**11,901 files clear the sampler's 4 s floor with no speech evidence at all**, which comfortably
+supports the **0.115** cell-9 share `configs/run_default.yaml` currently gives — the third largest.
+The cell is viable on supply; what E5 said was unsettled was its *definition*, and this measurement
+does not settle that.
+
+🔴 **2,113 files assert `VOICE_PRESENT = 0` while carrying speech evidence.** The threshold is
+`vad_speech_ratio_50 > 0`, i.e. **any** evidence at all, and that is deliberate rather than
+conservative: [#417333 A3](../competition/05-talkboard-qa.md) confirms `PRESENT = 1` at *any*
+duration, so choosing a tolerance would mean choosing a level of audibility the rules say does not
+exist. These are reassignment candidates (F-A1) and they are the same work list as **G-EDA6** —
+CompSpoof's environmental bonafide half carries 15.2% of it, which is what a real-world
+environmental corpus contains.
+
+⚠️ **Every number above is an upper bound, and the reason is recorded in the function itself.**
+Silero is a *speech* VAD: it cannot evidence music, so the `music_present = 0` half of cell 9 goes
+unchecked here. [09 §7](09-next-steps.md) records why PANNs was declined and
+[RESULTS §5.1](RESULTS_FOR_ANALYSIS.md) records the misreading that followed from forgetting this
+once already. A file of café ambience with background music is counted viable above and is not.
+
+⚠️ One file's VAD did not run. It is reported as `unmeasured` and is **not** counted viable — `na`
+is not `pass`, which is the same tri-state the gates use.

@@ -371,6 +371,47 @@ inverted. Screen both pools with the identical threshold.
 
 ---
 
+## B4b — ✅ Answered 2026-09-16: there is no degenerate-generation population
+
+Measured over all **58,885** decoded rows, chain plane, **one threshold applied to every pool**
+(`eda screens`). The rate is the finding, not a drop list — [D6](04-pool-d-fake-instrumental.md)
+states the rule and B4 states its mirror: *"screen both pools with the identical threshold"*.
+
+| partition | n | digital silence | bands flat | clipped | too short | all silence | duration outlier | **any** |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| **A** real voice | 6,426 | 0 | 0 | 0 | 0.22% | 0 | 0.87% | **0.89%** |
+| **B** fake voice | 6,000 | 0 | 0 | 0.07% | 0.02% | 0 | 1.08% | **1.15%** |
+| **C** real instr. | 2,660 | 0 | 0 | **0.83%** | 0 | 0.34% | 0.30% | **1.43%** |
+| **D** fake instr. | 27,605 | 0 | 0 | 0.24% | 0 | 0.16% | 0 | **0.40%** |
+| **E** noise | 14,194 | 0.42% | 0.35% | 0.31% | 0.12% | **7.07%** | 1.89% | **9.24%** |
+| **cell8** | 2,000 | 0 | 0 | 0 | 0 | 0 | 0.05% | **0.05%** |
+
+🔴 **F-S4's premise is not evidenced in this corpus.** B4 and D6 were written on the expectation
+that TTS and TTM at scale fail visibly and often. At these thresholds **pool D flags at 0.40%, the
+lowest of any component pool**, and pool B at 1.15% against pool A's 0.89% — a 0.26 pp difference.
+There is no failure population to drop, and therefore no per-generator failure rate to rank
+generators by. The `label_confidence` tier B4 expected this screen to justify has to rest on
+something else.
+
+🔴 **And the asymmetry runs the opposite way to the one D6 feared.** D6's rule is that a threshold
+flagging pool C at a materially different rate than pool D is manufacturing a cue. It does:
+**C flags 3.6× more often than D** (1.43% against 0.40%), almost entirely through clipping (0.83%
+against 0.24%). Dropping flagged files would remove proportionally more *real* music than fake and
+teach the 0.27-weight head that **clipping means REAL**. The correct action is to apply no drop —
+which is a decision this screen exists to license, and it licenses the null one.
+
+Pool E's 9.24% is the one real population and it is not a generation failure: 7.07% of it is
+`silence_ratio >= 0.99`, which is what a noise corpus contains.
+
+⚠️ **One sub-part is not computed and is not silently omitted.** Both B4 and D6 ask for a
+mel-envelope autocorrelation looping/babble detector. That needs the envelope **over time**, and
+the V tier stores per-band statistics over time ([`eda/extract/vectors.py`](../../eda/extract/vectors.py)),
+not the series. It needs a decode; `eda.analyze.screens.LOOPING_NOT_COMPUTED` carries the reason
+into the output table rather than leaving five screens to read as the six that were asked for.
+
+
+---
+
 ## B5 — Duration and speaker-proxy census ⚠️ Tier A
 
 **Compute.** Duration histogram per generator; MLAAD v9 is ~6.75 s/file on average over the full
@@ -438,3 +479,79 @@ conclude that a family is redundant.
 **Output.** `generator_difficulty_screen.csv`, ranking families by distance to their nearest
 neighbour — which is also a principled way to pick which families to hold out for the sealed PROBE
 slice.
+
+---
+
+## B6b — ✅ Answered 2026-09-16: generators are identifiable from one scalar, and the axis is not `group_key`
+
+One-vs-rest AUC of the **best single chain-plane scalar** at telling each generator from the rest of
+its own partition (`eda.analyze.screens.separability`). Univariate by design: a multivariate model
+scores higher and says less — the point is to name the *column* that carries the identity, because
+that is the one a render-time transform would have to neutralise.
+
+🔴 **`group_key` is the wrong axis for this question, and finding that out was half the result.**
+`group_key` is the **fold-grouping** atom — the speaker, the parent clip. The generator is the
+**stratification** axis, exactly as [B0b](#b0b---wavefake-fetched-117983-files-two-grouping-atoms-and-a-duplicated-half)
+already said for WaveFake: *"the vocoder is a stratification axis; the voice is the grouping one"*.
+In pool D the two are not merely different, they are incommensurable: `group_key` there is the
+FakeMusicCaps parent clip, giving **5,521 groups averaging 5 rows**, and a separability run keyed on
+it returns **zero measurable groups**. `screens.generator_key` builds the other axis, and it
+reproduces the published counts independently — CFAD **11**, FakeMusicCaps **5**, WaveFake **10**,
+MLAAD **133** of 175 families present in the draw.
+
+### Pool B — median best-AUC 0.904, 20 of 36 measurable generators at ≥ 0.90
+
+| generator | n | best AUC | carrier |
+|---|--:|--:|---|
+| `cfad/pwg` | 222 | **0.998** | `dc_offset_chain` |
+| `mlaad/VITS2-Claude` | 30 | 0.997 | `band_energy_7_chain` |
+| `cfad/gl` | 223 | 0.993 | `hf_ratio_8k_chain` |
+| `mlaad/tts_models_hr_cv_vits` | 30 | 0.989 | `near_nyquist_ratio_chain` |
+| `cfad/mbmelgan` | 222 | 0.983 | `rms_dbfs_chain` |
+| `mlaad/Edge-TTS` | 262 | 0.972 | `tail_silence_s_chain` |
+| `wavefake/ljspeech_waveglow` | 130 | 0.938 | `hf_ratio_8k_chain` |
+
+Carriers across all 36: `hf_ratio_8k` (7), `tail_silence_s` (6), `band_energy_7` (5),
+`near_nyquist_ratio` (4), `peak_dbfs` (3).
+
+⚠️ **`cfad/pwg` at 0.998 on `dc_offset` is a fixable fingerprint, not an acoustic finding.** A DC
+offset is exactly what [`eda/planes.py`](../../eda/planes.py) declines to remove because nothing in
+the render path removes one — and this is the first evidence that *adding* the step would erase a
+generator id rather than merely tidy a waveform. It is the opposite conclusion to
+[B1b](#b1b---answered-2026-09-16-the-artifact-does-not-die-at-16-khz)'s on the low end, and the two
+have to be decided together: **do not high-pass; do consider DC removal**, and measure the pair.
+
+### 🔴 Pool D — `mustango` separates at **AUC 1.000** on duration alone
+
+| generator | n | best AUC | carrier |
+|---|--:|--:|---|
+| `fakemusiccaps/mustango` | 5,521 | **1.000** | `duration_s_decoded_chain` |
+| `fakemusiccaps/stable_audio_open` | 5,521 | 0.858 | `tail_silence_s_chain` |
+| `fakemusiccaps/audioldm2` | 5,521 | 0.834 | `hf_ratio_8k_chain` |
+| `fakemusiccaps/musicldm` | 5,521 | 0.757 | `hf_ratio_8k_chain` |
+| `fakemusiccaps/MusicGen_medium` | 5,521 | 0.750 | `duration_s_decoded_chain` |
+
+The mechanism, and it is worse than the AUC suggests — **every generator's duration variance is
+exactly zero**:
+
+| generator | min | median | max |
+|---|--:|--:|--:|
+| `mustango` | **10.242** | 10.242 | 10.242 |
+| `MusicGen_medium` | **10.180** | 10.180 | 10.180 |
+| `audioldm2` · `musicldm` · `stable_audio_open` | 10.000 | 10.000 | 10.000 |
+
+[D8](04-pool-d-fake-instrumental.md) established that pool D is uniformly 10 s and called it the
+corpus's sharpest shortcut. This is sharper: **the exact millisecond value is a generator id**, with
+no variance to hide behind. `mustango` is isolated by one threshold; `MusicGen_medium` scores only
+0.750 because 10.180 sits *between* the other values, not because it is less determined.
+
+**What it changes.** The duration finding and the generator-disjointness requirement are the same
+problem, not two. A generator-disjoint fold in pool D is trivially recoverable from duration, so
+holding `mustango` out measures nothing about transfer — the model reads the clock. Any crop policy
+that leaves pool D's durations distinguishable leaves `artifact_family` recoverable, and
+[validation/01](../validation/01-split-scheme.md)'s family-disjoint split is only as strong as the
+crop in front of it.
+
+⚠️ A linear screen on summary statistics still ranks where to spend; it does not conclude that a
+family is redundant (see B6 above). ★ `[survey/02]`'s 46.4% cross-generator EER for music is about
+*acoustic* separability, and nothing here contradicts it — duration is not acoustics.

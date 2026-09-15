@@ -20,6 +20,7 @@ from eda.analyze import grouping as grp
 from eda.analyze import shortcut as sc
 from eda.analyze import signal as sig
 from eda.analyze import pairs as prs
+from eda.analyze import screens as scr
 from eda import driver as drv
 from eda import groupkeys
 from eda.config import load_eda_config
@@ -471,6 +472,65 @@ def _paired_scalar(signal: pd.DataFrame, column: str,
     return pd.DataFrame(rows)
 
 
+def cmd_screens(cfg, args) -> int:
+    """Step 2 of docs/EDA/10: B4/D6, B6, E5 and X2. Nothing here decodes.
+
+    One verb rather than four because they share a table and a caveat: each is
+    a `groupby` over `signal.parquet`, and each reports a **rate** rather than a
+    drop list. A screen that fires at a different rate on the fake pools than
+    the real ones is an asymmetric filter (R2), and the comparison a reader has
+    to make is between rows of one table.
+    """
+    try:
+        signal = load_signal(cfg)
+    except RuntimeError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+    out = cfg.out / "_shared"
+    out.mkdir(parents=True, exist_ok=True)
+
+    screen = scr.degenerate_screen(signal)
+    print("=== B4 / D6: degenerate output, chain plane, one threshold for every pool")
+    print(f"    ⚠️  not computed: {screen.attrs['not_computed']}")
+    _show(screen)
+    screen.to_parquet(out / "screen_degenerate.parquet", index=False)
+
+    cell9 = scr.cell9_viability(signal)
+    print(f"\n=== E5: cell-9 viability at {cell9.attrs['min_duration_s']} s"
+          f"\n    ⚠️  upper bound -- {cell9.attrs['upper_bound']}")
+    _show(cell9)
+    cell9.to_parquet(out / "screen_cell9.parquet", index=False)
+
+    frames = []
+    for partition in ("B", "D"):
+        table = scr.separability(signal, partition, by=args.axis,
+                                 min_rows=args.min_rows)
+        print(f"\n=== B6: separability by {args.axis}, partition {partition} -- "
+              f"{table.attrs['n_measurable']} of {table.attrs['n_groups']} group(s) "
+              f"have >= {table.attrs['min_rows']} rows")
+        if len(table):
+            _show(table.head(12))
+            print(f"    median best_auc {table['best_auc'].median():.3f}; "
+                  f"{int((table['best_auc'] >= 0.90).sum())} at >= 0.90")
+        else:
+            # 🔴 Printed, never omitted. An empty table here is the finding that
+            # the axis is the wrong grain -- `group_key` in pool D is the parent
+            # clip -- and a verb that printed nothing would read as a pass.
+            print(f"    no group is large enough to measure on this axis")
+        frames.append(table)
+    pd.concat(frames, ignore_index=True).to_parquet(
+        out / f"screen_separability_{args.axis}.parquet", index=False)
+
+    leak = scr.metadata_leak(None, signal)
+    print(f"\n=== X2: is the metadata shortcut exploitable?"
+          f"\n    ⚠️  blocked half -- {leak.attrs['blocked']}")
+    _show(leak.drop(columns=["top_features_metadata", "top_features_chain"]))
+    leak.to_parquet(out / "screen_metadata_leak.parquet", index=False)
+
+    print(f"\nwrote 4 screen table(s) to {out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="eda", description=__doc__)
     p.add_argument("--config", default=DEFAULT_CONFIG, type=Path)
@@ -521,6 +581,14 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("b1", help="B1: the paired vocoder experiment, read")
     s.set_defaults(fn=cmd_b1)
+
+    s = sub.add_parser("screens", help="step 2: B4/D6, B6, E5, X2 -- no decode")
+    s.add_argument("--axis", default="generator", choices=["generator", "group_key"],
+                   help="B6's axis. `generator` is the stratification atom and is "
+                        "the right one; `group_key` is the fold-grouping atom and in "
+                        "pool D it is the parent clip (5,521 groups of ~5 rows)")
+    s.add_argument("--min-rows", type=int, default=30, dest="min_rows")
+    s.set_defaults(fn=cmd_screens)
 
     args = p.parse_args(argv)
     return args.fn(load_eda_config(args.config), args)

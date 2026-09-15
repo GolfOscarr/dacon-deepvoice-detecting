@@ -273,3 +273,26 @@ artifact survives the 16 kHz chain is a two-plane measurement ([00](00-harness.m
 ⚠️ **The fake half only.** The 48,090 real songs ship as `real_songs.csv` — YouTube IDs, no audio —
 and [data/01](../data/01-rules-check.md) rules YouTube-sourced audio out. Do **not** reconstruct
 them. The config's `suffixes` excludes `.csv`, so the metadata files are not enumerated as audio.
+
+---
+
+## D6b — ✅ Answered 2026-09-16 (with B4): pool D flags at 0.40%, the lowest of any pool
+
+The screen is corpus-wide and one threshold, so it is reported once:
+[**02 B4b**](02-pool-b-fake-voice.md#b4b---answered-2026-09-16-there-is-no-degenerate-generation-population).
+
+The pool-D result in one line: **0.40% flagged**, against pool C's 1.43%. D6's own caution —
+*"any threshold that flags pool C at a materially different rate than pool D is an asymmetric
+filter (R2) and is manufacturing a cue"* — fires, and it fires in the direction nobody was watching
+for. Pool C flags **3.6× more often** than pool D, so a drop would remove proportionally more real
+music than fake. **No drop is applied.**
+
+⚠️ The flat-spectrum check D6 asks for ("some TTM failures emit noise") did run —
+`mel_bands_flat >= 128` — and found **zero** files in pool D. The looping detector did not; see
+B4b for why it needs a decode.
+
+🔴 D6's sibling question turned out to matter far more than its own. See
+[02 B6b](02-pool-b-fake-voice.md#b6b---answered-2026-09-16-generators-are-identifiable-from-one-scalar-and-the-axis-is-not-groupkey):
+every FakeMusicCaps generator has **exactly zero duration variance**, and `mustango` (10.242 s) is
+separable from the other four at **AUC 1.000** on duration alone. D8's shortcut is also a generator
+fingerprint.

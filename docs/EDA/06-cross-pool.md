@@ -444,3 +444,50 @@ the three this corpus is most at risk from.
 🔴 **Re-run X1 (shortcut audit) and X3 (adversarial validation) after *every* corpus change.**
 They are cheap, they take minutes against a metadata table that already exists, and they catch most
 of the failure modes in [data/09](../data/09-risks-and-checks.md) before those cost weeks.
+
+---
+
+## X2b — ✅ Answered 2026-09-16: the metadata leak is a mirage, and it is worse than useless
+
+X1's design matrix and the chain-plane acoustic matrix, audited over the same 58,885 decoded rows
+(`eda.analyze.screens.metadata_leak`). The question X2 asks is not X1's — X1 wants the metadata AUC
+*low*; X2 asks whether a high one is worth **shipping as a feature**.
+
+| head | n | metadata AUC | metadata, **source-held-out** | chain AUC | chain, source-held-out |
+|---|--:|--:|--:|--:|--:|
+| `voice_present` | 58,885 | 0.981 | **0.209** | 0.933 | 0.586 |
+| `music_present` | 58,885 | 0.9997 | **0.686** | 0.902 | 0.852 |
+| `voice_fake` | 14,426 | 0.834 | **0.0000008** | 0.884 | 0.401 |
+| `music_fake` | 32,265 | **1.000** | `nan` | 0.898 | `nan` |
+
+🔴 **`music_fake` is separable from metadata alone at AUC 1.000 — perfectly — and the same feature
+set scores 0.209 and 0.0000008 under an archive holdout.** An AUC *below* 0.5 is not weak evidence;
+it is a relationship that **inverts** on an unseen publisher. The metadata does not merely fail to
+transfer, it transfers backwards: a model shipping `bit_rate`, `codec_name` and `sample_fmt` as
+features would be confidently wrong on a publisher it had not seen, and would have looked flawless
+in cross-validation right up to the leaderboard.
+
+This is precisely the mirage X2 described and could not previously measure: *"our metadata reflects
+**our** archives, and DACON built theirs."* The conditional it left open — resolve in X1's direction
+**unless** the dummy files show the test chain preserves the signal — cannot fire, because
+⚠️ **the evidence that would fire it does not exist**: `TEST_0000–0002.wav` is [X4](#x4---dummy-file-forensics-e-s1--tier-s-blocking-and-it-unblocks-the-render-chain)'s blocker
+and is absent from the corpus, the repo and S3. So X2 resolves the way it said it should by default.
+
+**Decision, recorded so it is not re-litigated: neutralise. Per-file metadata is not a submission
+feature.** It is legal under rule 2.4 and it is worth less than nothing on an unseen publisher.
+
+⚠️ **Two honest caveats on the numbers.**
+* `music_fake`'s holdout column is `nan` and that is the correct answer, not a gap: pool D is a
+  single source, so holding it out leaves a single-class fold. The gates read `nan` as `na`, and
+  `na` is not `pass`.
+* A near-zero AUC under a **one-source** holdout is unstable in sign by construction — with few
+  sources, which side the model lands on is not itself meaningful. What *is* meaningful, and is the
+  finding, is the collapse from 0.98–1.00 to nowhere near 0.5 in either direction.
+
+🔴 **The chain-plane comparison is the one that should change plans.** Acoustics hold up far better
+under the same holdout — `music_present` 0.852 against metadata's 0.686 — which is the same number
+[X1d](#-x1d--x1-on-the-decoded-audio-the-duration-shortcut-survives-the-chain) reports as the
+duration shortcut, seen from the other side. The corpus's real, transferable shortcut is **duration**
+(and per [B6b](02-pool-b-fake-voice.md) the exact millisecond value is a *generator* id in pool D),
+not metadata. Neutralising metadata is cheap and correct; it does not touch the problem that
+actually matters.
