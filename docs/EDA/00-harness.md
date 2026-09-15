@@ -302,6 +302,48 @@ four are split across three pools.
 
 ---
 
+## 4e — 🔴 What the VAD can and cannot evidence
+
+The content tier landed 2026-09-15 ([09 §7](09-next-steps.md)): Silero VAD, vendored, over all
+58,885 S-tier rows on the **chain plane only**. 58,884 measured; the one failure is a `musan-noise`
+file shorter than a single 512-sample chunk.
+
+**It evidences speech, and it is good at it.** Every source that asserts `voice_present = 1` is
+confirmed — `ljspeech` 0.925 median speech ratio, `wavefake` 0.887, `mlaad` 0.830, `musan-speech`
+0.825, `zeroth-korean` 0.798, `cfad-real` 0.742 — with **zero** contradictions in four of them.
+
+🔴 **It does not evidence singing, and the corpus proves it.** SONICS' own `fake_songs.csv` reports
+`no_vocal = False` for **all 49,074 rows**: every file has vocals, by the publisher's own account.
+The VAD finds a speech ratio ≥ 0.20 in **28.1%** of them, median **0.030**.
+
+| SONICS generator | median speech ratio |
+|---|--:|
+| `udio-120s` | 0.211 |
+| `chirp-v3.5` | 0.026 |
+| `chirp-v2-xxl-alpha` | 0.013 |
+| `udio-30s` | 0.009 |
+| `chirp-v3` | 0.007 |
+
+The label is right and the detector is out of its domain. This is the **symmetric twin** of the
+PANNs problem [03 C2](03-pool-c-real-instrumental.md) already flags: PANNs calls singing Music, and
+a speech VAD calls singing nothing.
+
+⚠️ **It is not a footnote, it is a trap that was nearly walked into.** Read naively, the report said
+*72% of cell 8 has no voice* — and acting on that would relabel 49,074 AI songs as voiceless, which
+is exactly the defect that made SONICS a `whole_file` cell-8 source rather than a pool-D component
+(`configs/eda.yaml`). The check would have re-introduced the bug the corpus was restructured to
+avoid. `eda.analyze.signal.SUNG_SOURCES` now names such sources and their rows are reported as
+**unevidenceable** rather than contradicted — no evidence gathered is not evidence against.
+
+**Two consequences that travel:**
+
+1. Every contradiction count on a *music* source is a **lower bound**. [03 C2b](03-pool-c-real-instrumental.md)'s
+   13.7% of FMA is a floor; the sung remainder is invisible.
+2. `G-EDA6` can evidence the voice heads and cannot, on its own, evidence a sung one. Closing that
+   needs a singing-aware detector, not a better threshold.
+
+---
+
 ## 5 — Cost estimate
 
 | Pool | Files (est.) | M tier | S tier (sampled) |

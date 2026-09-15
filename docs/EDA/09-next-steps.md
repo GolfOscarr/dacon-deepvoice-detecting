@@ -120,21 +120,40 @@ written up where it belongs:
 
 ---
 
-## 7 — The content tier: VAD + PANNs ⬅ the largest remaining build
+## 7 — The content tier ✅ done 2026-09-15 (VAD; PANNs deliberately not)
 
-The largest remaining build, and the only thing **`G-EDA6`** waits on. Silero VAD at thresholds 0.5
-and 0.4, PANNs top-10 tags with scores.
+```bash
+$V -m eda.cli signal           # the content tier rides the same decode
+$V -m eda.cli gates            # G-EDA6 now reports instead of `na`
+```
 
-⚠️ **Both must be vendored, not `torch.hub.load`ed** — the eval server is offline
-([competition/02](../competition/02-submission.md)). And PANNs conflates singing with Music, so the
-tag is evidence, never a label.
+Silero VAD vendored as a TorchScript archive with a digest checked at load, run over all 58,885
+S-tier rows on the chain plane. 8 h 02 m, 58,884 measured, 0 decode failures.
 
----
+**`G-EDA6` fails, for the first time with an input**: 2,442 of 58,884 rows contradict their asserted
+components across 8 sources, plus 1,439 unevidenceable. 07 says reassign (F-A1) before dropping.
 
-⚠️ **It needs a second decode pass, ~4 h.** The models were not vendored when step 2 ran, so the
-scalars and vectors came out of a decode that could not also run them. Scope it to the partitions
-that need it -- C for [C2](03-pool-c-real-instrumental.md), E for
-[E2](05-pool-e-noise.md), then A and B -- rather than all six.
+| partition | contradicted | |
+|---|--:|---|
+| C | **336 / 2,660 = 12.6%** | [03 C2b](03-pool-c-real-instrumental.md) — and it is a floor |
+| E | 1,032 / 14,193 = 7.3% | environmental recordings with speech in them |
+| D | 1,006 / 27,605 = 3.6% | [04 D9](04-pool-d-fake-instrumental.md) |
+| B | 54 / 6,000 = 0.9% | |
+| A | 14 / 6,426 = 0.2% | |
+| cell 8 | 0, **1,439 unevidenceable** | [00 §4e](00-harness.md#4e---what-the-vad-can-and-cannot-evidence) |
+
+🔴 **The finding that nearly went the other way.** Read naively the report said *72% of cell 8 has
+no voice*. SONICS' publisher reports `no_vocal = False` for all 49,074 rows; the VAD finds speech in
+28.1% of them because it detects speech and SONICS **sings**. Acting on it would have relabelled 49k
+AI songs as voiceless — the defect the corpus was restructured to avoid. [00 §4e](00-harness.md#4e---what-the-vad-can-and-cannot-evidence)
+has it in full.
+
+**PANNs is deliberately not here**, decided 2026-09-15. It is trained on AudioSet at 32 kHz against
+our 16 kHz chain plane, and it conflates singing with Music — the same blind spot as the VAD, from
+the other side. `G-EDA6` admits *"VAD/PANNs/energy"*, and VAD plus the level/timing extractors cover
+every voice assertion; the music assertions rest on energy. If PANNs is ever wanted it costs a
+further decode pass, and [00 §4e](00-harness.md#4e---what-the-vad-can-and-cannot-evidence) says what
+it would and would not settle.
 
 ---
 

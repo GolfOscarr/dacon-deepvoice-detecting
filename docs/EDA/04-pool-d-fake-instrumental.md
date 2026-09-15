@@ -204,6 +204,24 @@ Two smaller findings from the same pass:
 
 ---
 
+## D9 — Content evidence: 3.6% of the generated "instrumental" has speech in it
+
+Run 2026-09-15 over all 27,605 files. Silero finds a speech ratio ≥ 0.20 in
+**1,006 of them (3.6%)**, against an asserted `voice_present = 0`; median 0.000,
+p90 0.016.
+
+Lower than pool C's 12.6% ([03 C2b](03-pool-c-real-instrumental.md)) and not
+nothing: five text-to-music models asked for instrumental clips produce
+vocal-like output some of the time. The same lower-bound caveat applies — sung
+output is invisible to a speech detector.
+
+⚠️ Worth pairing with [D8](#-d8--s-tier-every-file-is-exactly-10000-s-and-that-is-the-corpuss-sharpest-shortcut): the pool is
+already separable from pool C by duration alone, so a mislabelled 3.6% is a
+second-order problem here. It matters for the **presence** heads rather than for
+`music_fake`.
+
+---
+
 ## D7 — 🔴 SONICS: the corpus's first whole-file source — Tier S
 
 **30.4 GiB, 49,074 tracks, 1,971 h, CC BY-NC 4.0.** Suno (25,426) and Udio (23,648). Acquired

@@ -67,6 +67,41 @@ corpus. Output `pool_c_quarantine.csv` with a *reassignment* column, not a drop 
 
 ---
 
+## 🔴 C2b — ANSWERED: "instrumental" is not instrumental, and 13.7% is a floor
+
+Run 2026-09-15 over all 2,660 decoded pool-C files, Silero VAD on the chain plane
+(`eda report`, `eda.analyze.signal.content_report`).
+
+| source | asserts | median speech | p90 | **speech ≥ 0.20** |
+|---|---|--:|--:|--:|
+| `fma` | `voice_present = 0` | 0.000 | **0.418** | **274 / 2,000 = 13.7%** |
+| `musan-music` | `voice_present = 0` | 0.000 | 0.137 | 62 / 660 = 9.4% |
+
+**Pool C contradicts its own assertion on 336 of 2,660 files — 12.6%.** The median
+track really is instrumental, but the top decile of FMA is 42% speech, and every
+one of those files tells the model there is no voice in audio that has one.
+
+🔴 **And 13.7% is a lower bound, not an estimate.** Silero detects *speech*.
+Measured on SONICS, whose publisher reports `no_vocal = False` for all 49,074
+rows, it finds speech in only **28.1%** of files that certainly contain vocals
+([00 §4e](00-harness.md#4e---what-the-vad-can-and-cannot-evidence)). Sung FMA
+tracks are therefore invisible to it, and FMA is a music archive — the true
+fraction carrying voice is higher, plausibly much higher.
+
+⚠️ **This is pool C's whole job at stake.** It is the negative class for the
+`music_fake` head, which carries **0.27** of the metric. A mislabelled negative
+is worse here than a missing one.
+
+### The threshold question C2 asked, answered too
+
+C2 asks for 0.5 **and** 0.4 so the gap between them can be read. Measured, the gap
+is **0.000 on every pool-C source** and at most 0.010 anywhere in the corpus. The
+VAD is not equivocating: these files are confidently speech or confidently not,
+and the second threshold buys nothing here. It stays recorded because the cost is
+one column and the reasoning is only valid for *this* corpus.
+
+---
+
 ## C3 — Artist / album grouping-atom inventory 🔴 Tier S, no second chance
 
 **Compute.** From FMA's `tracks.csv` (`artist_id`, `album_id`) and Jamendo's `raw.tsv`

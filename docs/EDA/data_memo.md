@@ -1,6 +1,6 @@
 # The data memo — X7, the EDA's exit condition
 
-**Written 2026-09-14 against commit `4aa40e0`.** Every number here was measured, not carried
+**Written 2026-09-14, updated 2026-09-15 with the content tier.** Every number here was measured, not carried
 forward; the command that reproduces each one is named beside it. This is
 [06 X7](06-cross-pool.md#x7--the-data-memo-e-s3--tier-s-the-exit-condition), and the standard it is
 written to is the playbook's: *"do not advance to hyperparameter tuning until the data memo explains
@@ -181,7 +181,8 @@ exists.
 | `G-EDA3`: 5 of 14 sources under 6 groups | 2 have no publisher key (`musan-noise`, `musan-speech`); 3 are **genuinely short** (`ljspeech` 1, `sonics` 5, `wavefake` 2) | nothing — the last three are facts about the sources. They cannot be rotated in a fold table |
 | `G-EDA1/allowlist/fma` fails, 2,907 of 8,000 | open | a licence decision (C1), not a computation |
 | Pool C is one usable source | open | `mtg-jamendo` is in the store, unfetched |
-| `G-EDA6` — component evidence | `na` | the content tier: VAD + PANNs, vendored ([09 §7](09-next-steps.md)) |
+| 🔴 `G-EDA6` — component evidence | **fail: 2,442 of 58,884 rows contradict their assertions** | reassign (F-A1) before dropping. Worst: pool C at 12.6%, and that is a floor |
+| Sung voice cannot be evidenced | open, **measured** | a singing-aware detector. A speech VAD finds vocals in 28.1% of files the publisher says all have them ([00 §4e](00-harness.md#4e---what-the-vad-can-and-cannot-evidence)) |
 | `G-EDA4` — pairs vs fold boundaries | `na` | a built fold table (Phase 2) |
 | `G-EDA7` — filter-rate symmetry | `na` | a filter. Phase 0 applies none, by design (R2) |
 | E1 pass 2 is not a real content fingerprint | open, and **known to be weak** | a landmark/chromaprint fingerprint, or waveform cross-correlation over the LTAS shortlist |
@@ -193,8 +194,12 @@ exists.
 
 Stated rather than left as a silence:
 
-* **No content-tier measurement.** Whether pool C is actually instrumental (C2), where the valid
-  4 s spans are (E2), and every PANNs tag are unmeasured. `G-EDA6` is `na` for that reason.
+* **No PANNs tags.** Decided 2026-09-15 rather than skipped: it is trained at 32 kHz against our
+  16 kHz chain plane and conflates singing with Music. The voice assertions are evidenced by VAD;
+  the **music** assertions rest on energy and spectral proxies, not on a tagger.
+* **Sung voice is not evidenced at all.** The content tier measures speech, and the corpus's sung
+  sources (`sonics`, and `ctrsvdd` when unblocked) are outside it
+  ([00 §4e](00-harness.md#4e---what-the-vad-can-and-cannot-evidence)).
 * **`FILE_FAKE` is not audited.** A composed file's fake status does not exist until the sampler
   draws a spec, so the file head — **0.45 of the metric** — is X5's question, over the spec stream,
   not this corpus's.
