@@ -1,5 +1,9 @@
 # 09 — Next steps
 
+> ⚠️ **Superseded as the plan of record by [10](10-final-plan.md).** This page's eight steps are
+> all done, but it was a *remaining-work* plan, never the full task inventory — reporting "the EDA
+> is complete" from it was wrong. 10 is the inventory of all 43 declared tasks.
+
 Written 2026-09-13, after wave 1 + CFAD. This is the **plan of record** for what remains; the state
 it starts from is measured, not remembered, and every command below was run verbatim before this
 file was committed.
