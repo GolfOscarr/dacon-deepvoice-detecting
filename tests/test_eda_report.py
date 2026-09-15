@@ -345,3 +345,82 @@ def test_the_threshold_shift_is_reported():
     sig, files = _content([{"pool": "C", "ratio": 0.02, "ratio40": 0.60}])
     got = sg.content_report(sig, files).iloc[0]
     assert got["ratio_shift_50_to_40"] == pytest.approx(0.58)
+
+
+def test_a_sung_source_is_unevidenceable_not_contradicted():
+    """🔴 The finding that inverted this whole check. Silero detects *speech*;
+    SONICS sings. Its own `fake_songs.csv` reports `no_vocal = False` for all
+    49,074 rows, and the VAD finds a speech ratio >= 0.20 in **28.1%** of them,
+    median 0.030.
+
+    Counting those as contradictions claims 72% of cell 8 has no voice -- and
+    acting on it would relabel 49k AI songs as voiceless, which is exactly the
+    defect that made SONICS a whole-file cell-8 source rather than a pool-D
+    component. The check would have re-introduced the bug the corpus was
+    restructured to avoid.
+
+    Mutation: `sonics` removed from `SUNG_SOURCES`, or the `sung and asserts`
+    branch deleted. 1,439 rows move from `unevidenceable` to `contradicted` and
+    nothing else changes.
+    """
+    sig, files = _content([{"pool": None, "ratio": 0.03}] * 3
+                          + [{"pool": None, "ratio": 0.80}])
+    sig["source_name"] = "sonics"
+    files["source_name"] = "sonics"
+    # whole_file rows take their labels from the cell, not a pool
+    files["row_kind"] = "whole_file"
+    files["cell"] = 8
+    files["pool"] = None
+    got = sg.content_report(sig, files).iloc[0]
+    assert got["sung"] is True or got["sung"] == True   # noqa: E712
+    assert got["asserts_voice"] == 1.0
+    assert got["contradicted"] == 0
+    assert got["unevidenceable"] == 3
+
+
+def test_a_sung_source_can_still_be_contradicted_the_other_way():
+    """⚠️ The exemption is one-directional. A speech VAD finding *more* speech
+    than asserted is still evidence, whatever the source sings."""
+    assert "sonics" in sg.SUNG_SOURCES
+    assert all(reason for reason in sg.SUNG_SOURCES.values()), (
+        "every sung source names the evidence that it sings")
+
+
+def test_g_eda6_is_na_before_the_content_tier_and_fails_on_contradictions():
+    """🔴 `na` means *not run*, never *found nothing* -- the distinction
+    `eda/AGENTS.md` says three separate paths have confused before.
+
+    Mutation: the `content is None or content.empty` branch returning PASS.
+    """
+    from eda.config import load_eda_config
+    from eda.gates import FAIL, NA, PASS, _g_eda6
+
+    cfg = load_eda_config("configs/eda.yaml")
+    assert _g_eda6(cfg, None).verdict == NA
+    assert _g_eda6(cfg, pd.DataFrame()).verdict == NA
+
+    clean = pd.DataFrame([{"source_name": "s", "contradicted": 0, "measured": 10,
+                           "unevidenceable": 0, "sung": False}])
+    assert _g_eda6(cfg, clean).verdict == PASS
+
+    dirty = pd.DataFrame([{"source_name": "s", "contradicted": 3, "measured": 10,
+                           "unevidenceable": 0, "sung": False}])
+    result = _g_eda6(cfg, dirty)
+    assert result.verdict == FAIL and "Reassign (F-A1)" in result.detail
+
+
+def test_g_eda6_does_not_fail_on_unevidenceable_rows_alone():
+    """They are reported, and they do not fail the gate: no evidence was
+    gathered, which is not the same as evidence against.
+
+    Mutation: `unevidenced` added into `total`.
+    """
+    from eda.config import load_eda_config
+    from eda.gates import PASS, _g_eda6
+
+    cfg = load_eda_config("configs/eda.yaml")
+    frame = pd.DataFrame([{"source_name": "sonics", "contradicted": 0,
+                           "measured": 100, "unevidenceable": 72, "sung": True}])
+    result = _g_eda6(cfg, frame)
+    assert result.verdict == PASS
+    assert "72 row(s) unevidenceable" in result.detail and "sonics" in result.detail

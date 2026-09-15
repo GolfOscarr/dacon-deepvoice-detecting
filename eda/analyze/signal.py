@@ -31,7 +31,7 @@ from eda.planes import CHAIN, NATIVE, PLANES
 __all__ = ["CHAIN_EXCLUDED", "SIGNAL_SCALARS", "TEST_MAX_S", "TEST_MIN_S",
            "DUPLICATE_COSINE", "bandwidth_report", "content_fingerprints",
            "content_similarity_profile", "duration_report", "level_report",
-           "VOICE_EVIDENCE_RATIO", "content_report", "near_duplicates",
+           "SUNG_SOURCES", "VOICE_EVIDENCE_RATIO", "content_report", "near_duplicates",
            "plane_features", "paired", "signal_audit"]
 
 #: The competition's test set: 1,200 files, **4-60 s, 16 kHz**
@@ -400,6 +400,30 @@ def content_similarity_profile(fingerprints: np.ndarray, *, block: int = 1024,
 #: every borderline file into a contradiction.
 VOICE_EVIDENCE_RATIO = 0.20
 
+#: 🔴 **Sources whose voice is sung, where a speech VAD cannot evidence it.**
+#:
+#: Silero VAD detects *speech*. Measured on SONICS, whose own `fake_songs.csv`
+#: reports `no_vocal = False` for all 49,074 rows -- the publisher says every
+#: file has vocals -- it finds a speech ratio >= 0.20 in only **28.1%** of them,
+#: median **0.030**. The label is right and the detector is out of its domain.
+#:
+#: This is the exact symmetric twin of the PANNs problem docs/EDA/03 C2 already
+#: flags: PANNs calls singing Music, and a speech VAD calls singing nothing.
+#:
+#: ⚠️ It matters far more than a caveat. Counting those files as contradictions
+#: would say 72% of cell 8 has no voice -- and acting on it would relabel 49k AI
+#: songs as voiceless, which is precisely the defect that made SONICS a
+#: `whole_file` cell-8 source rather than a pool-D component in the first place
+#: (`configs/eda.yaml`). The check would have re-introduced the bug the corpus
+#: was restructured to avoid.
+SUNG_SOURCES = {
+    "sonics": "every row is `no_vocal = False` in the publisher's own CSV",
+    # Blocked, so it never reaches this report -- listed because it is the other
+    # sung source in the corpus and the next reader should not have to rederive
+    # it. 260 h of sung fake voice from 14 SVS/SVC methods (docs/EDA/02 B7).
+    "ctrsvdd": "sung fake voice by construction; currently blocked",
+}
+
 
 def content_report(signal: pd.DataFrame, files: pd.DataFrame) -> pd.DataFrame:
     """Per source: what the VAD found, against what the pool **asserts**.
@@ -413,6 +437,10 @@ def content_report(signal: pd.DataFrame, files: pd.DataFrame) -> pd.DataFrame:
     ⚠️ `contradicted` counts **files**, not duration. A source whose median
     speech ratio is 0 can still have 200 files full of singing, and the median
     would never show it.
+
+    🔴 And a contradiction on a music source is a **lower bound**. The detector
+    misses sung vocals (`SUNG_SOURCES`), so "13.7% of FMA contains speech" means
+    *at least* 13.7% contains voice; the sung remainder is invisible to it.
     """
     from eda.analyze.shortcut import head_labels
 
@@ -433,13 +461,20 @@ def content_report(signal: pd.DataFrame, files: pd.DataFrame) -> pd.DataFrame:
         measured = g[g["ok"]]
         claim = measured["asserts_voice"].dropna()
         asserts = float(claim.mean()) if len(claim) else float("nan")
+        sung = str(source) in SUNG_SOURCES
         if len(measured) and asserts == asserts:
             # Which direction counts as a contradiction depends on the claim.
             contra = (measured["ratio"] < VOICE_EVIDENCE_RATIO if asserts >= 0.5
                       else measured["ratio"] >= VOICE_EVIDENCE_RATIO)
-            n_contra = int(contra.sum())
+            # 🔴 A sung source asserting voice cannot be contradicted by a
+            # *speech* detector finding no speech. Those rows are counted as
+            # unevidenceable, not as disagreements -- see `SUNG_SOURCES`.
+            if sung and asserts >= 0.5:
+                n_contra, n_unevidenced = 0, int(contra.sum())
+            else:
+                n_contra, n_unevidenced = int(contra.sum()), 0
         else:
-            n_contra = 0
+            n_contra = n_unevidenced = 0
         rows.append({
             "source_name": source, "n": int(len(g)),
             "measured": int(len(measured)),
@@ -451,7 +486,11 @@ def content_report(signal: pd.DataFrame, files: pd.DataFrame) -> pd.DataFrame:
             # is unsure about, and that is itself the finding.
             "ratio_shift_50_to_40": (_q(measured["ratio40"].dropna(), 0.5)
                                      - _q(measured["ratio"].dropna(), 0.5)),
+            "sung": sung,
             "contradicted": n_contra,
             "contradicted_frac": (n_contra / len(measured)) if len(measured) else float("nan"),
+            # Asserted, not disputed, and not evidenced either: the detector is
+            # out of its domain. `na`, in the tri-state's sense.
+            "unevidenceable": n_unevidenced,
         })
     return pd.DataFrame(rows).sort_values("source_name").reset_index(drop=True)

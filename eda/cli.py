@@ -319,13 +319,31 @@ def cmd_analyze(cfg, args) -> int:
             d["detail"].to_parquet(out / DUPLICATE_TABLE, index=False)
 
     gates = run_gates(cfg, files, audit=res["shortcut"], groups=res["grouping"],
-                      dupes=None if d is None else dup.summary_of(d))
+                      dupes=None if d is None else dup.summary_of(d),
+                      content=_content_evidence(cfg, files))
     print("\n=== gates")
     _show(gates)
     gates.to_parquet(out / "gates.parquet", index=False)
     agg = gates.attrs["aggregate"]
     print(f"\naggregate: {agg}")
     return 1 if (gates["verdict"] == FAIL).any() else 0
+
+
+def _content_evidence(cfg, files):
+    """The C-tier evidence table, or None when the S tier has not run.
+
+    ⚠️ None rather than an empty frame: `G-EDA6` must tell "no content tier yet"
+    (`na`) from "content tier ran and found nothing" (`pass`), which is the
+    distinction `eda/AGENTS.md` names as the one three separate paths have
+    confused before.
+    """
+    try:
+        signal = load_signal(cfg)
+    except RuntimeError:
+        return None
+    if "vad_ok" not in signal.columns:
+        return None
+    return sig.content_report(signal, files)
 
 
 def cmd_gates(cfg, args) -> int:
@@ -346,7 +364,8 @@ def cmd_gates(cfg, args) -> int:
     dupes = (json.loads(summary_path.read_text(encoding="utf-8"))
              if summary_path.exists() else None)
     gates = run_gates(cfg, files, audit=table(SHORTCUT_TABLE),
-                      groups=table(GROUPING_TABLE), dupes=dupes)
+                      groups=table(GROUPING_TABLE), dupes=dupes,
+                      content=_content_evidence(cfg, files))
     _show(gates)
     print(f"\naggregate: {gates.attrs['aggregate']}")
     return 1 if (gates["verdict"] == FAIL).any() else 0

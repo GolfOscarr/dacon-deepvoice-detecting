@@ -222,8 +222,56 @@ def _g_eda5(cfg: EdaConfig, dupes: dict | None) -> GateResult:
         f"Byte identity only -- pass 2 (content fingerprint) is S tier")
 
 
+def _g_eda6(cfg: EdaConfig, content: pd.DataFrame | None) -> GateResult:
+    """Evidence. Every row's asserted components are evidenced, or explained.
+
+    🔴 Two different shortfalls, and only one of them is the corpus's fault.
+
+    A **contradiction** is a row whose audio disputes its own assertion: a
+    pool-C file that asserts `voice_present = 0` with speech through 40% of it.
+    07 says reassign (F-A1) before dropping, and the gate fails so that someone
+    has to.
+
+    An **unevidenceable** row is one the detector cannot speak to. Silero VAD
+    detects speech, and SONICS sings: the publisher's own CSV reports
+    `no_vocal = False` for all 49,074 rows while the VAD finds speech in 28% of
+    them. Counting those as contradictions would claim 72% of cell 8 has no
+    voice -- and acting on it would relabel 49k AI songs as voiceless, which is
+    the defect the corpus was restructured to avoid. They are reported and do
+    **not** fail the gate.
+
+    ⚠️ Nor do they pass it silently. A source that is entirely unevidenceable
+    has had no evidence gathered about it at all, which is `na`'s meaning in
+    this repo's tri-state -- and `na` never reads as a pass.
+    """
+    if content is None or content.empty:
+        return GateResult(
+            "G-EDA6", NA, "component-evidence checks need the S tier "
+            "(VAD/PANNs/energy) -- Phase 1. docs/EDA/07")
+    bad = content[content["contradicted"] > 0].sort_values(
+        "contradicted", ascending=False)
+    total = int(content["contradicted"].sum())
+    measured = int(content["measured"].sum())
+    unevidenced = int(content.get("unevidenceable", pd.Series(dtype=int)).sum())
+    note = (f"; {unevidenced} row(s) unevidenceable by a speech VAD "
+            f"(sung: {', '.join(sorted(content.loc[content['sung'], 'source_name']))})"
+            if unevidenced else "")
+    if not total:
+        return GateResult("G-EDA6", PASS,
+                          f"0 of {measured} measured row(s) contradict their "
+                          f"asserted components{note}")
+    named = ", ".join(f"{r.source_name} {int(r.contradicted)}"
+                      for r in list(bad.itertuples())[:5])
+    more = f" (+{len(bad) - 5} more)" if len(bad) > 5 else ""
+    return GateResult(
+        "G-EDA6", FAIL,
+        f"{total} of {measured} measured row(s) contradict their asserted "
+        f"components, over {len(bad)} source(s): {named}{more}{note}. "
+        f"Reassign (F-A1) before dropping")
+
+
 def run_gates(cfg: EdaConfig, files: pd.DataFrame, *, audit=None, groups=None,
-              dupes=None) -> pd.DataFrame:
+              dupes=None, content=None) -> pd.DataFrame:
     """Every gate, plus the aggregate. Exit status is `worst` over the column."""
     results: list[GateResult] = []
     results += _g_eda1(cfg, files)
@@ -233,9 +281,7 @@ def run_gates(cfg: EdaConfig, files: pd.DataFrame, *, audit=None, groups=None,
         "G-EDA4", NA, "pair_id/dup_group vs fold boundaries -- needs a built fold "
         "table (Phase 2). docs/EDA/02 B1"))
     results.append(_g_eda5(cfg, dupes))
-    results.append(GateResult(
-        "G-EDA6", NA, "component-evidence checks need the S tier (VAD/PANNs/energy) "
-        "-- Phase 1. docs/EDA/07"))
+    results.append(_g_eda6(cfg, content))
     results.append(GateResult(
         "G-EDA7", NA, "filter-rate symmetry needs a filter; none is applied in "
         "Phase 0 by design (R2)"))
