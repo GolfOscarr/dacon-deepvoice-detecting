@@ -72,7 +72,7 @@ Three tables, because the tiers have different populations *and* different shape
 | artifact | tier | population | shape |
 |---|---|---|---|
 | `<partition>/files.parquet` | M | **100%**, 382,068 rows | **30** columns: ffprobe, sha256, mp3 header, `group_key` |
-| `<partition>/signal.parquet` | S | sampled/full, 58,885 rows | **81** columns, the measured ones suffixed `_native` / `_chain` |
+| `<partition>/signal.parquet` | S + C | sampled/full, 58,885 rows | **90** columns — S measured on both planes and suffixed, C on the chain plane only and unsuffixed |
 | `<partition>/vectors.npz` | S | the same 58,885, keyed by position | `ltas`, `mel_band_skew`, `mel_band_kurt`, `[128]` each, both planes |
 
 **S-tier coverage**: A 6,426 · B 6,000 · C 2,660 · cell8 2,000 drawn at 2,000 per source spread

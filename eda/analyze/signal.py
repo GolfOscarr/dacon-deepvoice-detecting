@@ -238,8 +238,12 @@ def signal_audit(signal: pd.DataFrame, cfg=None, *, plane: str = CHAIN,
     `shortcut_audit`\'s docstring has the difference. `source_name` holds out an
     archive; `group_key` holds out a clip or a speaker and leaves the archive in
     training, so it scores **higher**. Measured on the chain plane:
-    `music_present` is 0.852 source-grouped and 0.894 group-keyed, and only the
-    first is evidence about publisher generalisation.
+    `music_present` is 0.852 source-grouped and 0.902 group-keyed, and only the
+    first is evidence about publisher generalisation. ⚠️ The group-keyed number
+    moves when a key is corrected -- it was 0.894 before
+    `compspoof-env-bonafide` went from 6 groups to 10,710 -- while the
+    source-grouped one does not, because an archive holdout does not depend on
+    the key.
     """
     from eda.analyze.shortcut import shortcut_audit
 

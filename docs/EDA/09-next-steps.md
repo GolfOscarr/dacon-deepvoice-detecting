@@ -28,11 +28,13 @@ WaveFake landed (step 5) — 117,983 files after its duplicated half was exclude
 `[128]`-wide vectors on both planes. The sampled partitions are A 6,426 · B 6,000 · C 2,660 ·
 cell8 2,000; D and E are measured in full.
 
-**Gates**: `G-EDA5` pass · `G-EDA1/exclude` ×5 pass · `G-EDA1/allowlist/fma` fail (a licence
-partition, not a defect) · `G-EDA1/allowlist/mtg-jamendo` `na` (unfetched) · `G-EDA2` fail
-(structural — see below) · `G-EDA3` fail, **5 of 14** sources, in two separated clauses
+**Gates — 6 pass · 4 fail · 3 `na`** (`_shared/gates.parquet`, refreshed 2026-09-15):
+`G-EDA5` pass · `G-EDA1/exclude` ×5 pass · `G-EDA1/allowlist/fma` fail (a licence partition, not a
+defect) · `G-EDA1/allowlist/mtg-jamendo` `na` (unfetched) · `G-EDA2` fail (structural — see below) ·
+`G-EDA3` fail, **5 of 14** sources, in two separated clauses
 ([06 X6b](06-cross-pool.md#-x6b--the-publishers-key-joined-what-path-depth-was-hiding)) ·
-`G-EDA4`, `G-EDA6`, `G-EDA7` `na`.
+**`G-EDA6` fail**, 2,442 rows contradicting their asserted components ([09 §7](#7--the-content-tier--done-2026-09-15-vad-panns-deliberately-not)) ·
+`G-EDA4`, `G-EDA7` `na`.
 
 **6 sources blocked**, each with a measured reason: `ctrsvdd`, `rirs-pointsource`,
 `rirs-isotropic-rir`, `cfad-codec`, `cfad-noisy`, `codecfake`.

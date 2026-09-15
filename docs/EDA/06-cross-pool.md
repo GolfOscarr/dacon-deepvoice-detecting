@@ -215,11 +215,16 @@ per-source version. `duration_s_decoded` sits at 0.946 on *both* planes.
 | holdout | asks | `music_present` |
 |---|---|--:|
 | `source_name` | does this survive an **unseen publisher**? | 0.852 |
-| `group_key` | does this survive an unseen **clip or speaker** from a publisher already in training? | 0.894 |
+| `group_key` | does this survive an unseen **clip or speaker** from a publisher already in training? | **0.902** |
 
 `group_key` is **not** the stricter one, and reading it as such is the mistake to avoid. Holding
 out one FakeMusicCaps clip leaves 5,520 others in training, so an archive-level confound is still
-fully available — which is why it scores *higher*. It is what makes `music_fake` measurable at all
+fully available — which is why it scores *higher*.
+
+⚠️ The group-keyed figure moves when a key is corrected: it was 0.894 when first measured and is
+**0.902** after `compspoof-env-bonafide` went from 6 groups to 10,710
+([05 E1b](05-pool-e-noise.md)). The source-grouped 0.852 did not move, because the archive holdout
+does not depend on the key. That asymmetry is the point of this table. It is what makes `music_fake` measurable at all
 (5,764 groups against 4 sources, giving **0.892**), and that number must never be quoted as an
 archive holdout.
 
