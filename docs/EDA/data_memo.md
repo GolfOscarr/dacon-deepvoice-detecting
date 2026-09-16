@@ -223,7 +223,7 @@ exists.
 | 🔴 `G-EDA2` reports 1.000 on `music_fake` | **structural, will not go green here** | X5 over the spec stream (Phase 2). X1 reads the corpus on disk; every fix is render-time |
 | Level as a publisher fingerprint | open, 22.6 dB spread | a normalisation decision, and the stage to apply it at |
 | `G-EDA3`: 5 of 14 sources under 6 groups | 2 have no publisher key (`musan-noise`, `musan-speech`); 3 are **genuinely short** (`ljspeech` 1, `sonics` 5, `wavefake` 2) | nothing — the last three are facts about the sources. They cannot be rotated in a fold table |
-| `G-EDA1/allowlist/fma` fails, 2,907 of 8,000 | open | a licence decision (C1), not a computation |
+| `G-EDA1/allowlist/fma` fails, 2,907 of 8,000 | ⏭️ deferred | **23 DENY + 2,884 ND**; ND resolved usable by #417333 A5. The allowlist is stale, not restrictive ([03 C1b](03-pool-c-real-instrumental.md)) |
 | Pool C is one usable source | open | `mtg-jamendo` is in the store, unfetched |
 | 🔴 `G-EDA6` — component evidence | **fail: 2,442 of 58,884 rows contradict their assertions** | reassign (F-A1) before dropping. Worst: pool C at 12.6%, and that is a floor |
 | Sung voice cannot be evidenced | open, **measured** | a singing-aware detector. A speech VAD finds vocals in 28.1% of files the publisher says all have them ([00 §4e](00-harness.md#4e---what-the-vad-can-and-cannot-evidence)) |
@@ -285,7 +285,7 @@ Measured, and left open because they are calls rather than computations.
 
 | | what | the number |
 |---|---|---|
-| **fma licence allowlist** | `G-EDA1/allowlist/fma` fails: how much of pool C may be used | **2,907 of 8,000** files outside the allowlist |
+| ~~fma licence allowlist~~ | ⏭️ **answered and deferred**, [03 C1b](03-pool-c-real-instrumental.md): the 2,907 are **23 DENY + 2,884 ND**, and ND is usable per #417333 A5. Regenerating is ~10 min and adds **+57% volume, 0 publishers, 0 shortcut dilution** — deferred until pool C volume binds | 23 unusable |
 | **G-EDA6 reassignment** | rows contradicting their asserted components; [07](07-order-and-gates.md) says reassign (F-A1) before dropping | **2,442** rows, of which **2,113** are pool-E files asserting `VOICE_PRESENT = 0` while carrying speech ([05 E5b](05-pool-e-noise.md)) |
 
 ---

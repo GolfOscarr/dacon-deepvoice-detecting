@@ -66,7 +66,7 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 
 | | task | status | evidence / blocker |
 |---|---|---|---|
-| C1 | Licence-allowlist intersection | ✅ | computed — G-EDA1 **fail**, 2,907 of 8,000 outside. ⚠️ the *decision* is open, the measurement is not |
+| C1 | Licence-allowlist intersection | ✅ | **2026-09-16**, [03 C1b](03-pool-c-real-instrumental.md). The 2,907 are **23 DENY + 2,884 ND**, and ND was resolved usable by #417333 A5 the same day the allowlist was built. ⏭️ **stale, not restrictive** — deferred with a trigger |
 | C2 | Silero VAD sweep | ✅ | [03 C2b](03-pool-c-real-instrumental.md) — 12.6%, and a floor |
 | C3 | Artist / album grouping atoms | ⛔ | needs FMA `tracks.csv`; the metadata archive is unfetched. `eda keys` flags it every run |
 | C4 | Genre census, C↔D matching | ⛔ | same archive |
@@ -214,7 +214,7 @@ computations — they are not EDA work and closing the EDA does not close them:
 
 | | the number |
 |---|---|
-| `G-EDA1/allowlist/fma` | **2,907 of 8,000** pool-C files outside the licence allowlist |
+| `G-EDA1/allowlist/fma` | **23** genuinely DENY; the other **2,884** are ND and already usable ([03 C1b](03-pool-c-real-instrumental.md)). ⏭️ deferred: the gain is volume, and volume is not pool C's constraint |
 | `G-EDA6` reassignment | **2,442** rows contradicting their asserted components, of which **2,113** are pool-E files asserting `VOICE_PRESENT = 0` while carrying speech |
 
 🔴 **`eda gates` still exits non-zero and that is correct.** `G-EDA2` is structural and cannot go

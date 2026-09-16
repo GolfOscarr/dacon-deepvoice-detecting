@@ -333,3 +333,67 @@ sit at 11.7% and 16.3% — close to each other, and nothing like either music po
   tests. 93 pool-E rows are excluded on `envelope_ref_dbfs <= -100` and **counted** in the report.
 * The `fade` class for speech is really "gradual onset": a talker ramping up over more than 50 ms is
   indistinguishable here from a deliberate fade. It does not affect the C-vs-D reading.
+
+---
+
+## C1b — ✅ Answered 2026-09-16: the allowlist is **stale**, not restrictive — and the split is 23 / 2,884
+
+`G-EDA1/allowlist/fma` fails on **2,907 of 8,000** pool-C files, and that number has been carried as
+*"a licence decision, open"*. It reads like a licence problem. It is not one.
+
+Measured against the licence ledger on
+`s3://hyeonseop-s3/dacon-deepfake-detection/data/licences/`:
+
+| bucket | files of the 2,907 | what it means |
+|---|--:|---|
+| **DENY** | **23** | the licence restricts provision. Genuinely unusable |
+| **ND or unlisted** | **2,884** | ⚠️ **already resolved as usable** |
+
+🔴 **The ND call was answered and the allowlist was never regenerated.**
+[`scripts/filter_track_licences.py`](../../scripts/filter_track_licences.py) deliberately parked the
+ND family in a third bucket and said so in its own docstring — *"the call is a legal read (the same
+one CtrSVDD is waiting on), not something this script should decide."* That read came back **yes**:
+[#417333 A5](../competition/05-talkboard-qa.md) — *"CC BY-NC-ND data may be used, augmentation
+included, provided the work is reproducible from 원본 파일 + 코드"* — resolved **2026-09-08**, the
+same day `fma_allow.csv` was generated at 20:08.
+[data/01](../data/01-rules-check.md) and [survey/10 V2](../survey/10-open-questions.md) both record
+it as closed; the artifact was simply never rebuilt.
+
+### ⏭️ Deferred, with a trigger — **not** an open licence question
+
+Regenerating is ~10 minutes: merge `allow ∪ derivatives_barred` into `fma_allow.csv` keeping the
+`verdict` column so the ND provenance stays visible, then re-run `eda gates`. It would take
+`G-EDA1/allowlist/fma` from **fail** to pass on ~7,977 of 8,000.
+
+**It is deferred because the benefit is volume, and volume is not pool C's constraint.**
+
+| | |
+|---|---|
+| what it adds | **+57%** allowed files (5,093 → ~7,977) |
+| what it does **not** add | a publisher. Pool C is two sources — `fma` 66.6 h, `musan-music` 42.6 h — and stays two |
+| what it does **not** dilute | 🔴 neither shortcut. Duration (30.003 s) and the 43 dB onset deficit ([C5b](#c5b---answered-2026-09-16-the-boundary-shortcut-is-real-and-it-runs-backwards)) are properties of **FMA's excerpting**, and the recovered files are FMA excerpts too |
+| what it does **not** change | any EDA number. The S-tier draw takes 2,000 `fma` files, well under the 5,093 already allowed |
+
+⚠️ And pool C is not volume-starved: **109.2 h of real music against pool D's 77.3 h**. The corpus
+is fake-heavy on this head, so adding to the real side is the less useful direction.
+
+**Trigger: do it when pool C volume becomes the binding constraint on the music head — not before.**
+The cost is the ~10 minutes plus accepting A5's condition as a *pipeline obligation*: the 2nd-stage
+submission must ship 원본 파일 + 코드 and never a redistributed derivative. That is already
+[data/06](../data/06-augmentation-spec.md)'s design, so it costs nothing architecturally, but it
+binds the submission format.
+
+### 🔴 The lead this actually produced: `mtg-jamendo`
+
+The ND resolution's value is not fma. **`mtg-jamendo` would be pool C's *third* publisher** — which
+is the constraint that binds — and its allowlist carries the identical staleness: 36,728 `allow`
+rows, with a `derivatives_barred` bucket roughly 60% that size again. A5 approximately doubles what
+Jamendo would contribute.
+
+It is **not on disk**, so that is an *acquisition* decision rather than EDA work, and
+`G-EDA1/mtg-jamendo` correctly reads `na` until it lands.
+
+⚠️ For the record, because it is the obvious next guess and it is wrong: **ND does not unblock
+CtrSVDD.** Its blocker is a label-file join — 128,029 rows are 109,313 deepfake and **18,716
+bonafide**, and the label lives only in `train.txt`/`dev.txt` keyed by utterance id
+([`configs/eda.yaml`](../../configs/eda.yaml)). Nothing about licensing changes that.
