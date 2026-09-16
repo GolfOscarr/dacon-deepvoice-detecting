@@ -1,7 +1,7 @@
 # The data memo — X7, the EDA's exit condition
 
-**Written 2026-09-14; updated 2026-09-15 with the content tier and 2026-09-16 with steps 1-4 of
-[10](10-final-plan.md).** Every number here was measured, not carried forward; the command that
+**Written 2026-09-14; updated 2026-09-15 (content tier), 2026-09-16 (steps 1-4 of
+[10](10-final-plan.md)) and 2026-09-17 (A6, and the last two sub-parts).** Every number here was measured, not carried forward; the command that
 reproduces each one is named beside it. This is
 [06 X7](06-cross-pool.md#x7--the-data-memo-e-s3--tier-s-the-exit-condition), and the standard it is
 written to is the playbook's: *"do not advance to hyperparameter tuning until the data memo explains
@@ -10,18 +10,21 @@ sections, and the third is the one to read first.
 
 ```bash
 V=/data/project/private/dacon-venvs/dacon311/bin/python
-$V -m eda.cli sources | probe | consolidate | keys   # the M tier and the group keys
-$V -m eda.cli sample | signal                        # the S tier, both halves
-$V -m eda.cli report                                 # duration, bandwidth, level
-$V -m eda.cli analyze | gates                        # X1, E1, grouping, the gates
-$V -m eda.cli b1 | screens | roles | envelope        # B1, the four screens, X6, C5
-$V -m eda.cli envelope --run                         # C5's decode, ~5 min over the corpus
+# read-only, no decode -- one verb per line, because they are not a pipeline
+for verb in sources probe consolidate keys sample report analyze gates \
+            b1 screens roles envelope reassign; do
+  $V -m eda.cli "$verb"
+done
+$V -m eda.cli signal          # the S tier: ~8 h. Not to be re-run (10 section 4)
+$V -m eda.cli envelope --run  # C5's decode, ~5 min over the corpus
 ```
 
 ⚠️ **Completeness claims in this repository have been wrong before.** The 2026-09-15 version of this
 memo said the EDA was complete on the strength of [09](09-next-steps.md)'s eight steps; 09 was a
 remaining-work plan and never the task inventory. [10 §1](10-final-plan.md) is the inventory —
-**33 answered, 7 blocked, 2 Phase 2** — and it is the page to check before believing this one.
+**34 answered · 7 blocked · 2 Phase 2 = 43** — and it is the page to check before believing this
+one. ⚠️ That page's own header was wrong from 2026-09-16 to 2026-09-17 (it read *"33 … = 42"*
+while A6 was still outstanding), so **count the status markers, not the header**.
 
 ---
 
@@ -148,15 +151,17 @@ four are split across three pools ([00 §4d](00-harness.md#4d---r1-on-the-whole-
 
 ## 5 — 🔴 The leakage hypothesis
 
-**There are two, they are independent, they are on the same 0.27-weight head, and they are within
-0.02 AUC of each other.** The playbook asks for *the first* leakage hypothesis; this corpus has two
-that matter equally, and treating them as one is the error that would leave half the problem in
-place.
+**There are four: three statistical and one structural, on both scored heads.** The playbook asks
+for *the first* leakage hypothesis; this corpus has several that matter, and collapsing them into
+one is the error that would leave most of the problem in place. L1 and L2 are within **0.02 AUC** of
+each other on the same 0.27-weight head and are **independent** — one is the file's length, the
+other its first 20 ms.
 
 | | shortcut | what it is | AUC | fixed by |
 |---|---|---|--:|---|
 | **L1** | **duration** | the file's *length* | **0.852** (whole-publisher holdout) | a crop policy |
 | **L2** | **onset deficit** | the file's first **20 ms** | **0.869** (pool C vs D) | a **random-offset** crop |
+| **L3** | **sibling content** | the same recording either side of a fold | *structural* | the fold builder (`G-EDA4`, Phase 2) |
 | **L4** | **leading silence** | the file's first *seconds* | **0.639** (same utterance, one vocoder apart) | the `A-A11` silence-edit augmentation |
 
 ⚠️ **L4 is on the *voice* head, and it is the one that survives pairing.** See
@@ -177,11 +182,18 @@ The evidence, in the order it was found:
 | | measurement | where |
 |---|---|---|
 | M tier, full corpus | every metadata column except `n_streams` separates the corpus alone | [06 X1b](06-cross-pool.md#x1b---x1-run-on-the-full-corpus-it-is-one-confound-wearing-fifteen-hats) |
-| M tier, source-grouped | voice heads collapse (0.488, 0.467); `music_present` does not (0.991), and **duration alone holds 0.933** | [06 X1c](06-cross-pool.md) |
+| M tier, source-grouped ⚠️ **dated** | voice heads collapse (0.488, 0.467); `music_present` does not (0.991), and **duration alone holds 0.933** | [06 X1c](06-cross-pool.md) |
 | **S tier, chain plane, source-grouped** | `music_present` **0.852**, carried by `longest_valid_span_s` 0.943 and `duration_s_decoded` 0.922 | [06 X1d](06-cross-pool.md#-x1d--x1-on-the-decoded-audio-the-duration-shortcut-survives-the-chain) |
 | the cause | pool D is **10.000 s** for every file; pool C is 30.003 s | [04 D8](04-pool-d-fake-instrumental.md), [03 C8](03-pool-c-real-instrumental.md) |
 
 Against a gate of **AUC < 0.60**.
+
+⚠️ **The X1c row is a dated snapshot and today's artifact disagrees with it on purpose.** X1c was
+run on **264,085 rows across 13 sources on 2026-09-12, before WaveFake landed**. Today's
+`shortcut_audit.parquet` (382,068 rows, 14 sources) reads `voice_present` **0.324**, `voice_fake`
+**0.333**, `music_present` **0.583** source-grouped. The row is kept because it is the order the
+evidence arrived in; it is **not** a current claim. The live number for L1 is the S-tier one below,
+and it lives in `screen_metadata_leak.parquet` as `auc_source_grouped_chain`.
 
 **Why it is the dangerous one.** Source-grouped validation is the tool we use to catch shortcuts,
 and it *hides* this one: every music source we hold is long and every voice source is short, so
@@ -231,8 +243,8 @@ exists.
 | Level as a publisher fingerprint | open, 22.6 dB spread | a normalisation decision, and the stage to apply it at |
 | `G-EDA3`: 5 of 14 sources under 6 groups | 2 have no publisher key (`musan-noise`, `musan-speech`); 3 are **genuinely short** (`ljspeech` 1, `sonics` 5, `wavefake` 2) | nothing — the last three are facts about the sources. They cannot be rotated in a fold table |
 | `G-EDA1/allowlist/fma` fails, 2,907 of 8,000 | ⏭️ deferred | **23 DENY + 2,884 ND**; ND resolved usable by #417333 A5. The allowlist is stale, not restrictive ([03 C1b](03-pool-c-real-instrumental.md)) |
-| Pool C is one usable source | open | `mtg-jamendo` is in the store, unfetched |
-| 🔴 `G-EDA6` — component evidence | **fail: 2,442 of 58,884 rows contradict their assertions** | reassign (F-A1) before dropping. Worst: pool C at 12.6%, and that is a floor |
+| Pool C is **two** sources, one of them small | open | `fma` 8,000 files / 66.6 h and `musan-music` 660 / 42.6 h. Both usable -- the risk is **publisher diversity**, not usability. `mtg-jamendo` would be a third and is in the store, unfetched ([03 C1b](03-pool-c-real-instrumental.md)) |
+| 🔴 `G-EDA6` — component evidence | **fail: 2,442 of 58,884 rows contradict their assertions** | ✅ **decomposed** into three problems with opposite actions ([07 G-EDA6b](07-order-and-gates.md)); acting on it is a **manifest** change. Worst source rate: pool C at 12.6%, and that is a floor |
 | Sung voice cannot be evidenced | open, **measured** | a singing-aware detector. A speech VAD finds vocals in 28.1% of files the publisher says all have them ([00 §4e](00-harness.md#4e---what-the-vad-can-and-cannot-evidence)) |
 | `G-EDA4` — pairs vs fold boundaries | `na` | a built fold table (Phase 2) |
 | `G-EDA7` — filter-rate symmetry | `na` | a filter. Phase 0 applies none, by design (R2) |
@@ -282,13 +294,28 @@ Stated rather than left as a silence:
 6. **Level is a publisher fingerprint and is *not* neutralised by the chain** — 22.6 dB of
    median-RMS spread. Metadata is neutralised by the render chain; level is not, yet.
 7. **No degenerate-generation population exists to drop**, and a drop would be asymmetric anyway:
-   pool C flags **3.6×** more often than pool D ([02 B4b](02-pool-b-fake-voice.md)).
+   pool C flags **3.6×** more often than pool D ([02 B4b](02-pool-b-fake-voice.md)). ⚠️ But the VAD
+   finds **23** that the level/clipping screen structurally could not
+   ([07 G-EDA6b](07-order-and-gates.md)) — the right detector for *"the TTS produced no speech"* is
+   a VAD.
+8. 🔴 **Turn the silence augmentation on.** `silence_lead_s` / `silence_tail_s` are **0.0** in
+   `configs/run_default.yaml`, so no RNG draw happens at all. L4 clears the gate in every
+   configuration measured and is **strongest where the controls are tightest**
+   ([01 A6b](01-pool-a-real-voice.md)). Symmetric across pools A and B, or it becomes the cue it
+   inoculates against. ⚠️ Changes the drawn stream — needs an I1b re-run.
+9. 🔴 **Do not trim silence**, and the reason is now arithmetic as well as principled. Trimming
+   costs pool A **7.78 pp** of the 4-60 s window against pool B's **4.12 pp**, so it is an
+   **asymmetric transform** (R2) that shifts the real/fake balance toward the label; pool E would
+   lose **27.28 pp** ([01 A5b](01-pool-a-real-voice.md)). It also does nothing for L1 — the music
+   pools are untouched.
 
 ---
 
-## 9 — The two decisions this memo does not make
+## 9 — The two decisions that were open, and where they landed
 
-Measured, and left open because they are calls rather than computations.
+⚠️ **Both were open when this section was written and neither is now.** Kept as a section because
+each still needs an *action* somewhere outside the EDA, and because the shape of each answer is the
+useful part.
 
 | | what | the number |
 |---|---|---|
