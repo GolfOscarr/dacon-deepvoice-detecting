@@ -116,12 +116,13 @@ claimed nothing was outstanding. Count the markers, not the header: `grep -c` th
 ### ⚠️ Sub-parts not delivered inside otherwise-answered tasks
 
 A ✅ above means the task's **question** has a written numeric answer. Five asked for something
-extra that was not produced, none of which changes a conclusion:
+extra. **Two were computed on 2026-09-17** and are struck through; the other three are closed for
+stated reasons rather than left hanging:
 
 | task | what is missing |
 |---|---|
-| A5 | the duration counts were not repeated *after silence trimming* |
-| A7 | `lufs_integrated` is deliberately deferred (`eda/extract/level.py`); the between- vs within-source variance ratio was not computed |
+| ~~A5~~ | ✅ **2026-09-17.** Trimming costs pool A **7.78 pp** of the 4-60 s window against pool B's **4.12 pp**, and pool E **27.28 pp**; pools C and D are unaffected (0.18, 0.55). 🔴 An **asymmetric** transform under R2 — one more reason not to trim ([01 A6b](01-pool-a-real-voice.md)) |
+| ~~A7~~ | ✅ **2026-09-17** for the variance ratio: **35.9%** of `rms_dbfs` variance and 36.1% of `peak_dbfs` is *between source*, against 13.5% for `crest_factor_db`. The publisher sets the level, not the content. `lufs_integrated` stays deliberately deferred (`eda/extract/level.py`) |
 | A8 | the PANNs half — VAD only ([09 §7](09-next-steps.md) records why PANNs was declined) |
 | E4 | groups counted; `build_folds` feasibility not run — it needs the fold builder (Phase 2) |
 | X1 | audited **per head**, not additionally per cell |

@@ -379,3 +379,55 @@ tightest, and survives the render chain untouched.
 ⚠️ Turning them on changes the drawn stream and needs an **I1b re-run**. And ⚠️ **the augmentation
 must be symmetric** (R2): applied to pool A and pool B alike, or it becomes the cue it is meant to
 inoculate against.
+
+---
+
+## A5b / A7b — ✅ 2026-09-17: the two sub-parts, computed
+
+Both were listed in [10 §1](10-final-plan.md) as *"asked for and not produced"*. Neither needs a
+decode; both are arithmetic over `signal.parquet`.
+
+### A5b — what silence trimming would cost, per pool
+
+Trimmed duration is `duration_s_decoded - lead_silence_s - tail_silence_s`, chain plane, read
+against the test set's 4-60 s window.
+
+| partition | raw median | trimmed median | raw in window | trimmed in window | **pp lost** |
+|---|--:|--:|--:|--:|--:|
+| **A** real voice | 6.96 | 6.24 | 76.1% | 68.3% | **7.78** |
+| **B** fake voice | 4.73 | 4.36 | 58.6% | 54.5% | **4.12** |
+| C real instr. | 30.00 | 30.00 | 75.7% | 75.5% | 0.18 |
+| D fake instr. | 10.00 | 10.00 | 100.0% | 99.5% | 0.55 |
+| **E** noise | 4.00 | 4.00 | 98.0% | 70.7% | **27.28** |
+| cell 8 | 120.00 | 120.00 | 20.2% | 20.2% | 0.00 |
+
+🔴 **Trimming is an asymmetric transform, and R2 forbids it on that ground alone.** It costs pool A
+**7.78 pp** of usable material against pool B's **4.12 pp** — a 3.66 pp gap that shifts the real/fake
+balance on the voice head in the direction of the label. That is a third, independent reason not to
+trim, beside [P-A2](../data/10-preprocessing-and-filtering.md)'s argument and
+[A6b](#a6b---answered-2026-09-17-the-silence-shortcut-is-real-and-it-survives-pairing)'s.
+
+⚠️ **Pool E would lose 27.28 pp**, because its median file is exactly 4.00 s — at the floor, with no
+headroom. Trimming would gut the noise pool's cell-9 viability, which [05 E5b](05-pool-e-noise.md)
+measured at 83.8%.
+
+⚠️ The music pools are untouched (0.18 and 0.55 pp), so this says nothing about the duration
+shortcut [L1](data_memo.md). Trimming does not fix that and was never going to.
+
+### A7b — the publisher sets the level, not the content
+
+Between- against within-source variance, chain plane, over all 58,885 rows:
+
+| column | between | within | ratio | share that is the source |
+|---|--:|--:|--:|--:|
+| `rms_dbfs` | 41.29 | 73.78 | 0.560 | **35.9%** |
+| `peak_dbfs` | 41.25 | 72.98 | 0.565 | **36.1%** |
+| `crest_factor_db` | 1.86 | 11.95 | 0.156 | 13.5% |
+
+**Over a third of all level variance is between sources** — which is what [A9](#-a9--s-tier-duration-and-a-226-db-level-spread-across-the-corpus) reports as the
+22.6 dB median-RMS spread, expressed as a proportion. `crest_factor_db` at 13.5% is the control: it
+is a *shape* statistic, it is far less publisher-bound, and it is the one to prefer where a level
+feature is wanted at all.
+
+⚠️ `lufs_integrated` stays deliberately deferred (`eda/extract/level.py`); this sub-part was the
+variance ratio, and the ratio is what A7 asked for.
