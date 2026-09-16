@@ -555,3 +555,43 @@ crop in front of it.
 ⚠️ A linear screen on summary statistics still ranks where to spend; it does not conclude that a
 family is redundant (see B6 above). ★ `[survey/02]`'s 46.4% cross-generator EER for music is about
 *acoustic* separability, and nothing here contradicts it — duration is not acoustics.
+
+---
+
+## B2b — ✅ Answered 2026-09-16: **Korean fake voice exists** — 12 generators, 359 files, 0.92 h
+
+`eda/out/_shared/census_mlaad_inventory.parquet`. Over the capped 16,006-file MLAAD draw:
+**534 `language × generator` leaves, 54 languages, 205 generators, 34.6 h.**
+
+⚠️ The counts in [02's header](#02--pool-b-fake-voice) — *"175 TTS families across 535 directories"*
+— came from the S3 key listing at acquisition. Measured against the census the numbers are **205
+generators over 534 leaves**. Neither is wrong; the listing counted directories on the archive and
+this counts what was actually fetched under the 30-file-per-leaf cap. The census figure is the one
+to quote from here on.
+
+### 🔴 The question B2 existed to answer
+
+*"Whether Korean fake voice exists in our pool at all"* — flagged in
+[PROGRESS](../../PROGRESS.md) as an open decision with **no evidence attached**, because the
+competition is Korean-hosted. It does:
+
+| generator | n | | generator | n |
+|---|--:|---|---|--:|
+| `Chatterbox Multilingual` | 30 | | `Qwen3-TTS-12Hz-0.6B-Base` | 30 |
+| `Fish-S2-Pro` | 30 | | `Qwen3-TTS-12Hz-1.7B-Base` | 30 |
+| `Higgs-Audio-V2` | 30 | | `VoxCPM2` | 30 |
+| `MOSS-TTS-1.7B` | 30 | | `minimax_speech-02-turbo` | 30 |
+| `MOSS-TTS-8B` | 29 | | `..._bark` | 30 |
+| `OmniVoice` | 30 | | `..._xtts_v2` | 30 |
+
+**12 generators, 359 files, 0.92 audio-hours.** Modern families, and the spread across 12 of them
+matters more than the hours: generator diversity is what the fold table consumes.
+
+⚠️ **But 0.92 h is 2.7% of MLAAD and 0.1% of the corpus.** The decision B2 was blocking is *"how
+large a Korean slice"*, and the honest framing is that Korean fake voice is **present but thin** —
+enough to evidence that the families exist and reach Korean, not enough to train a Korean-specific
+head. Self-generated Korean TTS moves up or down on how much that matters, and we hold
+Zeroth-Korean transcripts (52.9 h, 22,720 files) to drive it if it does.
+
+For scale, the top of the distribution: `en` 4,286 files / 8.65 h / 143 generators, `fr` 1,260 /
+2.58 h / 42, `de` 1,320 / 2.51 h / 44, `es` 1,139 / 2.02 h / 38. Korean sits well down the tail.

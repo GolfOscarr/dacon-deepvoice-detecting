@@ -15,11 +15,15 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 | ⛔ **blocked** | needs an input we do not hold |
 | ⏭️ **Phase 2** | out of the EDA's scope by design |
 
-**25 answered · 7 data-exists · 2 runnable · 7 blocked · 2 Phase 2 = 43.**
+**32 answered · 0 data-exists · 1 runnable · 7 blocked · 2 Phase 2 = 42**, plus **C5** — 1 runnable and
+**optional**; [§2.4](#step-4--c5s-envelope-half-optional-and-probably-unnecessary) recommends closing it on reasoning rather than a decode.
 
-> **Steps 1 and 2 closed 2026-09-16.** B1, B4, D6, B6, E5 and X2 all have written answers.
-> **Only step 3 remains** -- `_shared/roles.md` and the six 📊 census write-ups -- and it does
-> not decode. C5 (step 4) is optional and [§2.4](#step-4--c5s-envelope-half-optional-and-probably-unnecessary) recommends closing it on reasoning.
+> **Steps 1, 2 and 3 closed 2026-09-16.** Every runnable task except **C5** now has a written
+> answer, and C5 is optional -- [§2.4](#step-4--c5s-envelope-half-optional-and-probably-unnecessary)
+> recommends closing it on reasoning rather than spending a 45-minute decode.
+>
+> What remains before the EDA is closed: **C5's disposition**, then updating
+> [`data_memo.md`](data_memo.md) and [`RESULTS_FOR_ANALYSIS.md`](RESULTS_FOR_ANALYSIS.md).
 
 ⚠️ `A9`, `C8`, `D8`, `D9` are **result sections**, not tasks, and are not counted here.
 
@@ -31,7 +35,7 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 
 | | task | status | evidence / blocker |
 |---|---|---|---|
-| A1 | Native-format census | 📊 | `files.parquet`, 100%. Never tabulated per source |
+| A1 | Native-format census | ✅ | **2026-09-16**, [01 A1b](01-pool-a-real-voice.md). `fakemusiccaps` is the corpus's only `pcm_f32le` source -- one column identifies pool D |
 | A2 | Near-Nyquist rolloff profile | ✅ | [00 §4d](00-harness.md), `signal_bandwidth.parquet` |
 | A3 | Speaker inventory / grouping atoms | ✅ | [06 X6b](06-cross-pool.md), `grouping_report.parquet` — zeroth 115, ljspeech declared 1 |
 | A4 | Common Voice subset design | ⛔ | `common-voice-en/ko` not on disk |
@@ -46,8 +50,8 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 |---|---|---|---|
 | B0 | CFAD registered | ✅ | [02 B0](02-pool-b-fake-voice.md) |
 | **B1** | **WaveFake ↔ LJSpeech pairs** | ✅ | **Answered 2026-09-16**, [02 B1b](02-pool-b-fake-voice.md). 500 pairs, 4,000 files, 0 failures. The artifact **survives 16 kHz at 82–115%** and `melgan` ↔ `multi_band_melgan` correlate at **−0.186** |
-| B2 | MLAAD generator / language inventory | 📊 | `group_key` holds 54 language×generator groups; not tabulated |
-| B3 | Format census against pool A | 📊 | same data as A1 |
+| B2 | MLAAD generator / language inventory | ✅ | **2026-09-16**, [02 B2b](02-pool-b-fake-voice.md). 534 leaves, 54 languages, 205 generators. **Korean exists**: 12 generators, 359 files, 0.92 h |
+| B3 | Format census against pool A | ✅ | **2026-09-16**, [01 A1b](01-pool-a-real-voice.md). Pools A and B are **format-indistinguishable** -- no container confound between real and fake voice |
 | B4 | Degenerate-output screen (F-S4) | ✅ | **2026-09-16**, [02 B4b](02-pool-b-fake-voice.md). No failure population: pool D flags **0.40%**, the lowest of any pool. ⚠️ the looping detector needs a decode |
 | B5 | Duration / speaker-proxy census | ✅ | [02 B0c](02-pool-b-fake-voice.md) |
 | B6 | Cross-generator separability | ✅ | **2026-09-16**, [02 B6b](02-pool-b-fake-voice.md). Pool B median best-AUC **0.904**; pool D's `mustango` at **1.000** on duration alone |
@@ -62,7 +66,7 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 | C3 | Artist / album grouping atoms | ⛔ | needs FMA `tracks.csv`; the metadata archive is unfetched. `eda keys` flags it every run |
 | C4 | Genre census, C↔D matching | ⛔ | same archive |
 | C5 | Clip boundary / duration morphology | ▶️ | duration half answered by [03 C8](03-pool-c-real-instrumental.md). The **onset/offset envelope classification** — hard-cut / fade / natural start — was never computed and needs a decode |
-| C6 | Codec provenance, the mp3 question | 📊 | `files.parquet`; not tabulated |
+| C6 | Codec provenance, the mp3 question | ✅ | **2026-09-16**, [01 A1b](01-pool-a-real-voice.md). Not "is it mp3": `sonics` 36.8 kbps against `fma` 265.7 kbps, non-overlapping |
 | C7 | MUSAN `music/` as pool C | ✅ | structural in `configs/eda.yaml` |
 
 ### Pool D — fake instrumental
@@ -70,8 +74,8 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 | | task | status | evidence / blocker |
 |---|---|---|---|
 | D1 | Archive inventory, real-half exclusion | ✅ | [08 §D1](08-real-run.md) — no MusicCaps real half |
-| D2 | Per-model census | 📊 | per *source* exists; per generator directory not tabulated |
-| D3 | Near-Nyquist per model, both planes | 📊 | `signal_bandwidth.parquet` is per source, not per generator |
+| D2 | Per-model census | ✅ | **2026-09-16**, [04 D2b](04-pool-d-fake-instrumental.md). 231 generators. All 5 of pool D's have a **single duration each**, over all 27,605 files |
+| D3 | Near-Nyquist per model, both planes | ✅ | **2026-09-16**, [04 D3b](04-pool-d-fake-instrumental.md). 🔴 **the chain is a no-op for pool D** -- both planes identical; `near_nyquist_ratio` spans 58x |
 | D4 | Family-count shortfall vs fold builder | ⏭️ | needs a built fold table |
 | D5 | Caption / prompt census vs pool C | ⛔ | MusicCaps captions not fetched |
 | D6 | Degenerate-generation screen (F-S4) | ✅ | **2026-09-16**, [04 D6b](04-pool-d-fake-instrumental.md). ⚠️ pool C flags **3.6×** more than D -- a drop would manufacture "clipping means REAL" |
@@ -97,7 +101,7 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 | X3 | Adversarial validation | ⛔ | needs the organizers' test audio |
 | X4 | Dummy-file forensics | ⛔ | 🔴 needs `TEST_0000–0002.wav`. **Not on disk** — searched the corpus, the repo and S3. Marked *blocking*; it leaves `normalize` unparameterized in the render path |
 | X5 | Composition confound, spec stream | ⏭️ | Phase 2 — X1 reads the corpus, this reads the spec stream |
-| X6 | Metadata role assignment | ▶️ | keys done ([X6b](06-cross-pool.md)); the artifact it asks for — `_shared/roles.md`, every column assigned feature / split-key / leakage-risk — **does not exist** |
+| X6 | Metadata role assignment | ✅ | **2026-09-16**, [06 X6b](06-cross-pool.md). `_shared/roles.md`: **118 columns, 0 unassigned**. `files.parquet` contributes **zero** features |
 | X7 | The data memo | ✅ | [`data_memo.md`](data_memo.md) |
 
 ### ⚠️ Sub-parts not delivered inside otherwise-answered tasks
@@ -146,13 +150,16 @@ All over columns already on disk. No decode.
 | **E5** | cell-9 viability: how much of pool E can supply `PRESENT=0` at 4 s |
 | **X2** | the metadata-leak question, against the chain-plane features |
 
-### Step 3 — `_shared/roles.md`, and the census write-ups
+### Step 3 — `_shared/roles.md`, and the census write-ups ✅ **done 2026-09-16**
 
 X6's actual deliverable. Every column in `files.parquet` and `signal.parquet` assigned to exactly
 one of **feature** / **split key** / **leakage risk**, with missingness and cardinality. Folding in
 the six 📊 tasks — A1, B2, B3, C6, D2, D3 — as the per-source census tables they each asked for.
 
 **Done when** `_shared/roles.md` exists and no column is unassigned.
+✅ **Met.** 118 columns, 0 unassigned, generated by `python -m eda.cli roles` and regenerable.
+⚠️ It reports **five** roles, not three: `label` and `diagnostic` were added because 40 of the 118
+columns fit none of X6's original three, and forcing them would have been false ([06 X6b](06-cross-pool.md)).
 
 ### Step 4 — C5's envelope half: optional, and probably unnecessary
 

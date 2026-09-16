@@ -237,3 +237,72 @@ crowd-sourced clips).
 cell-5 sample, not garbage, and reassignment *adds* a hard positive rather than shrinking the pool.
 Files with no evidenced voice get a validity mask (V-A2) or, if nothing survives, a drop with the
 reason recorded.
+
+---
+
+## A1b — ✅ Answered 2026-09-16 (with B3 and C6): the format census, and where it separates the pools
+
+`eda/out/_shared/census_format_census.parquet`, written by `python -m eda.cli roles`. One row per
+source over all **382,068** census rows. A1 asks for it over pool A; [B3](02-pool-b-fake-voice.md)
+asks for pool B's *against* pool A's, so it is one table and the comparison is a sort.
+
+| source | pool | n | hours | container | codec | fmt | rate | ch | encoder present |
+|---|---|--:|--:|---|---|---|--:|--:|--:|
+| `cfad-real` | A | 38,600 | 57.5 | wav | pcm_s16le | s16 | 16k | 1 | 0% |
+| `ljspeech` | A | 13,100 | 23.9 | wav | pcm_s16le | s16 | 22.05k | 1 | 0% |
+| `musan-speech` | A | 426 | 60.4 | wav | pcm_s16le | s16 | 16k | 1 | 0% |
+| `zeroth-korean` | A | 22,720 | 52.9 | **flac** | flac | s16 | 16k | 1 | 0% |
+| `cfad-fake` | B | 73,700 | 69.5 | wav | pcm_s16le | s16 | 16k | 1 | 0% |
+| `mlaad` | B | 16,006 | 34.6 | wav | pcm_s16le | s16 | 22.05k | 1 | 0% |
+| `wavefake` | B | 117,983 | 198.7 | wav | pcm_s16le | s16 | 22.05k | 1 | 0% |
+| `fma` | C | 8,000 | 66.6 | **mp3** | mp3 | **fltp** | **44.1k** | **2** | **100%** |
+| `musan-music` | C | 660 | 42.6 | wav | pcm_s16le | s16 | 16k | 1 | 0% |
+| `fakemusiccaps` | D | 27,605 | 77.3 | wav | **pcm_f32le** | **flt** | 16k | 1 | 0% |
+| `compspoof-env-bonafide` | E | 13,172 | 14.6 | wav | pcm_s16le | s16 | 16k | 1 | 0% |
+| `musan-noise` | E | 930 | 6.2 | wav | pcm_s16le | s16 | 16k | 1 | 0% |
+| `rirs-isotropic-noise` | E | 92 | 0.8 | wav | pcm_s16le | s16 | 16k | **8** | 0% |
+| `sonics` | cell 8 | 49,074 | 1,970.6 | **mp3** | mp3 | fltp | 16k | 1 | **100%** |
+
+### ✅ B3's answer: pools A and B are format-indistinguishable
+
+**Every pool-A and pool-B source is `pcm_s16le`/`s16` mono wav, except `zeroth-korean`'s flac.**
+The rates are 16 kHz and 22.05 kHz on *both* sides. This is the good news B3 was looking for and did
+not expect: there is **no format confound between real and fake voice**, so the voice heads' problem
+is not a container fingerprint. It is consistent with [X2b](06-cross-pool.md)'s `voice_fake` being
+the weakest metadata head (AUC 0.834 against `music_fake`'s 1.000).
+
+### 🔴 …and the two places where format *is* the label
+
+1. **`fakemusiccaps` is the only `pcm_f32le`/`flt` source in the corpus.** One column,
+   `sample_fmt`, identifies pool D with certainty. That is the mechanism behind X2b's
+   `music_fake` AUC of **1.000** — not a subtle statistical edge, a single categorical value.
+2. **`fma` is the only 44.1 kHz source, the only stereo one, and one of two mp3 sources.** Four
+   independent columns each isolate pool C.
+
+So the music heads' metadata leak is not one confound but two, sitting on opposite sides of the
+label, and neither exists between pools A and B.
+
+### 🔴 C6's answer: the mp3 question is about **bit rate**, not about mp3
+
+`census_codec_provenance.parquet`. Only two sources are lossy, and they differ by **7×**:
+
+| source | container | n | bit rate p05 / median / p95 | Xing | LAME |
+|---|---|--:|--:|--:|--:|
+| `fma` | mp3 | 7,997 | 138.5k / **265.7k** / 320.0k | 100% | 50.5% |
+| `sonics` | mp3 | 49,074 | 33.9k / **36.8k** / 40.1k | 100% | 100% |
+| `zeroth-korean` | flac | 22,720 | 97.2k / 121.1k / 141.3k | 0% | 0% |
+| everything else | wav | — | 256k – 2,048k, near-constant per source | 0% | 0% |
+
+⚠️ **`sonics` at 36.8 kbps against `fma`'s 265.7 kbps is the cell-8-vs-pool-C boundary wearing a
+codec.** Both are mp3, so "is it mp3" separates nothing; the bit rate separates them completely and
+non-overlappingly (fma p05 138.5k against sonics p95 40.1k). SONICS is AI songs and FMA is real
+music, so this is a **third** metadata route to the music label, independent of the two above.
+Anything that reads `bit_rate` reads the label.
+
+⚠️ Three `fma` rows have no container at all — the probe failures already recorded in `probe_error`.
+They are counted here, not dropped (R2).
+
+⚠️ `encoder` is present for 100% of both mp3 sources and 0% of everything else, so its
+**missingness** is the fingerprint rather than its value — which is exactly what `build_design`'s
+`_isna` indicators encode, and why the census reports `encoder_present` rather than only
+`n_encoders`.

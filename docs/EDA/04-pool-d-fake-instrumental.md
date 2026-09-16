@@ -296,3 +296,76 @@ B4b for why it needs a decode.
 every FakeMusicCaps generator has **exactly zero duration variance**, and `mustango` (10.242 s) is
 separable from the other four at **AUC 1.000** on duration alone. D8's shortcut is also a generator
 fingerprint.
+
+---
+
+## D2b / D3b — ✅ Answered 2026-09-16: per generator, and R1 is a no-op for pool D
+
+`census_generator_census.parquet` and `census_near_nyquist_by_generator.parquet`
+(`python -m eda.cli roles`). **231 generators across four sources** — CFAD 11, FakeMusicCaps 5,
+MLAAD 205, WaveFake 10.
+
+🔴 **D2 and D3 were blocked on a key nobody had built, not on data.** Both ask for a
+per-*generator* breakdown; the census carries `source_name` and `group_key`, and in pool D
+`group_key` is the FakeMusicCaps parent clip ([02 B6b](02-pool-b-fake-voice.md)). They were
+unblocked by `screens.generator_key` rather than by any new measurement.
+
+### D2b — pool D, and the constant-duration finding at full census scale
+
+| generator | n | hours | rate | median duration | **constant?** |
+|---|--:|--:|--:|--:|:--:|
+| `MusicGen_medium` | 5,521 | 15.61 | 16k | **10.180** | ✅ |
+| `audioldm2` | 5,521 | 15.34 | 16k | **10.000** | ✅ |
+| `musicldm` | 5,521 | 15.34 | 16k | **10.000** | ✅ |
+| `mustango` | 5,521 | 15.71 | 16k | **10.242** | ✅ |
+| `stable_audio_open` | 5,521 | 15.34 | 16k | **10.000** | ✅ |
+
+**All five of pool D's generators have a single duration each, over all 27,605 files** — and they
+are the only 5 of the corpus's 231 generators that do. B6b measured this on the 2,000-file draw;
+this is the whole census and it holds exactly.
+
+⚠️ **The count is 5, and getting it right needed `min == max` rather than `std == 0`.** Measured:
+`mustango` and `MusicGen_medium` are each a single repeated value whose `std` comes back as
+`1.776357e-15`, not `0.0` — floating-point error accumulated over 5,521 identical addends. A zero
+test finds 3 of the 5 and would have published *"3 of 231"*. The census reports an exact
+`duration_constant` column for this reason and a mutant holds it in place.
+
+### D3b — 🔴 the chain is a **no-op** for pool D, so nothing is destroyed
+
+Median per generator, both planes:
+
+| generator | `near_nyquist_ratio` native → chain | `effective_bandwidth_hz` native → chain | `hf_ratio_8k` |
+|---|--:|--:|--:|
+| `mustango` | 0.0030 → **0.0030** | 8000 → 8000 | 0.0000 |
+| `musicldm` | 0.0139 → **0.0139** | **7687.5** → 7687.5 | 0.0000 |
+| `MusicGen_medium` | 0.1259 → **0.1259** | 8000 → 8000 | 0.0000 |
+| `stable_audio_open` | 0.1320 → **0.1320** | 8000 → 8000 | 0.0000 |
+| `audioldm2` | 0.1753 → **0.1753** | 8000 → 8000 | 0.0000 |
+
+**Every column is identical on the two planes**, because FakeMusicCaps is natively 16 kHz — the
+competition's own standardization has nothing to do. This is the generator-level form of the
+corpus-wide finding that ten of fourteen sources lose nothing to the chain, and it is the answer to
+D3's actual question: pool D's per-generator fingerprints **all survive**, because there is no
+resample to survive.
+
+And they are large. `near_nyquist_ratio` spans **0.0030 to 0.1753 — a 58× range across five
+generators** — with `musicldm` additionally the only one whose effective bandwidth is not 8000 Hz.
+Together with the constant durations, pool D's generators are identifiable on at least two
+independent, chain-invariant axes.
+
+### Contrast — WaveFake, where the chain *does* destroy something
+
+The same table for pool B's 22.05 kHz source, which makes the asymmetry legible:
+
+| generator | `effective_bandwidth_hz` native → chain | `hf_ratio_8k` native → chain | `near_nyquist_ratio` native → chain |
+|---|--:|--:|--:|
+| `ljspeech_waveglow` | 11025 → **8000** | 0.0378 → **0.0001** | 0.0312 → 0.2473 |
+| `ljspeech_multi_band_melgan` | 10853 → **8000** | 0.0225 → **0.0001** | 0.0341 → 0.1934 |
+| `ljspeech_parallel_wavegan` | 10874 → **8000** | 0.0137 → **0.0001** | 0.0254 → 0.1466 |
+| `jsut_multi_band_melgan` | 11672 → **8000** | 0.0014 → **0.0000** | 0.0801 → 0.3507 |
+
+`hf_ratio_8k` is annihilated — two to three orders of magnitude — which is
+[02 B1b](02-pool-b-fake-voice.md)'s "above the cut" finding at generator granularity. But
+`near_nyquist_ratio` is not destroyed; it is *transformed*, and remains spread. R1's premise is
+therefore source-dependent, and the clean statement is: **the chain removes evidence only where
+there was content above 8 kHz to remove.** For pool D there never was.
