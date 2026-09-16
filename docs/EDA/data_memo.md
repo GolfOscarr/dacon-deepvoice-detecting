@@ -157,6 +157,13 @@ place.
 |---|---|---|--:|---|
 | **L1** | **duration** | the file's *length* | **0.852** (whole-publisher holdout) | a crop policy |
 | **L2** | **onset deficit** | the file's first **20 ms** | **0.869** (pool C vs D) | a **random-offset** crop |
+| **L4** | **leading silence** | the file's first *seconds* | **0.639** (same utterance, one vocoder apart) | the `A-A11` silence-edit augmentation |
+
+⚠️ **L4 is on the *voice* head, and it is the one that survives pairing.** See
+[01 A6b](01-pool-a-real-voice.md): 0.612 corpus-wide, **0.717** inside one publisher, 0.639 between
+LJSpeech and its own vocoded copies. `silence_lead_s` / `silence_tail_s` are **0.0** in
+`configs/run_default.yaml` today, so no RNG draw happens; this measurement says make them non-zero,
+symmetrically across pools A and B (R2).
 
 🔴 **A crop that fixes L1 does not necessarily fix L2.** Cropping every music file to a common
 length removes duration and leaves the file's *beginning* exactly where it was. Only drawing the

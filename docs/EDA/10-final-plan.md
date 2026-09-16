@@ -15,7 +15,11 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 | ⛔ **blocked** | needs an input we do not hold |
 | ⏭️ **Phase 2** | out of the EDA's scope by design |
 
-**33 answered · 0 data-exists · 0 runnable · 7 blocked · 2 Phase 2 = 42.**
+**34 answered · 0 data-exists · 0 runnable · 7 blocked · 2 Phase 2 = 43.**
+
+⚠️ **This line was wrong from 2026-09-16 to 2026-09-17**, reading *"33 · 0 · 0 · 7 · 2 = 42"* --
+it was hand-edited when step 3 closed and never recounted, and **A6 was still 📊** while the page
+claimed nothing was outstanding. Count the markers, not the header: `grep -c` the status column.
 
 🔴 **Every runnable task is answered.** What remains is out of scope by construction (7 blocked,
 2 Phase 2) plus the two exit artifacts.
@@ -45,7 +49,7 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 | A3 | Speaker inventory / grouping atoms | ✅ | [06 X6b](06-cross-pool.md), `grouping_report.parquet` — zeroth 115, ljspeech declared 1 |
 | A4 | Common Voice subset design | ⛔ | `common-voice-en/ko` not on disk |
 | A5 | Duration census vs 4 s / 60 s | ✅ | [01 A9](01-pool-a-real-voice.md), `signal_duration.parquet` |
-| A6 | Silence statistics vs pool B | 📊 | `signal_duration.parquet` has silence/lead/tail per partition; the **A-vs-B comparison the task asks for was never written**. Its point is the ASVspoof silence shortcut |
+| A6 | Silence statistics vs pool B | ✅ | **2026-09-17**, [01 A6b](01-pool-a-real-voice.md). 🔴 `lead_silence_s` **AUC 0.612** corpus-wide, **0.717** within one publisher, and **0.639** on the same utterance one vocoder apart -- a synthesis artefact, not a corpus one |
 | A7 | Loudness, DC, clipping census | ✅ | [01 A9](01-pool-a-real-voice.md), `signal_level.parquet` |
 | A8 | Pool-membership verification | ✅ | `signal_content.parquet`, G-EDA6 |
 

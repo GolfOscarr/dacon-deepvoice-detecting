@@ -5,7 +5,7 @@ map, not a summary: it says what was measured, where each result physically live
 authoritative, and — most importantly — **which readings of them are wrong**. Section 5 is the one
 that will save you the most time.
 
-**Written 2026-09-15, rewritten 2026-09-16.** The EDA is complete: **all 33 runnable tasks** of
+**Written 2026-09-15, rewritten 2026-09-16 and 2026-09-17.** The EDA is complete: **all 34 runnable tasks** of
 [10](10-final-plan.md) have written answers. ⚠️ The 2026-09-15 version of this page said the same
 thing on the strength of [09](09-next-steps.md)'s eight steps, and **that was wrong** — 09 was a
 remaining-work plan, never the task inventory. [10](10-final-plan.md) is the inventory; read its
@@ -178,31 +178,44 @@ three 10.000 s — so `mustango` separates from its pool-mates at **AUC 1.000** 
 generator-disjoint fold in pool D is recoverable from the clock.
 → [02 B6b](02-pool-b-fake-voice.md), [04 D2b](04-pool-d-fake-instrumental.md)
 
-**6 · The voice heads are clean.** Under the same holdout they collapse to 0.586 and 0.401. Whatever
-separates real from fake *voice* in this corpus is not a publisher artefact.
+**6 · 🔴 Leading silence is a synthesis artefact, and it survives pairing.**
+`lead_silence_s` separates real from fake voice at **AUC 0.612** corpus-wide, **0.717** inside a
+single publisher that ships both halves (CFAD), and **0.639** between LJSpeech and its own vocoded
+copies — same utterance, same speaker, one vocoder apart. The shortcut is **stronger where the
+controls are tighter**: mixing publishers *hides* it, because `ljspeech`'s median lead is 0.00 s,
+exactly like the TTS sources. The chain does not touch it (0.6116 native → 0.6087 chain).
+**Decision: turn on the `A-A11` silence-edit augmentation** — `silence_lead_s` / `silence_tail_s`
+are 0.0 today, so no RNG draw happens at all. ⚠️ symmetric across pools A and B, or it becomes the
+cue it inoculates against.
+→ [01 A6b](01-pool-a-real-voice.md)
+
+**7 · The voice heads are clean *of publisher confounds*.** Under the same holdout they collapse to
+0.586 and 0.401. Whatever separates real from fake *voice* in this corpus is not a publisher
+artefact. ⚠️ That is a **multivariate** result under an **archive** holdout and does not cover
+finding 6, which is a single column under a same-utterance control.
 → [06 X1d](06-cross-pool.md)
 
-**7 · Above 8 kHz is unavailable.** Ten of fourteen sources are natively ≤ 16 kHz, so the chain
+**8 · Above 8 kHz is unavailable.** Ten of fourteen sources are natively ≤ 16 kHz, so the chain
 removes nothing from them (`bandwidth_lost_hz` 0.000, `hf_ratio_8k_native` ~1e-09 to 1e-12). Only
 `fma` (−10,389 Hz), `wavefake` (−3,220), `ljspeech` (−2,853) and `mlaad` (−2,530) lose anything, and
 those four sit in three different pools.
 → [00 §4d](00-harness.md#4d---r1-on-the-whole-corpus-ten-of-fourteen-sources-lose-nothing)
 
-**8 · Level is a publisher fingerprint.** Median RMS spans **22.6 dB** across sources on the chain
+**9 · Level is a publisher fingerprint.** Median RMS spans **22.6 dB** across sources on the chain
 plane. All three MUSAN partitions sit at peak −0.000265 dBFS with 86–88% of files clipping:
 peak-normalised to full scale.
 → [01 A9](01-pool-a-real-voice.md)
 
-**9 · "Instrumental" is not instrumental.** Pool C contradicts its own `voice_present = 0` on
+**10 · "Instrumental" is not instrumental.** Pool C contradicts its own `voice_present = 0` on
 **336 of 2,660 files, 12.6%** — FMA at 13.7%, p90 speech ratio 0.418. Pool D at 3.6%. **Both are
 lower bounds** (§5.1).
 → [03 C2b](03-pool-c-real-instrumental.md), [04 D9](04-pool-d-fake-instrumental.md)
 
-**10 · 41% of pool B is shorter than the test set's minimum**, and only 10.3% of it holds a 4 s
+**11 · 41% of pool B is shorter than the test set's minimum**, and only 10.3% of it holds a 4 s
 non-silent span — the least usable material in the corpus.
 → [02 B0c](02-pool-b-fake-voice.md)
 
-**11 · Two structural leaks were found and fixed.** WaveFake ships its Common-Voice half twice
+**12 · Two structural leaks were found and fixed.** WaveFake ships its Common-Voice half twice
 (16,283 byte-identical files); CompSpoof shares **292 parent recordings** across its two splits
 (1,060 files), which the path-derived key did not catch.
 → [02 B0b](02-pool-b-fake-voice.md), [05 E1b](05-pool-e-noise.md)

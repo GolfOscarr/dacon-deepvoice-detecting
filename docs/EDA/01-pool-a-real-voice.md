@@ -306,3 +306,76 @@ They are counted here, not dropped (R2).
 **missingness** is the fingerprint rather than its value — which is exactly what `build_design`'s
 `_isna` indicators encode, and why the census reports `encoder_present` rather than only
 `n_encoders`.
+
+---
+
+## A6b — 🔴 Answered 2026-09-17: the silence shortcut is real, and it **survives pairing**
+
+`lead_silence_s`, `tail_silence_s` and `silence_ratio` over the 12,426 decoded pool-A and pool-B
+rows, as an A-vs-B AUC on the `voice_fake` head. Gate: **AUC < 0.60**. No decode — the columns were
+already in `signal.parquet`.
+
+| column | native | chain |
+|---|--:|--:|
+| **`lead_silence_s`** | **0.6116** | **0.6087** |
+| `silence_ratio` | 0.5561 | 0.5569 |
+| `tail_silence_s` | 0.5311 | 0.5325 |
+
+Only **leading** silence clears the gate, and the render chain does not touch it — 0.6116 → 0.6087.
+
+### 🔴 The corpus-wide number is the *weakest* reading, not the strongest
+
+A6 predicted a between-corpus artefact: studio-trimmed real against TTS output. The controls say
+otherwise.
+
+| comparison | what is held constant | `lead_silence_s` AUC |
+|---|---|--:|
+| corpus-wide A vs B | nothing | 0.6116 |
+| **within `cfad`** | **one publisher ships both halves** | **0.7167** |
+| **`ljspeech` ↔ `wavefake`** | **same utterance, same speaker, one vocoder apart** | **0.6391** |
+| cross-publisher only | CFAD and the LJSpeech pair removed | **0.7336** |
+
+**The shortcut is stronger inside a publisher than across the corpus.** The corpus-wide 0.61 is
+*diluted* by pool A's own heterogeneity — `ljspeech` has a median lead of **0.00 s**, exactly like
+the TTS sources — so mixing publishers hides the effect rather than manufacturing it.
+
+🔴 **And it survives the strictest control the corpus can offer.** The `ljspeech ↔ wavefake`
+comparison is [B1](02-pool-b-fake-voice.md)'s paired design: same utterance, same speaker, same
+source recording, one vocoder apart. At **AUC 0.639** on leading silence alone, the vocoder is
+changing the silence — reconstruction puts low-level noise where the original had digital silence.
+That is a **synthesis artefact**, not a corpus artefact, and no amount of publisher balancing
+removes it.
+
+| source | pool | lead median | lead p90 | tail median |
+|---|---|--:|--:|--:|
+| `zeroth-korean` | A | 0.50 | 0.80 | 0.85 |
+| `cfad-real` | A | 0.35 | 1.36 | 0.35 |
+| `musan-speech` | A | 0.05 | 1.10 | 0.00 |
+| `ljspeech` | A | **0.00** | 0.00 | 0.05 |
+| `mlaad` | B | 0.10 | 0.45 | 0.40 |
+| `cfad-fake` | B | 0.05 | 0.40 | 0.25 |
+| `wavefake` | B | **0.00** | 0.20 | 0.10 |
+
+### ⚠️ This refines "the voice heads are clean"
+
+[06 X1d](06-cross-pool.md) reports `voice_fake` collapsing to **0.401** under an archive holdout, and
+[RESULTS](RESULTS_FOR_ANALYSIS.md) carries that as *"the voice heads are clean"*. Both remain true
+and neither covers this: X1d is a **multivariate** model measured under an **archive** holdout, and
+this is a **single column** measured under a **same-utterance** control. The precise statement is
+that the voice heads are clean of *publisher* confounds and are **not** clean of the silence
+artefact, which is the one thing that survives pairing.
+
+### What it changes — turn the silence augmentation on
+
+[data/10 P-A2](../data/10-preprocessing-and-filtering.md) already argues **against trimming**:
+trimming kills the shortcut and the genuine cue together. It prefers **inoculation** through the
+`A-A11` silence-edit augmentation — and `silence_lead_s` / `silence_tail_s` are both **0.0** in
+`configs/run_default.yaml`, so no RNG draw happens at all today.
+
+🔴 **This measurement is what P-A2 said would decide it, and it decides for non-zero.** The
+artefact clears the gate in every configuration measured, is strongest where the controls are
+tightest, and survives the render chain untouched.
+
+⚠️ Turning them on changes the drawn stream and needs an **I1b re-run**. And ⚠️ **the augmentation
+must be symmetric** (R2): applied to pool A and pool B alike, or it becomes the cue it is meant to
+inoculate against.
