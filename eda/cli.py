@@ -637,6 +637,47 @@ def _roles_page(roles: pd.DataFrame, summary: pd.DataFrame,
     return "\n".join(lines)
 
 
+def cmd_envelope(cfg, args) -> int:
+    """C5: onset/offset morphology (docs/EDA/03 C5).
+
+    `--run` decodes the recorded draw and writes the table; without it the verb
+    reads what is already there. Separate for the reason `sample` is separate
+    from `signal`: the decode is the expensive, once-only half.
+    """
+    table = cfg.out / "_shared" / drv.ENVELOPE_TABLE
+    if args.run:
+        partitions = [args.partition] if args.partition else cfg.partitions()
+        frames = []
+        for partition in partitions:
+            try:
+                frames.append(drv.envelope_partition(
+                    cfg, partition,
+                    progress=lambda p, i, n: print(f"  [{p}] shard {i:05d}: "
+                                                   f"{n} rows", flush=True)))
+            except (NotProbed, RuntimeError) as exc:
+                print(f"partition {partition}: skipped -- {exc}", file=sys.stderr)
+        if not frames:
+            print("nothing measured", file=sys.stderr)
+            return 1
+        table.parent.mkdir(parents=True, exist_ok=True)
+        pd.concat(frames, ignore_index=True).to_parquet(table, index=False)
+
+    if not table.exists():
+        print(f"{table} does not exist -- run with --run first", file=sys.stderr)
+        return 1
+    envelope = pd.read_parquet(table)
+    report = sig.envelope_report(envelope)
+    ok = envelope["envelope_ok"].fillna(False)
+    print(f"=== C5: {len(envelope)} rows, {int(ok.sum())} measured, "
+          f"{int((~ok).sum())} failure(s)")
+    print(f"    ⚠️  a silent file has a flat envelope and reads as `hard_cut`; "
+          f"silent rows are excluded and counted below")
+    _show(report)
+    report.to_parquet(cfg.out / "_shared" / "envelope_report.parquet", index=False)
+    print(f"\nwrote the C5 report to {cfg.out / '_shared'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="eda", description=__doc__)
     p.add_argument("--config", default=DEFAULT_CONFIG, type=Path)
@@ -695,6 +736,12 @@ def main(argv: list[str] | None = None) -> int:
                         "pool D it is the parent clip (5,521 groups of ~5 rows)")
     s.add_argument("--min-rows", type=int, default=30, dest="min_rows")
     s.set_defaults(fn=cmd_screens)
+
+    s = sub.add_parser("envelope", help="C5: onset/offset morphology")
+    s.add_argument("--run", action="store_true",
+                   help="decode the recorded draw first (~5 min over the corpus)")
+    s.add_argument("--partition", help=part_help)
+    s.set_defaults(fn=cmd_envelope)
 
     s = sub.add_parser("roles", help="step 3: X6's roles.md and the six censuses")
     s.add_argument("--head", type=int, default=20,

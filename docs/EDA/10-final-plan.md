@@ -15,15 +15,20 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 | ⛔ **blocked** | needs an input we do not hold |
 | ⏭️ **Phase 2** | out of the EDA's scope by design |
 
-**32 answered · 0 data-exists · 1 runnable · 7 blocked · 2 Phase 2 = 42**, plus **C5** — 1 runnable and
-**optional**; [§2.4](#step-4--c5s-envelope-half-optional-and-probably-unnecessary) recommends closing it on reasoning rather than a decode.
+**33 answered · 0 data-exists · 0 runnable · 7 blocked · 2 Phase 2 = 42.**
 
-> **Steps 1, 2 and 3 closed 2026-09-16.** Every runnable task except **C5** now has a written
-> answer, and C5 is optional -- [§2.4](#step-4--c5s-envelope-half-optional-and-probably-unnecessary)
-> recommends closing it on reasoning rather than spending a 45-minute decode.
+🔴 **Every runnable task is answered.** What remains is out of scope by construction (7 blocked,
+2 Phase 2) plus the two exit artifacts.
+
+> **Steps 1-4 closed 2026-09-16.** B1, B4, D6, B6, E5, X2, X6, A1, B2, B3, C6, D2, D3 and **C5**
+> all have written answers.
 >
-> What remains before the EDA is closed: **C5's disposition**, then updating
-> [`data_memo.md`](data_memo.md) and [`RESULTS_FOR_ANALYSIS.md`](RESULTS_FOR_ANALYSIS.md).
+> ⚠️ **C5 was nearly closed on reasoning instead of measured**, and measuring it found a
+> **0.869-AUC** shortcut on the 0.27-weight music head that the reasoning could not have reached --
+> see [§2.4](#step-4--c5s-envelope-half--done-2026-09-16--and-the-recommendation-below-was-wrong).
+>
+> What remains before the EDA is closed: updating [`data_memo.md`](data_memo.md) and
+> [`RESULTS_FOR_ANALYSIS.md`](RESULTS_FOR_ANALYSIS.md), which both still claim it is complete.
 
 ⚠️ `A9`, `C8`, `D8`, `D9` are **result sections**, not tasks, and are not counted here.
 
@@ -65,7 +70,7 @@ Status was read off artifacts and doc sections, not recalled. Five states:
 | C2 | Silero VAD sweep | ✅ | [03 C2b](03-pool-c-real-instrumental.md) — 12.6%, and a floor |
 | C3 | Artist / album grouping atoms | ⛔ | needs FMA `tracks.csv`; the metadata archive is unfetched. `eda keys` flags it every run |
 | C4 | Genre census, C↔D matching | ⛔ | same archive |
-| C5 | Clip boundary / duration morphology | ▶️ | duration half answered by [03 C8](03-pool-c-real-instrumental.md). The **onset/offset envelope classification** — hard-cut / fade / natural start — was never computed and needs a decode |
+| C5 | Clip boundary / duration morphology | ✅ | **2026-09-16**, [03 C5b](03-pool-c-real-instrumental.md). 🔴 the boundary shortcut is **real and inverted**: `onset_level_deficit_db` separates C from D at **AUC 0.869** |
 | C6 | Codec provenance, the mp3 question | ✅ | **2026-09-16**, [01 A1b](01-pool-a-real-voice.md). Not "is it mp3": `sonics` 36.8 kbps against `fma` 265.7 kbps, non-overlapping |
 | C7 | MUSAN `music/` as pool C | ✅ | structural in `configs/eda.yaml` |
 
@@ -161,18 +166,26 @@ the six 📊 tasks — A1, B2, B3, C6, D2, D3 — as the per-source census table
 ⚠️ It reports **five** roles, not three: `label` and `diagnostic` were added because 40 of the 118
 columns fit none of X6's original three, and forcing them would have been false ([06 X6b](06-cross-pool.md)).
 
-### Step 4 — C5's envelope half: optional, and probably unnecessary
+### Step 4 — C5's envelope half ✅ **done 2026-09-16 — and the recommendation below was wrong**
 
-C5's remaining half — classify each pool-C clip as hard-cut / fade / natural start — needs a decode
-of pool C's 2,660 files (~59 audio hours, **~45 min**) because the onset envelope is not among the
-stored columns.
+⚠️ **This section previously recommended closing C5 on reasoning rather than spending the decode**,
+on the grounds that [03 C8](03-pool-c-real-instrumental.md) had pool C at 30.003 s median with p05
+29.977 — FMA ships fixed-length excerpts, which are hard cuts by construction. **That reasoning was
+wrong**, and it is left here rather than deleted because the way it was wrong is the lesson.
 
-⚠️ **It is very likely already answered.** [03 C8](03-pool-c-real-instrumental.md) measured pool C
-at **30.003 s median with p05 29.977** — FMA ships fixed-length excerpts, which are hard cuts by
-construction. Run it only if the crop policy turns out to depend on the distinction; otherwise
-record that reasoning and close it.
+C5's hypothesis is a *comparison*: real music cut from track centres against generated music that
+begins from silence. The duration evidence speaks only to pool C's half of it and says nothing
+whatever about pool D's onset morphology — so the inference covered one side of a two-sided claim.
 
----
+**Measured** ([03 C5b](03-pool-c-real-instrumental.md)): the shortcut is real, it runs **opposite**
+to the predicted direction — pool D opens at its own level and pool C opens 43 dB below it — and
+`onset_level_deficit_db` separates the two at **AUC 0.869** against a 0.60 gate. That is a second
+shortcut the size of duration's 0.852, on the same 0.27-weight head, and independent of it.
+
+The whole corpus was measured rather than pool C alone, because the crop policy C5 proposes is a
+*transform* and R2 makes it a symmetry obligation. Cost: 58,885 files, 1 failure, **~5 min** at
+76 audio-hours/min — the 45-minute estimate above assumed the S tier's rate, and an envelope pass
+skips the spectral, VAD and vector work entirely.
 
 ## 3 — Explicitly out of scope
 
@@ -188,9 +201,22 @@ Declared here so nobody re-opens them.
 
 ---
 
-## 4 — After this, the EDA is closed
+## 4 — ✅ The EDA is closed, 2026-09-16
+
+**33 of 33 runnable tasks answered.** What remains is out of scope by construction: 7 blocked on
+inputs we do not hold, 2 deferred to Phase 2 (§3).
 
 The exit artifacts are [`data_memo.md`](data_memo.md) and
-[`RESULTS_FOR_ANALYSIS.md`](RESULTS_FOR_ANALYSIS.md), both of which must be updated with steps 1–3
-before the EDA is declared done. They currently say the EDA is complete, which
-[§1](#1--the-inventory) shows it is not.
+[`RESULTS_FOR_ANALYSIS.md`](RESULTS_FOR_ANALYSIS.md), and both have been updated with steps 1-4.
+
+⚠️ **Two decisions are measured and deliberately left open**, because they are calls rather than
+computations — they are not EDA work and closing the EDA does not close them:
+
+| | the number |
+|---|---|
+| `G-EDA1/allowlist/fma` | **2,907 of 8,000** pool-C files outside the licence allowlist |
+| `G-EDA6` reassignment | **2,442** rows contradicting their asserted components, of which **2,113** are pool-E files asserting `VOICE_PRESENT = 0` while carrying speech |
+
+🔴 **`eda gates` still exits non-zero and that is correct.** `G-EDA2` is structural and cannot go
+green in the EDA at all (§3); `G-EDA3` reports a genuine count, not a gap; the other two are the
+decisions above.

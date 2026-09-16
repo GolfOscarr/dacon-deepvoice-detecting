@@ -237,3 +237,99 @@ also become the "noise" component of composed cells, so the damage is not contai
 property of one builder script, not of the corpus, and **the next builder is where it breaks**.
 ⚠️ See also [05 E1](05-pool-e-noise.md): MUSAN's music subdirectories are literally named
 `fma`, `jamendo` and `hd` — and we are separately acquiring FMA and Jamendo.
+
+---
+
+## C5b — 🔴 Answered 2026-09-16: the boundary shortcut is **real, and it runs backwards**
+
+Measured over all **58,885** drawn files on the chain plane — every partition, not only C and D,
+because the crop policy C5 proposes is a *transform* and R2 makes a transform a symmetry
+obligation. 1 decode failure, ~5 min at 76 audio-hours/min (`python -m eda.cli envelope --run`).
+
+### The hypothesis, and what actually happened
+
+[C5](#c5--clip-boundary-and-duration-morphology--tier-a) predicted that **real** music is cut from
+track centres and so begins at full level, while a **generated** clip is a complete piece and begins
+from silence — and that the first 100 ms would therefore separate the classes at 0.27 weight
+through an *editing* artifact no spectral analysis could surface.
+
+**The separation is there. The direction is inverted.**
+
+| partition | `hard_cut` | `fade` | `natural` | median onset deficit |
+|---|--:|--:|--:|--:|
+| **C** real instrumental | **12.1%** | 16.6% | **71.3%** | **43.35 dB** |
+| **D** fake instrumental | **73.1%** | 15.7% | **11.2%** | **0.90 dB** |
+| A real voice | 11.7% | 56.6% | 31.7% | 22.24 dB |
+| B fake voice | 16.3% | 45.9% | 37.9% | 24.60 dB |
+| E noise | 86.7% | 7.1% | 6.2% | 0.25 dB |
+| cell 8 (SONICS) | 27.8% | 56.2% | 16.0% | 37.95 dB |
+
+`onset_level_deficit_db` is how far below its **own** median level a clip opens, so 0 is a hard cut
+and a large number is a quiet start. **Pool D opens at its own level; pool C opens 43 dB below it.**
+
+### 🔴 `onset_level_deficit_db` separates C from D at **AUC 0.869**
+
+| column | C vs D AUC |
+|---|--:|
+| **`onset_level_deficit_db`** | **0.8692** |
+| `onset_class == hard_cut` | 0.8052 |
+| `onset_lead_silence_s` | 0.7514 |
+| `onset_rise_s` | 0.7064 |
+| `offset_level_deficit_db` | 0.5986 |
+
+Against the **0.60** gate. The interquartile ranges do not overlap — C p25 **34.53 dB** against D
+p75 **6.93 dB**:
+
+| | p05 | p25 | median | p75 | p95 |
+|---|--:|--:|--:|--:|--:|
+| C | −1.12 | **34.53** | 43.35 | 72.63 | 88.01 |
+| D | −8.27 | −2.21 | 0.90 | **6.93** | 61.35 |
+
+🔴 **This is a second shortcut of the same magnitude as duration, on the same head, and independent
+of it.** Duration holds AUC 0.852 after a whole-publisher holdout
+([06 X1d](06-cross-pool.md)); this holds 0.869. One is the file's *length*, the other its first
+**20 milliseconds** — no crop that fixes one automatically fixes the other, and a model that lost
+duration would still have this.
+
+**The mechanism, stated as inference rather than measurement:** excerpting a track from its centre
+leaves a discontinuity, and the standard remedy is a short de-click ramp at the cut. The **real**
+pool therefore carries the edit and the **generated** pool carries none, because a generation simply
+begins. C5's instinct — *"an editing artifact rather than an acoustic one"* — was exactly right; the
+sign was assumed rather than measured, and the assumption was wrong.
+
+### Two alternative explanations, ruled out before publishing
+
+1. ⚠️ **mp3 decoder padding.** FMA is pool C's only mp3 source and encoder delay would counterfeit
+   this precisely. **Refuted per source:** `musan-music`, a **wav** source, shows the largest
+   deficit in the corpus at **77.04 dB**, against `fma`'s 39.71. Both pool-C sources carry it, so
+   the container does not explain it.
+2. ⚠️ **The classifier measuring loudness compression rather than editing.** A compressed signal has
+   its first frame near its own median by construction, so `hard_cut` could have meant "heavily
+   limited". **Refuted:** `corr(onset_level_deficit_db, crest_factor_db_chain)` is |r| ≤ 0.33 in
+   every partition and under 0.15 in most.
+
+### What it changes
+
+🔴 **The crop policy moves from optional to mandatory.** Drawing every music component from a random
+offset inside the file is the only thing that removes this, and R2 makes it symmetric by
+construction only if **both** pools go through it — C5 said so and the number now says how much it
+costs to skip.
+
+⚠️ **`onset_*` and `offset_*` are `leakage_risk` columns**, not features, and belong in
+[`roles.md`](06-cross-pool.md) as such the moment anything consumes them.
+
+⚠️ **Pool E is 86.7% `hard_cut` and pool A/B are fade-dominated**, which is why this was measured
+everywhere. A crop policy tuned on C-vs-D alone would be applied to a corpus where the voice pools
+sit at 11.7% and 16.3% — close to each other, and nothing like either music pool.
+
+### Limits of the classification, stated
+
+* The thresholds (`HARD_CUT_DB` 6 dB, `FADE_MIN_S` 50 ms, `BOUNDARY_S` 0.5 s) are **a reading, not a
+  measurement**. `onset_level_deficit_db` and `onset_rise_s` are stored beside the class so anyone
+  who disagrees can re-derive it without a re-decode — and the AUC above is computed on the
+  **scalar**, not the class, for that reason.
+* ⚠️ **A digitally silent file has a flat envelope**, so its deficit against its own median is 0 and
+  it reads as `hard_cut` — silence would otherwise count as evidence for the very asymmetry this
+  tests. 93 pool-E rows are excluded on `envelope_ref_dbfs <= -100` and **counted** in the report.
+* The `fade` class for speech is really "gradual onset": a talker ramping up over more than 50 ms is
+  indistinguishable here from a deliberate fade. It does not affect the C-vs-D reading.

@@ -5,11 +5,16 @@ map, not a summary: it says what was measured, where each result physically live
 authoritative, and — most importantly — **which readings of them are wrong**. Section 5 is the one
 that will save you the most time.
 
-Written 2026-09-15. The EDA is complete: all eight steps of [09](09-next-steps.md) are done.
+**Written 2026-09-15, rewritten 2026-09-16.** The EDA is complete: **all 33 runnable tasks** of
+[10](10-final-plan.md) have written answers. ⚠️ The 2026-09-15 version of this page said the same
+thing on the strength of [09](09-next-steps.md)'s eight steps, and **that was wrong** — 09 was a
+remaining-work plan, never the task inventory. [10](10-final-plan.md) is the inventory; read its
+§1 before believing any completeness claim, including this one.
 
-> **The one-line version.** The corpus's dangerous shortcut is **duration**, it survives both the
-> 16 kHz render chain and a whole-publisher holdout at **AUC 0.852**, and only the sampler can fix
-> it. Everything else is detail.
+> **The one-line version.** The corpus has **two independent shortcuts of near-equal strength on the
+> music head**: **duration** (AUC 0.852 after a whole-publisher holdout) and the **first 20 ms**
+> (AUC 0.869 between pools C and D). Both survive the 16 kHz render chain, neither is acoustic, and
+> only the sampler can fix either. Everything else is detail.
 
 ---
 
@@ -21,7 +26,8 @@ Written 2026-09-15. The EDA is complete: all eight steps of [09](09-next-steps.m
 | why each measurement exists | [`00-harness.md`](00-harness.md) |
 | the shortcut analysis | [`06-cross-pool.md`](06-cross-pool.md) — X1, X1b, X1c, X1d, X6b |
 | one pool's findings | [`01`](01-pool-a-real-voice.md)–[`05`](05-pool-e-noise.md) by pool letter |
-| what remains, and what was decided not to do | [`09-next-steps.md`](09-next-steps.md) |
+| **the task inventory, and what is out of scope** | **[`10-final-plan.md`](10-final-plan.md)** — 33 answered, 7 blocked, 2 Phase 2 |
+| what was decided not to do, and why | [`09-next-steps.md`](09-next-steps.md) — ⚠️ superseded by 10 |
 
 ⚠️ **Do not treat the prose as the source of truth.** Every figure in those documents came from a
 parquet file listed in §3. Where they disagree, **the artifact wins** — and §6 tells you which
@@ -100,6 +106,20 @@ vectors.npz keys:  file_id (n,) object
 | `signal_bandwidth.parquet` | 14 × 8 | what the 16 kHz chain removes, paired per file |
 | `signal_level.parquet` | 14 × 9 | loudness, headroom, DC, clipping per source |
 | `signal_content.parquet` | 14 × 11 | **G-EDA6**: VAD evidence vs what each pool asserts |
+| `roles.md` | 118 rows | **X6**: every column's role. ⚠️ generated, not committed — `eda roles` |
+| `column_roles.parquet` | 118 × 7 | the same, as a table |
+| `envelope.parquet` | 58,885 × 14 | **C5**: onset/offset morphology, chain plane |
+| `envelope_report.parquet` | 6 × 14 | **C5** read: the class mix per partition |
+| `screen_degenerate.parquet` | 6 × 10 | **B4/D6**: the degenerate-output rate per partition |
+| `screen_cell9.parquet` | 3 × 7 | **E5**: cell-9 viability |
+| `screen_separability_generator.parquet` | 41 × 7 | **B6**: per-generator identifiability |
+| `screen_metadata_leak.parquet` | 4 × 8 | **X2**: metadata vs chain-plane AUC, and the drop |
+| `census_format_census.parquet` | 14 × 13 | **A1 / B3**: native format per source |
+| `census_codec_provenance.parquet` | 15 × 10 | **C6**: the mp3 question |
+| `census_generator_census.parquet` | 231 × 10 | **D2**: per generator |
+| `census_near_nyquist_by_generator.parquet` | 159 × 9 | **D3**: both planes, per generator |
+| `census_mlaad_inventory.parquet` | 534 × 6 | **B2**: MLAAD language × generator |
+| `b1/` | 8 files | **B1**: the paired vocoder experiment |
 
 ---
 
@@ -115,6 +135,7 @@ each file is decoded once and measured on both, so it is its own control.
 | S signal | 58,885 | `level` (9), `spectral` (14), `timing` (6) | 29 × 2 planes |
 | V vectors | 58,885 | `ltas`, `mel_band_skew`, `mel_band_kurt` | 768 + 2 |
 | C content | 58,884 | Silero `vad` | 7, chain plane only |
+| **E envelope** | **58,884** | `envelope` (C5) | 9, chain plane only |
 
 ### The findings, ranked by what they change
 
@@ -125,31 +146,63 @@ pool D is **10.000 s for every file** (p05 = p50 = 10.000, p95 = 10.242) and poo
 while the test set is 4–60 s for both.
 → [06 X1d](06-cross-pool.md), [04 D8](04-pool-d-fake-instrumental.md), [03 C8](03-pool-c-real-instrumental.md)
 
-**2 · The voice heads are clean.** Under the same holdout they collapse to 0.586 and 0.401. Whatever
+**2 · 🔴 The first 20 ms is a second shortcut, as strong as duration and independent of it.**
+`onset_level_deficit_db` — how far below its own median level a clip opens — separates pool C from
+pool D at **AUC 0.869**, against the same 0.60 gate. Pool C opens **43.35 dB** below its own level,
+pool D **0.90 dB**; the interquartile ranges do not overlap. ⚠️ **The direction is the opposite of
+what C5 predicted**: the *real* pool carries the editing artefact (a de-click ramp at the excerpt
+cut) and the *generated* pool carries none, because a generation simply begins. Ruled out before
+publishing: mp3 decoder padding (`musan-music`, a **wav** source, shows the largest deficit in the
+corpus at 77.04 dB) and loudness compression (|r| ≤ 0.33 against `crest_factor_db_chain`).
+→ [03 C5b](03-pool-c-real-instrumental.md)
+
+**3 · The vocoder artefact survives 16 kHz at 82–115%, and lives below 72 Hz.**
+500 LJSpeech utterances against all seven WaveFake vocoders — the only unconfounded real/fake
+comparison in the corpus. For five of seven the dominant term is sub-speech rumble the vocoder
+invents (+5.58 dB for `parallel_wavegan`). 🔴 **Consequence: do not high-pass.** A render-time DC or
+rumble filter would delete the largest discriminative feature pool B has. And the vocoder **names
+are anti-correlated with the artefact families** — `melgan` ↔ `melgan_large` correlate at 0.895,
+`melgan` ↔ `multi_band_melgan` at **−0.186**.
+→ [02 B1b](02-pool-b-fake-voice.md)
+
+**4 · Metadata is worse than useless: AUC 1.000 in CV, 0.0000008 under an archive holdout.**
+`music_fake` is separable from metadata *alone* at 1.000 — `fakemusiccaps` is the corpus's only
+`pcm_f32le` source, so one categorical value identifies the pool. Under a source holdout the same
+features score 0.209 and 0.0000008: the relationship **inverts** on an unseen publisher. **Decision
+recorded: neutralise. Per-file metadata is not a submission feature.**
+→ [06 X2b](06-cross-pool.md), [01 A1b](01-pool-a-real-voice.md)
+
+**5 · Duration is also a *generator* id.** All five FakeMusicCaps generators have a **single
+duration each** across all 27,605 files — `mustango` 10.242 s, `MusicGen_medium` 10.180 s, the other
+three 10.000 s — so `mustango` separates from its pool-mates at **AUC 1.000** on duration alone. A
+generator-disjoint fold in pool D is recoverable from the clock.
+→ [02 B6b](02-pool-b-fake-voice.md), [04 D2b](04-pool-d-fake-instrumental.md)
+
+**6 · The voice heads are clean.** Under the same holdout they collapse to 0.586 and 0.401. Whatever
 separates real from fake *voice* in this corpus is not a publisher artefact.
 → [06 X1d](06-cross-pool.md)
 
-**3 · Above 8 kHz is unavailable.** Ten of fourteen sources are natively ≤ 16 kHz, so the chain
+**7 · Above 8 kHz is unavailable.** Ten of fourteen sources are natively ≤ 16 kHz, so the chain
 removes nothing from them (`bandwidth_lost_hz` 0.000, `hf_ratio_8k_native` ~1e-09 to 1e-12). Only
 `fma` (−10,389 Hz), `wavefake` (−3,220), `ljspeech` (−2,853) and `mlaad` (−2,530) lose anything, and
 those four sit in three different pools.
 → [00 §4d](00-harness.md#4d---r1-on-the-whole-corpus-ten-of-fourteen-sources-lose-nothing)
 
-**4 · Level is a publisher fingerprint.** Median RMS spans **22.6 dB** across sources on the chain
+**8 · Level is a publisher fingerprint.** Median RMS spans **22.6 dB** across sources on the chain
 plane. All three MUSAN partitions sit at peak −0.000265 dBFS with 86–88% of files clipping:
 peak-normalised to full scale.
 → [01 A9](01-pool-a-real-voice.md)
 
-**5 · "Instrumental" is not instrumental.** Pool C contradicts its own `voice_present = 0` on
+**9 · "Instrumental" is not instrumental.** Pool C contradicts its own `voice_present = 0` on
 **336 of 2,660 files, 12.6%** — FMA at 13.7%, p90 speech ratio 0.418. Pool D at 3.6%. **Both are
 lower bounds** (§5.1).
 → [03 C2b](03-pool-c-real-instrumental.md), [04 D9](04-pool-d-fake-instrumental.md)
 
-**6 · 41% of pool B is shorter than the test set's minimum**, and only 10.3% of it holds a 4 s
+**10 · 41% of pool B is shorter than the test set's minimum**, and only 10.3% of it holds a 4 s
 non-silent span — the least usable material in the corpus.
 → [02 B0c](02-pool-b-fake-voice.md)
 
-**7 · Two structural leaks were found and fixed.** WaveFake ships its Common-Voice half twice
+**11 · Two structural leaks were found and fixed.** WaveFake ships its Common-Voice half twice
 (16,283 byte-identical files); CompSpoof shares **292 parent recordings** across its two splits
 (1,060 files), which the path-derived key did not catch.
 → [02 B0b](02-pool-b-fake-voice.md), [05 E1b](05-pool-e-noise.md)
@@ -216,6 +269,63 @@ evidence. `eda.analyze.signal.CHAIN_EXCLUDED` drops it; do the same in any new d
 
 ---
 
+### 5.6 · C5's hypothesis is stated backwards in the spec
+
+[03 C5](03-pool-c-real-instrumental.md) predicts that **real** music begins with a hard cut and
+**fake** music begins from silence. The spec text is still there and is still worth reading for the
+mechanism — but the measurement
+([C5b](03-pool-c-real-instrumental.md#c5b---answered-2026-09-16-the-boundary-shortcut-is-real-and-it-runs-backwards))
+found the **opposite**: pool D opens at its own level (73.1% `hard_cut`) and pool C opens 43 dB
+below it (71.3% `natural`).
+
+Anyone who reads the hypothesis and implements a mitigation for the predicted direction will reason
+about the crop policy the wrong way round. The shortcut is real and strong (AUC 0.869); only its
+sign was assumed rather than measured.
+
+⚠️ It was also nearly closed **without** measuring, on the argument that pool C's fixed 30 s
+excerpts are hard cuts by construction. That argument is about pool C alone, and C5's claim is a
+*comparison* — the inference covered one arm of a two-sided claim and reported the claim as settled.
+
+### 5.7 · `group_key` is not the generator
+
+`group_key` is the **fold-grouping** atom — the speaker, the parent clip. The **generator** is the
+stratification axis, and in pool D they are incommensurable: `group_key` there is the FakeMusicCaps
+parent clip, giving **5,521 groups averaging 5 rows**. A per-generator analysis keyed on `group_key`
+returns *nothing* in pool D, and an empty result reads like a broken query rather than a wrong axis.
+
+Use `eda.analyze.screens.generator_key`. It reproduces the published counts independently — CFAD
+**11**, FakeMusicCaps **5**, WaveFake **10**, MLAAD **133** of 175 present in the draw.
+
+⚠️ Its `GENERATOR_DEPTH` table was wrong in **three of its first four entries**, and every error was
+silent: one component too shallow returns the CFAD split (`fake_clean`), the MLAAD **language**
+(`bg` — 54 of them, which looks exactly like a plausible generator count) or WaveFake's archive
+directory. Each produced a confident, plausible, wrong table. The function now refuses a depth that
+resolves to one constant per source.
+
+### 5.8 · `std == 0` does not find a constant column
+
+`mustango` and `MusicGen_medium` are each a **single repeated duration** (10.242 s and 10.180 s)
+across 5,521 files, and `pandas.Series.std(ddof=0)` returns **`1.776357e-15`** for them, not `0.0` —
+float error accumulated over thousands of identical addends.
+
+A `std == 0` test therefore finds **3** of FakeMusicCaps' **5** constant-duration generators. The
+first draft of [04 D2b](04-pool-d-fake-instrumental.md) said *"3 of 231"*; the answer is 5 of 231.
+`census_generator_census.parquet` carries an exact `duration_constant` column computed as
+`min == max`. Use it rather than re-deriving from `duration_s_std`.
+
+### 5.9 · A threshold written relative to its own constant is not tested
+
+Not a reading of the data — a warning about the **tests**, and it is the one that most affects how
+much you should trust a number here. Several tests in this repo were written as
+`assert classify(HARD_CUT_DB + 1, ...) == "fade"`. Scaling the constant scales the assertion with
+it, so the mutant is invisible **by construction**: widening `HARD_CUT_DB` from 6.0 to 60.0 left
+every test in `tests/test_eda_envelope.py` green.
+
+Every threshold in `eda/extract/envelope.py` now has a literal-pinned test. If you add a threshold
+anywhere, pin it with a literal or `scripts/mutate_eda.py` will report a kill it did not earn.
+
+---
+
 ## 6 — Provenance: which numbers are live
 
 | | |
@@ -233,8 +343,10 @@ They describe whatever census was on disk at the time; `files.parquet`'s row cou
 
 ```bash
 V=/data/project/private/dacon-venvs/dacon311/bin/python
-$V -m eda.cli sources | keys | report | analyze | gates    # all read-only, no decode
+$V -m eda.cli sources | keys | report | analyze | gates    # read-only, no decode
+$V -m eda.cli screens | roles | b1 | envelope              # read-only, no decode
 $V -m eda.cli probe | consolidate | sample | signal        # rebuild the tiers (~8 h for signal)
+$V -m eda.cli envelope --run                               # C5's pass, ~5 min over the corpus
 ```
 
 ```python
@@ -273,18 +385,33 @@ Stated so you do not go looking:
   `mtg-jamendo`. Six are blocked, each with a recorded reason.
 * **Gates `na`**: G-EDA1/mtg-jamendo (unfetched), G-EDA4 (needs a fold table), G-EDA7 (needs a
   filter; Phase 0 applies none by design).
+* **The looping/babble detector** B4 and D6 ask for. It needs the mel envelope **over time**, and
+  the V tier stores per-band statistics over time, not the series. It needs a decode
+  ([02 B4b](02-pool-b-fake-voice.md)).
+* **Music presence is never evidenced**, only speech. Every cell-9 count in
+  [05 E5b](05-pool-e-noise.md) is an upper bound for that reason (§5.1).
 
 ---
 
 ## 9 — If you are looking for features
 
-The three conclusions the EDA hands forward:
+The conclusions the EDA hands forward:
 
-1. **Duration is the shortcut, and only the sampler can fix it** — nothing in the render chain
-   changes a file's length.
-2. **Above 8 kHz is not available** — ten of fourteen sources have nothing there to begin with.
-3. **Level and metadata are publisher fingerprints** — metadata is already neutralised by the render
-   chain (one identical encode, tags stripped); level is not.
+1. **Two shortcuts, not one, and they are independent.** Duration (AUC 0.852) is the file's
+   *length*; onset deficit (AUC **0.869**) is its first *20 ms*. A crop that fixes one does not fix
+   the other — **only a random offset inside the file removes both**, and R2 makes it symmetric by
+   construction only if pools C and D both go through it.
+2. **Nothing in `files.parquet` is a feature.** All 30 M-tier columns are a leakage risk, a split
+   key or the label ([`roles.md`](06-cross-pool.md), §3). Metadata inverts under an archive holdout.
+3. **Above 8 kHz is not available** — ten of fourteen sources have nothing there to begin with.
+4. **Do not high-pass.** Five of seven vocoder signatures live below 72 Hz
+   ([02 B1b](02-pool-b-fake-voice.md)). ⚠️ But `cfad/pwg` is identifiable at AUC 0.998 from
+   `dc_offset` alone ([02 B6b](02-pool-b-fake-voice.md)) — DC removal and a high-pass pull in
+   opposite directions and have to be decided together.
+5. **`artifact_family` is measured, not named** — `melgan` and `multi_band_melgan` share a name and
+   have opposite artefacts (r = −0.186).
+6. **Level is a publisher fingerprint** and is *not* neutralised by the render chain — 22.6 dB of
+   median-RMS spread.
 
 And the largest unexploited asset: **45.3 M of the 56.0 M measurements are the `[128]`-wide LTAS and
 mel-moment vectors**, and no analysis has read them beyond the duplicate sweep. If you rank

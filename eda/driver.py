@@ -32,7 +32,7 @@ from eda.config import EdaConfig, SourceSpec
 from eda.extract import CONTENT, VECTOR, run_content, run_metadata, run_signal, run_vectors
 from eda.groupkeys import attach_group_keys
 from eda.ids import file_id_for
-from eda.planes import PLANES, load_planes
+from eda.planes import CHAIN, PLANES, load_planes
 from eda.sample import SAMPLE_FILE, load_sample, sampled_rows
 # Importing for the side effect of registration. Critical: without these the
 # registry is empty and `probe_source` writes a table of ids and nothing else --
@@ -44,6 +44,7 @@ from eda.extract import spectral as _spectral        # noqa: F401
 from eda.extract import timing as _timing            # noqa: F401
 from eda.extract import vectors as _vectors          # noqa: F401
 from eda.extract import content as _content          # noqa: F401
+from eda.extract.envelope import envelope_row        # noqa: F401
 
 __all__ = ["BlockedSource", "FIXED_COLUMNS", "NotProbed", "SIGNAL_TABLE",
            "SignalResult", "VECTOR_TABLE", "consolidate", "enumerate_source",
@@ -665,3 +666,68 @@ def load_pair_vectors(path: Path, column: str) -> dict[str, np.ndarray]:
                 f"{path.name} has no {column!r}; it holds {sorted(data)}")
         matrix, ids = data[column], data["file_id"]
     return {str(f): matrix[i] for i, f in enumerate(ids)}
+
+
+#: C5's artifact. Under `_shared/` because the question spans every partition:
+#: the crop policy C5 proposes is a transform, and R2 makes a transform a
+#: symmetry obligation over the whole corpus rather than over pool C.
+ENVELOPE_TABLE = "envelope.parquet"
+
+
+def envelope_partition(cfg: EdaConfig, partition: str, *, progress=None
+                       ) -> pd.DataFrame:
+    """C5 over one partition's recorded draw. Chain plane only.
+
+    🔴 A separate pass rather than a new S-tier extractor, and the reason is a
+    standing decision rather than a preference: registering it in `SIGNAL` would
+    make `signal.parquet` stale and demand an **8-hour** re-run of a tier that
+    is explicitly not to be re-run. B1 is built the same way and for the same
+    reason.
+
+    ⚠️ Chain plane only. The morphology question is about the file the model
+    receives; the native plane's onset is the archive's, and a crop policy
+    cannot act on it.
+    """
+    files = load_files(cfg, partition)
+    sample = load_sample(cfg, partition)
+    if sample is None:
+        raise NotProbed(
+            f"partition {partition}: no {SAMPLE_FILE}. C5 measures the recorded "
+            f"draw, not a new one -- its numbers have to be comparable with the "
+            f"S tier's over the same files")
+    rows = sampled_rows(files, sample)
+    roots = stage_roots(cfg)
+
+    def one(i: int) -> dict[str, Any]:
+        row = rows.iloc[i]
+        fixed = {"file_id": row["file_id"], "source_name": row["source_name"],
+                 "partition": partition}
+        source_name = str(row["source_name"])
+        if source_name not in roots:
+            return {**fixed, **_failed_envelope(f"source {source_name!r} not in the config")}
+        declared = row.get("orig_sr")
+        declared = None if declared is None or pd.isna(declared) else int(declared)
+        try:
+            planes = load_planes(roots[source_name] / row["path"],
+                                 declared_sr=declared, file_id=str(row["file_id"]))
+        except Exception as exc:                     # noqa: BLE001 -- a row, not a raise
+            return {**fixed, **_failed_envelope(f"{type(exc).__name__}: {exc}")}
+        plane = planes[CHAIN]
+        return {**fixed, **envelope_row(plane.wav, plane.sample_rate)}
+
+    out: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=cfg.probe.workers) as pool:
+        for idx, batch in shards(list(range(len(rows))), cfg.sample.shard_size):
+            out.extend(pool.map(one, batch))
+            if progress is not None:
+                progress(partition, idx, len(batch))
+    return pd.DataFrame(out)
+
+
+def _failed_envelope(error: str) -> dict[str, Any]:
+    from eda.extract.envelope import COLUMNS as _ENV_COLUMNS
+
+    failed = {c: None for c in _ENV_COLUMNS}
+    failed["envelope_ok"] = False
+    failed["envelope_error"] = error
+    return failed

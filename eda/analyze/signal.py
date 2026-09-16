@@ -32,6 +32,7 @@ __all__ = ["CHAIN_EXCLUDED", "SIGNAL_SCALARS", "TEST_MAX_S", "TEST_MIN_S",
            "DUPLICATE_COSINE", "bandwidth_report", "content_fingerprints",
            "content_similarity_profile", "duration_report", "level_report",
            "SUNG_SOURCES", "VOICE_EVIDENCE_RATIO", "content_report", "near_duplicates",
+           "ENVELOPE_SILENT_DBFS", "envelope_report",
            "plane_features", "paired", "signal_audit"]
 
 #: The competition's test set: 1,200 files, **4-60 s, 16 kHz**
@@ -498,3 +499,44 @@ def content_report(signal: pd.DataFrame, files: pd.DataFrame) -> pd.DataFrame:
             "unevidenceable": n_unevidenced,
         })
     return pd.DataFrame(rows).sort_values("source_name").reset_index(drop=True)
+
+
+#: C5's silent-file guard. A digitally silent clip has a flat envelope, so its
+#: deficit against its **own** median is 0 and it reads as a `hard_cut` -- which
+#: would count silence as evidence for the very asymmetry C5 is testing. Files
+#: whose reference level is at or under this are excluded and **counted**.
+ENVELOPE_SILENT_DBFS = -100.0
+
+
+def envelope_report(envelope: pd.DataFrame) -> pd.DataFrame:
+    """C5, read: the onset and offset class mix per partition.
+
+    🔴 The comparison the reader must make is **C against D, down the same
+    column**. C5's hypothesis is that real music is cut from track centres
+    (`hard_cut`) while generated music is a complete piece (`natural` or
+    `fade`), and that the first 100 ms therefore separates the 0.27-weight
+    music head with no acoustics involved. Rates per partition are what
+    confirm or refute it; a corpus-wide number would hide it entirely.
+
+    ⚠️ Silent files are excluded and counted, not dropped quietly -- see
+    `ENVELOPE_SILENT_DBFS`.
+    """
+    ok = envelope["envelope_ok"].fillna(False)
+    ref = pd.to_numeric(envelope["envelope_ref_dbfs"], errors="coerce")
+    silent = ok & (ref <= ENVELOPE_SILENT_DBFS)
+    usable = envelope[ok & ~silent]
+
+    rows = []
+    for partition, block in usable.groupby("partition"):
+        row = {"partition": partition, "n": len(block),
+               "n_failed": int((~ok)[envelope["partition"] == partition].sum()),
+               "n_silent": int(silent[envelope["partition"] == partition].sum())}
+        for edge in ("onset", "offset"):
+            counts = block[f"{edge}_class"].value_counts(normalize=True)
+            for name in ("hard_cut", "fade", "natural", "unknown"):
+                row[f"{edge}_{name}"] = float(counts.get(name, 0.0))
+            row[f"{edge}_lead_median_s"] = float(
+                pd.to_numeric(block[f"{edge}_lead_silence_s"],
+                              errors="coerce").median())
+        rows.append(row)
+    return pd.DataFrame(rows).sort_values("partition").reset_index(drop=True)

@@ -1,7 +1,8 @@
 # The data memo — X7, the EDA's exit condition
 
-**Written 2026-09-14, updated 2026-09-15 with the content tier.** Every number here was measured, not carried
-forward; the command that reproduces each one is named beside it. This is
+**Written 2026-09-14; updated 2026-09-15 with the content tier and 2026-09-16 with steps 1-4 of
+[10](10-final-plan.md).** Every number here was measured, not carried forward; the command that
+reproduces each one is named beside it. This is
 [06 X7](06-cross-pool.md#x7--the-data-memo-e-s3--tier-s-the-exit-condition), and the standard it is
 written to is the playbook's: *"do not advance to hyperparameter tuning until the data memo explains
 class imbalance, domain shift, and the first leakage hypothesis."* Those three have their own
@@ -13,7 +14,14 @@ $V -m eda.cli sources | probe | consolidate | keys   # the M tier and the group 
 $V -m eda.cli sample | signal                        # the S tier, both halves
 $V -m eda.cli report                                 # duration, bandwidth, level
 $V -m eda.cli analyze | gates                        # X1, E1, grouping, the gates
+$V -m eda.cli b1 | screens | roles | envelope        # B1, the four screens, X6, C5
+$V -m eda.cli envelope --run                         # C5's decode, ~5 min over the corpus
 ```
+
+⚠️ **Completeness claims in this repository have been wrong before.** The 2026-09-15 version of this
+memo said the EDA was complete on the strength of [09](09-next-steps.md)'s eight steps; 09 was a
+remaining-work plan and never the task inventory. [10 §1](10-final-plan.md) is the inventory —
+**33 answered, 7 blocked, 2 Phase 2** — and it is the page to check before believing this one.
 
 ---
 
@@ -140,8 +148,22 @@ four are split across three pools ([00 §4d](00-harness.md#4d---r1-on-the-whole-
 
 ## 5 — 🔴 The leakage hypothesis
 
-**Duration predicts the music labels, it survives a whole-publisher holdout, and the render chain
-cannot touch it.**
+**There are two, they are independent, they are on the same 0.27-weight head, and they are within
+0.02 AUC of each other.** The playbook asks for *the first* leakage hypothesis; this corpus has two
+that matter equally, and treating them as one is the error that would leave half the problem in
+place.
+
+| | shortcut | what it is | AUC | fixed by |
+|---|---|---|--:|---|
+| **L1** | **duration** | the file's *length* | **0.852** (whole-publisher holdout) | a crop policy |
+| **L2** | **onset deficit** | the file's first **20 ms** | **0.869** (pool C vs D) | a **random-offset** crop |
+
+🔴 **A crop that fixes L1 does not necessarily fix L2.** Cropping every music file to a common
+length removes duration and leaves the file's *beginning* exactly where it was. Only drawing the
+crop from a **random offset inside** the file removes both — and R2 makes that symmetric by
+construction only if pools C and D both go through it.
+
+### L1 — duration
 
 The evidence, in the order it was found:
 
@@ -163,8 +185,30 @@ measuring length, and the test set is 4–60 s for both classes.
 features that drop out are `mel_bands_flat` and `effective_bandwidth_hz` — the native sample rate
 wearing acoustic names. The rate fingerprint dies at 8 kHz. Duration does not.
 
-⚠️ **A second leakage axis, structural rather than statistical**: near-duplicate and sibling content
-across fold boundaries. Found and fixed once already — CompSpoof shares **292 parent recordings
+### L2 — the first 20 ms
+
+**Pool C opens 43.35 dB below its own median level; pool D opens 0.90 dB below it.** Measured over
+all 58,885 drawn files on the chain plane
+([03 C5b](03-pool-c-real-instrumental.md)); `onset_level_deficit_db` separates the two pools at
+**AUC 0.869** and the interquartile ranges do not overlap (C p25 34.53, D p75 6.93).
+
+⚠️ **The direction is the opposite of what [03 C5](03-pool-c-real-instrumental.md) predicted.** The
+spec assumed real music is cut from track centres (hard) and generated music begins from silence.
+In fact the **real** pool carries the editing artefact — a short de-click ramp at the excerpt cut —
+and the **generated** pool carries none, because a generation simply begins. The mechanism C5
+identified is right; its sign was assumed rather than measured.
+
+Two alternative explanations were ruled out before this was published: **mp3 decoder padding**
+(`musan-music`, a wav source, shows the corpus's largest deficit at 77.04 dB) and **loudness
+compression** (|r| ≤ 0.33 against `crest_factor_db_chain`).
+
+🔴 **Why it is dangerous in the same way L1 is:** it is not acoustic, no spectral analysis would
+surface it, and it survives the render chain untouched — resampling does not move a file's first
+frame.
+
+### L3 — structural, and not statistical
+
+⚠️ Near-duplicate and sibling content across fold boundaries. Found and fixed once already — CompSpoof shares **292 parent recordings
 between its two splits, 1,060 files**, which the path-derived key did not catch
 ([05 E1b](05-pool-e-noise.md)). `G-EDA4` is the gate for this and it cannot run until a fold table
 exists.
@@ -209,14 +253,40 @@ Stated rather than left as a silence:
 
 ---
 
-## 8 — The three things to carry into processing strategy
+## 8 — What to carry into processing strategy
 
-1. **Duration is the shortcut, and only the sampler can fix it.** Nothing in the render chain
-   changes a file's length.
-2. **Above 8 kHz is not available.** Ten of fourteen sources have nothing there to begin with, so
-   any feature engineered up there works on four sources split across three pools.
-3. **Level and metadata are publisher fingerprints.** Metadata is already handled — every file
-   leaves the render chain through one identical encode with tags stripped. Level is not, yet.
+1. 🔴 **Two shortcuts, not one, and a crop must remove both.** L1 is the file's length, L2 its
+   first 20 ms. **Only a random offset inside the file removes both**, applied identically to pools
+   C and D or it manufactures the cue it is meant to erase (R2).
+2. 🔴 **Nothing in `files.parquet` is a feature.** All 30 M-tier columns are a leakage risk, a split
+   key or the label — `roles.md` assigns every one of the corpus's 118 columns
+   ([06 X6b](06-cross-pool.md)). Metadata scores AUC 1.000 in CV and **0.0000008** under an archive
+   holdout: it does not merely fail to transfer, it **inverts**.
+3. **Above 8 kHz is not available.** Ten of fourteen sources have nothing there, so any feature
+   engineered up there works on four sources split across three pools.
+4. 🔴 **Do not high-pass — and decide it together with DC removal.** Five of seven vocoder
+   signatures live below 72 Hz ([02 B1b](02-pool-b-fake-voice.md)), so a rumble filter would delete
+   the largest discriminative feature pool B has. ⚠️ But `cfad/pwg` is identifiable at **AUC 0.998**
+   from `dc_offset` alone ([02 B6b](02-pool-b-fake-voice.md)), so DC removal would *erase* a
+   generator id. The two pull in opposite directions and are one decision, not two.
+5. **`artifact_family` is measured, not named.** `melgan` ↔ `melgan_large` correlate at 0.895;
+   `melgan` ↔ `multi_band_melgan` at **−0.186** — same name, opposite artefacts. A fold builder that
+   groups by model name merges two families and splits the one real one.
+6. **Level is a publisher fingerprint and is *not* neutralised by the chain** — 22.6 dB of
+   median-RMS spread. Metadata is neutralised by the render chain; level is not, yet.
+7. **No degenerate-generation population exists to drop**, and a drop would be asymmetric anyway:
+   pool C flags **3.6×** more often than pool D ([02 B4b](02-pool-b-fake-voice.md)).
+
+---
+
+## 9 — The two decisions this memo does not make
+
+Measured, and left open because they are calls rather than computations.
+
+| | what | the number |
+|---|---|---|
+| **fma licence allowlist** | `G-EDA1/allowlist/fma` fails: how much of pool C may be used | **2,907 of 8,000** files outside the allowlist |
+| **G-EDA6 reassignment** | rows contradicting their asserted components; [07](07-order-and-gates.md) says reassign (F-A1) before dropping | **2,442** rows, of which **2,113** are pool-E files asserting `VOICE_PRESENT = 0` while carrying speech ([05 E5b](05-pool-e-noise.md)) |
 
 ---
 
