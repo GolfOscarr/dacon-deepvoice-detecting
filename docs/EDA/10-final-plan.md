@@ -215,7 +215,7 @@ computations — they are not EDA work and closing the EDA does not close them:
 | | the number |
 |---|---|
 | `G-EDA1/allowlist/fma` | **23** genuinely DENY; the other **2,884** are ND and already usable ([03 C1b](03-pool-c-real-instrumental.md)). ⏭️ deferred: the gain is volume, and volume is not pool C's constraint |
-| `G-EDA6` reassignment | **2,442** rows contradicting their asserted components, of which **2,113** are pool-E files asserting `VOICE_PRESENT = 0` while carrying speech |
+| `G-EDA6` reassignment | ✅ **decomposed 2026-09-16**, [07 G-EDA6b](07-order-and-gates.md): **1,342** reassign to cells 5/8 · **1,032** pool-E files restricted from the noise layer · **23** genuine generation failures · 42 unevidenceable · 3 sparse. Acting on it is a **manifest** change, not EDA work |
 
 🔴 **`eda gates` still exits non-zero and that is correct.** `G-EDA2` is structural and cannot go
 green in the EDA at all (§3); `G-EDA3` reports a genuine count, not a gap; the other two are the

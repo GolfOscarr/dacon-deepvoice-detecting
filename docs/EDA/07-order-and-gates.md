@@ -115,3 +115,85 @@ Stated so they are not discovered as surprises.
   a hypothesis to be measured, not a result. The repo's own standing lesson applies:
   *a green suite is not evidence that a check can fail*, and a plausible plan is not evidence that
   a confound exists.
+
+---
+
+## G-EDA6b — ✅ Answered 2026-09-16: the 2,442 are **three problems**, not one work list
+
+`eda/out/_shared/reassignment_worklist.parquet`, written by `python -m eda.cli reassign`. The gate
+names a count; this names the rows and the action.
+
+🔴 **Reading the 2,442 as a single list is the error this decomposition prevents — they need
+opposite actions.**
+
+| action | rows | what it means |
+|---|--:|---|
+| **`reassign_cell`** | **1,342** | F-A1: asserts `voice_present = 0`, carries speech, **becomes a mixed-cell whole_file sample** |
+| **`restrict_noise`** | **1,032** | ⚠️ same contradiction, but pool E — **not** a reassignment, see below |
+| `unevidenceable` | 42 | under the 4 s floor. `na`, not a contradiction |
+| `degenerate` | 23 | F-S4: normal length, no speech, and the pool *generates* voice |
+| `sparse_real` | 3 | the same shape from pool A, which generates nothing |
+
+### `reassign_cell` — 1,342 rows, and the target is derived, not typed
+
+| source | pool | n | → cell | median speech ratio |
+|---|---|--:|--:|--:|
+| `fakemusiccaps` | D | 1,006 | **8** `(1,1,1,1)` | 0.559 |
+| `fma` | C | 274 | **5** `(1,1,0,0)` | 0.666 |
+| `musan-music` | C | 62 | **5** | 0.582 |
+
+Pool C is real music, so real music + the real voice the VAD heard is **cell 5**. Pool D is
+text-to-music, so any vocal in its output was generated with the rest of the clip — **cell 8**.
+
+⚠️ **The median speech ratio is 0.56–0.67**, not something marginal sitting on the threshold. These
+files carry speech through *more than half* their duration. `fma` at 13.7% contradicted is the
+corpus's worst rate, and "instrumental" is the label it was carrying.
+
+🔴 `TARGET_CELL` is checked against `CELL_TABLE` **at import**: a target that does not assert voice,
+or that changes the pool's music label, raises. It is the one defect this table could introduce, and
+it would move 1,006 files into a cell asserting the opposite of what was intended.
+
+### `restrict_noise` — 1,032 rows, and it is **not** a reassignment
+
+⚠️ **Pool E is an additive layer, not a standalone sample.** Noise is mixed *under* a composite whose
+labels come from the other components. A noise clip carrying speech, mixed under a music-only
+composite, makes that composite carry voice while asserting `voice_present = 0` — so **one
+contaminated noise file mislabels every sample it is ever mixed into**. That is a larger failure
+than a single mislabelled row, and it is invisible in any per-file audit of the composite.
+
+And the obvious reassignment is no better: a field recording with distant speech is a poor cell-1
+*voice* sample. The action is to **restrict where it may be used** — never as a layer under a
+`PRESENT = 0` composite — which is neither "reassign" nor "drop".
+
+⚠️ This overlaps [05 E5b](05-pool-e-noise.md) and the two numbers differ **because the thresholds
+do**: E5 asks whether *any* speech evidence exists (`ratio > 0`, giving 2,113 pool-E rows) because
+[#417333 A3](../competition/05-talkboard-qa.md) makes `PRESENT = 1` true at any audibility. G-EDA6
+asks whether the contradiction is *material* (`ratio >= 0.20`, giving 1,032). Both are right for
+their own question; quoting one for the other is not.
+
+### `degenerate` — 23 rows, and they are the population B4 could not find
+
+`mlaad` 14, `cfad-fake` 9. Normal length for their source — `mlaad`'s median is **11.28 s** against
+the source's 7.99 — asserting fake voice, and carrying **no speech**.
+
+🔴 [02 B4b](02-pool-b-fake-voice.md) screened the whole corpus for degenerate output and found no
+population worth dropping. This is that population, and B4 could not see it: the right detector for
+*"the TTS produced no speech"* is a **VAD**, not a clipping or level threshold. A babbling or silent
+generation has ordinary peak, RMS and clipping statistics.
+
+### `sparse_real` — 3 rows, and why they are not the previous category
+
+`cfad-real`, ratio 0.192, just under the threshold. **F-S4 is *generation*-failure detection and
+pool A generates nothing**, so filing a real recording's quiet passage as a broken generation is
+wrong by construction. Measured: the first version of this analysis did exactly that, and the split
+on `POOL_LABELS[pool][voice_fake]` is what prevents it.
+
+### What this does and does not close
+
+`G-EDA6` still **fails**, and correctly: the rows are identified and nothing has been reassigned.
+Acting on the list is a **manifest** change, not an EDA one — `row_kind` goes `component` →
+`whole_file`, `pool` → null, `cell` → 5 or 8 — and the EDA does not write the manifest.
+
+⚠️ **Do not act on `reassign_cell` by dropping.** F-A1 is explicit: *"Reassign, don't drop — it
+becomes a mixed-cell sample"*. 1,342 files of genuine music-with-vocals is material the corpus is
+short of, and cells 5–8 are exactly where the composed majority of the test set lives.

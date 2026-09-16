@@ -286,7 +286,7 @@ Measured, and left open because they are calls rather than computations.
 | | what | the number |
 |---|---|---|
 | ~~fma licence allowlist~~ | ⏭️ **answered and deferred**, [03 C1b](03-pool-c-real-instrumental.md): the 2,907 are **23 DENY + 2,884 ND**, and ND is usable per #417333 A5. Regenerating is ~10 min and adds **+57% volume, 0 publishers, 0 shortcut dilution** — deferred until pool C volume binds | 23 unusable |
-| **G-EDA6 reassignment** | rows contradicting their asserted components; [07](07-order-and-gates.md) says reassign (F-A1) before dropping | **2,442** rows, of which **2,113** are pool-E files asserting `VOICE_PRESENT = 0` while carrying speech ([05 E5b](05-pool-e-noise.md)) |
+| **G-EDA6 reassignment** | ✅ **decomposed**, [07 G-EDA6b](07-order-and-gates.md). Three problems, opposite actions | **1,342** → cells 5/8 · **1,032** pool-E restricted from the noise layer · **23** generation failures · 45 not contradictions |
 
 ---
 

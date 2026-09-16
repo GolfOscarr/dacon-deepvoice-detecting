@@ -23,6 +23,7 @@ from eda.analyze import pairs as prs
 from eda.analyze import screens as scr
 from eda.analyze import census as cen
 from eda.analyze import roles as rol
+from eda.analyze import reassign as rea
 from eda import driver as drv
 from eda import groupkeys
 from eda.config import load_eda_config
@@ -678,6 +679,37 @@ def cmd_envelope(cfg, args) -> int:
     return 0
 
 
+def cmd_reassign(cfg, args) -> int:
+    """G-EDA6's work list: docs/EDA/07, F-A1.
+
+    The gate names a count; this names the **rows and the action**. Nothing
+    here changes the corpus -- it writes the list somebody has to work.
+    """
+    try:
+        signal = load_signal(cfg)
+    except RuntimeError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+    threshold = (sig.VOICE_EVIDENCE_RATIO if args.threshold is None
+                 else args.threshold)
+    rows = rea.contradiction_rows(signal, threshold=threshold)
+    out = cfg.out / "_shared"
+    out.mkdir(parents=True, exist_ok=True)
+
+    print(f"=== G-EDA6: {len(rows)} contradicted row(s) at "
+          f"ratio >= {rows.attrs['threshold']}")
+    print("    🔴 three different problems, and they need opposite actions")
+    _show(rea.reassignment_plan(rows))
+    rows.to_parquet(out / "reassignment_worklist.parquet", index=False)
+
+    print("\n=== totals by action")
+    totals = rows.groupby("action").size().rename("rows").reset_index()
+    totals["why"] = totals["action"].map(rea.ACTIONS)
+    _show(totals)
+    print(f"\nwrote the work list to {out / 'reassignment_worklist.parquet'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="eda", description=__doc__)
     p.add_argument("--config", default=DEFAULT_CONFIG, type=Path)
@@ -742,6 +774,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="decode the recorded draw first (~5 min over the corpus)")
     s.add_argument("--partition", help=part_help)
     s.set_defaults(fn=cmd_envelope)
+
+    s = sub.add_parser("reassign", help="G-EDA6: the contradiction work list (F-A1)")
+    s.add_argument("--threshold", type=float, default=None,
+                   help="speech-ratio threshold; defaults to VOICE_EVIDENCE_RATIO")
+    s.set_defaults(fn=cmd_reassign)
 
     s = sub.add_parser("roles", help="step 3: X6's roles.md and the six censuses")
     s.add_argument("--head", type=int, default=20,
