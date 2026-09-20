@@ -158,29 +158,37 @@ def frame_intervals_for(spec: SampleSpec) -> dict[str, tuple[tuple[float, float,
     Keyed by branch (``voice`` / ``music`` / ``file``), values ``(start_s,
     end_s, label)``. Consecutive tiles of one component merge into one
     interval: the tiles are a rendering device, the span is the fact.
-    Whole-file specs carry empty tuples (interim -- step 3).
-    """
-    empty: dict[str, tuple[tuple[float, float, int], ...]] = {
-        "voice": (), "music": (), "file": ()}
-    if spec.render_mode != "composed":
-        return empty
 
+    A whole-file spec is one row carrying every component its cell says is
+    present, placed under the same lead/tail and tiles as a composed one -- so
+    its tiles describe every present role at once, labelled by the cell.
+    (``training.render.frame_intervals_for`` returns empty tuples for it: the
+    training sampler never places a whole-file row anywhere but 0.)
+    """
     fake_for_role = {"voice": spec.voice_fake, "music": spec.music_fake, "noise": 0}
     out: dict[str, list[tuple[float, float, int]]] = {"voice": [], "music": [], "file": []}
+    whole_roles = tuple(r for r, present in (("voice", spec.voice_present),
+                                             ("music", spec.music_present)) if present)
     for draw in spec.components:
         start = max(0.0, float(draw.target_start_s))
         end = min(float(spec.duration_s), start + float(draw.duration_s))
         if end <= start:
             continue
-        label = int(fake_for_role.get(draw.role) or 0)
-        keys = ("file",) if draw.role == "noise" else (draw.role, "file")
-        for key in keys:
-            spans = out[key]
-            if spans and spans[-1][2] == label and abs(spans[-1][1] - start) < 1e-6:
-                spans[-1] = (spans[-1][0], end, label)
-            else:
-                spans.append((start, end, label))
+        roles = whole_roles if spec.render_mode == "whole_file" else (draw.role,)
+        for role in roles or ("noise",):
+            label = int(fake_for_role.get(role) or 0)
+            _merge(out, (("file",) if role == "noise" else (role, "file")), start, end, label)
     return {k: tuple(v) for k, v in out.items()}
+
+
+def _merge(out: dict[str, list[tuple[float, float, int]]], keys: tuple[str, ...],
+           start: float, end: float, label: int) -> None:
+    for key in keys:
+        spans = out[key]
+        if spans and spans[-1][2] == label and abs(spans[-1][1] - start) < 1e-6:
+            spans[-1] = (spans[-1][0], end, label)
+        else:
+            spans.append((start, end, label))
 
 
 # --------------------------------------------------------------------------- #

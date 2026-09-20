@@ -163,10 +163,19 @@ class SampleSpec:
             raise ValueError(f"duration_s must be > 0, got {self.duration_s}")
         if not self.components:
             raise ValueError("a spec needs at least one component draw")
-        if self.render_mode == "whole_file" and len(self.components) != 1:
-            raise ValueError(
-                f"a whole_file spec is exactly one row used as-is, got "
-                f"{len(self.components)} components")
+        # Critical: a whole_file spec is ONE row used as-is -- but it may be
+        # placed as several tiles of that row (docs/processing/03 DRAW-3 applies
+        # the take/offset/tile rule to every row kind). What is invariant is
+        # that every component names the same file and the same role; a second
+        # file would be a composition wearing the whole-file label.
+        if self.render_mode == "whole_file":
+            files = {c.file_id for c in self.components}
+            roles = {c.role for c in self.components}
+            if len(files) != 1 or len(roles) != 1:
+                raise ValueError(
+                    f"a whole_file spec is exactly one row used as-is: every "
+                    f"component must name the same file and role, got files "
+                    f"{sorted(files)} and roles {sorted(roles)}")
         # Cells 6 and 7 hold one real and one fake component, so they cannot be
         # scraped -- that is the whole reason two fake heads exist.
         if self.cell in (6, 7) and self.render_mode != "composed":

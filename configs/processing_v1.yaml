@@ -30,6 +30,12 @@ draw:
   edge_margin_s: 0.5
   # D-5. The component floor (the timeline floor stays duration_range[0]).
   component_floor_s: 2.0
+  # D-21 (measured during implementation, docs/processing/03 §1). The take is
+  # capped by the file, so short files mean more tiles, and pool B is short:
+  # the tile count was a voice-fake cue (I1b 0.65). Within each role the real
+  # and fake sides are re-weighted to draw the same histogram of usable
+  # duration over these edges; above take_hi the cap never binds. null = off.
+  duration_match_edges_s: [3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
   # DRAW-4. The voice/music level ratio, skewed quiet (A-A3).
   gain_db_range: [-15.0, 15.0]
   gain_db_mean: -3.6

@@ -70,6 +70,18 @@ class DrawConfig:
     #: recovers 63.5 h. Must exceed ``2 * edge_margin_s`` or a row at the floor
     #: has no usable interior.
     component_floor_s: float = 2.0
+    #: D-21 (measured in step 3, not in the spec). The take is capped by the
+    #: file's usable interior, so a short file yields shorter tiles and MORE
+    #: joins -- and pool B is short: under the DOSS weights 39 % of fake-voice
+    #: mass has < 3 s of interior against 15 % of real-voice mass, which made
+    #: the tile count a voice-fake cue (I1b 0.65 in the mixed stratum on the
+    #: S-tier manifest; 10.1 tiles per fake voice component vs 7.7 real).
+    #: Fix: within each role, the file weights are re-balanced so both sides
+    #: draw the same histogram of usable duration over these bin edges
+    #: (``w *= target(bin) / side(bin)``, target = the two sides' mean; a bin
+    #: one side lacks gets 0). Nothing is discarded. Bins only matter below
+    #: ``take_hi``; above it the cap never binds. ``None`` switches it off.
+    duration_match_edges_s: tuple[float, ...] | None = (3.0, 4.0, 5.0, 6.0, 7.0, 8.0)
 
     # -- DRAW-4: placement -------------------------------------------------- #
     gain_db_range: tuple[float, float] = (-15.0, 15.0)
@@ -110,6 +122,11 @@ class DrawConfig:
                 f"floor needs a positive interior to take from")
         if self.domain_cap < 1:
             raise ValueError(f"domain_cap must be >= 1, got {self.domain_cap}")
+        edges = self.duration_match_edges_s
+        if edges is not None and (len(edges) == 0 or min(edges) <= 0
+                                  or list(edges) != sorted(set(edges))):
+            raise ValueError(f"duration_match_edges_s must be strictly increasing "
+                             f"positive edges or null, got {edges}")
         for name in ("silence_lead_s", "silence_tail_s"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")

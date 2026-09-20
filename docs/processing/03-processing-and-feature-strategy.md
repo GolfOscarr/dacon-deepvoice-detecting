@@ -51,6 +51,7 @@ The decisions, in the order the pipeline meets them. `D-` ids are used throughou
 | D-18 | model input | waveform → SSL frontend; **no handcrafted feature reaches the model**; scalars are sidecars | FIXED | [02 §7–§9](02-analysis-report.md#7--dc-and-the-high-pass): every scalar is a fingerprint |
 | D-19 | segmentation | `whole_file` first; `tiling 5 s / 2.5 s` fallback | FIXED (order) | [architecture/04 §6.1](../architecture/04-heads-and-pooling.md#61--cross-window-aggregation-and-the-duration-trap) |
 | D-20 | Tier-2 input channels | none in v1; ablate one at a time after the first scored model | FIXED (order) | §3 FEAT-2 |
+| D-21 | duration-matched file weights | within each role, real and fake re-weighted to one histogram of usable duration over edges `{3,4,5,6,7,8}` s; `None` = off | FIXED (measured in step 3) | the take is capped by the file, so a short file means more tiles; pool B is short (39 % of fake-voice mass under 3 s of interior vs 15 % real) and the tile count read as `voice_fake` — I1b 0.652 in the mixed stratum on the S-tier stream, 10.1 vs 7.7 tiles; matched: below the gate (`processing/sampler.py::_match_durations`) |
 
 ---
 
@@ -224,7 +225,12 @@ for each tile: offset_i ~ U(0, file_duration − take)   # independent per tile
 ```
 
 **Parameters.** `take_lo 3.0`, `take_hi 8.0`, `edge_margin_s 0.5`, `component_floor_s 2.0`
-(all **NEW** `SamplerConfig` fields); `domain_cap 500`.
+(all **NEW** `SamplerConfig` fields); `domain_cap 500`; `duration_match_edges_s` (D-21).
+⚠️ **Measured in step 3:** the cap `take ≤ file − 2·margin` makes the tile count follow the file's
+length, and the length distribution differs between a role's pools — the harness did not see it
+because it audited joins per policy on the *training* sampler's file draws, where the cap was one
+margin wide. D-21 closes it; the 2 s floor (D-5) is realised only in bins the real side also
+populates (it does: 15 % of real-voice mass is under 3 s).
 **Why these values.** 3–8 s is below pool D's 10 s (so the offset range is never empty) and inside
 the segment grid ★ `[BirdCLEF playbook]` D4 recommends; the audit is flat across 2–8 s (P5/P7/P8
 within 0.03). `edge_margin 0.5` took onset exposure from 20 % → 0.8 % (voice) and 78 % → 1.9 %

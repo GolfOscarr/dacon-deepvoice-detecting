@@ -362,14 +362,61 @@ def test_the_test_chain_is_applied_last(corpus, cfg):
     assert chained.shape[0] == 1 and chained.shape[-1] == plain.shape[-1]
 
 
-def test_the_interim_whole_file_spec_renders(corpus, cfg):
-    _, manifest, index = corpus
-    s = Sampler(manifest, DrawConfig(f8=0.0, duration_range=(4.0, 6.0)))
-    whole = [spec for spec in s.epoch_specs(200) if spec.render_mode == "whole_file"]
-    assert whole
-    r = render(whole[0], index, cfg)
-    assert r.wav.shape[-1] == int(round(whole[0].duration_s * SR))
-    assert r.frame_intervals == {"voice": (), "music": (), "file": ()}
+@pytest.fixture(scope="module")
+def whole(corpus):
+    """Whole-file specs of every cell the corpus scrapes whole."""
+    _, manifest, _ = corpus
+    s = Sampler(manifest, DrawConfig(f8=0.0, duration_range=(4.0, 12.0)))
+    out = {}
+    for spec in s.epoch_specs(600):
+        if spec.render_mode == "whole_file" and spec.cell not in out:
+            out[spec.cell] = spec
+    return out
+
+
+def test_whole_file_specs_render_to_the_timeline_with_the_lead_silent(corpus, cfg, whole):
+    _, _, index = corpus
+    # the 6-row fixture scrapes three cells whole; 8 is the both-roles case
+    assert 8 in whole and len(whole) >= 3, sorted(whole)
+    for spec in whole.values():
+        r = render(spec, index, cfg)
+        assert r.wav.shape[-1] == int(round(spec.duration_s * SR))
+        wav = r.wav.abs().max(dim=0).values.numpy()
+        lead = min(c.target_start_s for c in spec.components)
+        end = max(c.target_start_s + c.duration_s for c in spec.components)
+        assert np.all(wav[:int(round(lead * SR))] == 0)
+        assert _longest_zero_run(wav[int(round(lead * SR)):int(round(end * SR))]) <= 2
+        assert torch.equal(r.wav, render(spec, index, cfg).wav)
+
+
+def test_whole_file_frame_intervals_name_every_present_role_from_the_cell(whole):
+    """A cell-8 row is voice AND music, fake on both; its tiles describe both
+    branches at once, merged into one span each."""
+    for cell, spec in whole.items():
+        iv = frame_intervals_for(spec)
+        lead = min(c.target_start_s for c in spec.components)
+        end = max(c.target_start_s + c.duration_s for c in spec.components)
+        for role in ("voice", "music"):
+            present = getattr(spec, f"{role}_present")
+            if present:
+                assert iv[role] == ((pytest.approx(lead), pytest.approx(end),
+                                     int(getattr(spec, f"{role}_fake") or 0)),), (cell, iv)
+            else:
+                assert iv[role] == (), (cell, iv)
+        assert iv["file"] and all(lbl == spec.file_fake for _, _, lbl in iv["file"]), (cell, iv)
+        if cell == 9:
+            assert iv["file"] == ((pytest.approx(lead), pytest.approx(end), 0),)
+
+
+def test_whole_file_frame_intervals_match_the_audio(corpus, cfg, whole):
+    _, _, index = corpus
+    for spec in whole.values():
+        r = render(spec, index, cfg)
+        wav = r.wav.abs().max(dim=0).values.numpy()
+        mask = np.zeros(wav.shape[-1], dtype=bool)
+        for s, e, _ in r.frame_intervals["file"]:
+            mask[int(round(s * SR)):int(round(e * SR))] = True
+        assert np.all(wav[~mask] == 0) and wav[mask].mean() > 0
 
 
 def test_an_invalid_crossfade_shape_is_rejected(cfg):

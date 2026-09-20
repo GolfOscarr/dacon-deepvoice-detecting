@@ -149,8 +149,19 @@ def test_a_component_may_not_run_past_the_timeline():
 
 
 def test_whole_file_specs_hold_exactly_one_row():
+    """One row -- which may be placed as several tiles of that row (the
+    processing pipeline's take/offset/tile rule applies to every row kind),
+    but never a second file or a second role."""
     with pytest.raises(ValueError, match="exactly one row"):
-        _spec(render_mode="whole_file", components=(_draw(), _draw()))
+        _spec(render_mode="whole_file",
+              components=(_draw(duration_s=5.0), _draw(file_id="A00002", duration_s=5.0,
+                                                       target_start_s=5.0)))
+    with pytest.raises(ValueError, match="exactly one row"):
+        _spec(render_mode="whole_file",
+              components=(_draw(duration_s=5.0), _draw(role="music", duration_s=5.0,
+                                                       target_start_s=5.0)))
+    _spec(render_mode="whole_file",
+          components=(_draw(duration_s=5.0), _draw(duration_s=5.0, target_start_s=5.0)))
 
 
 @pytest.mark.parametrize("bad", [{"cell": 0}, {"cell": 10},

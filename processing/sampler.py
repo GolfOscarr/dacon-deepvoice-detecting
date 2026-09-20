@@ -13,10 +13,19 @@ What differs from ``training.sampler.Sampler``, and why (02 §2-§3):
   0.993 -> 0.497; onset exposure < 1 %.
 * **A 2 s floor (D-5)**, not 4 s: under the tile rule a 2 s file is usable, and
   the 4 s floor cost 22.5 % of pool B's hours.
-* **DOSS on whole-file rows too (D-16).** The training sampler draws them
-  uniformly; the SONICS generators are 400 rows each today but will not stay
-  balanced.
-* **Lead/tail silence on every sample (D-6)** at the measured values.
+* **Whole-file rows go through the same rule (D-3, D-16).** The training
+  sampler uses a whole-file row as-is from offset 0, capped at the row's
+  length -- which made the row's length a duration cue and its onset a
+  silence cue. Here a whole-file draw is DOSS-weighted, the timeline is the
+  timeline, and the row is cropped inside and tiled over the span like any
+  component. Under ``f8 = 1`` the branch is drawn only in the ``f8`` sweep.
+* **Lead/tail silence on every sample (D-6)** at the measured values -- drawn
+  before the branch, so the whole-file branch carries the same lead.
+* **Duration-matched file weights (D-21, measured in step 3).** The take is
+  capped by the file, so a short file means more tiles; pool B is short and
+  the tile count became a voice-fake cue (I1b 0.65). Within each role the two
+  sides are re-weighted to the same usable-duration histogram
+  (``_match_durations``).
 
 Everything else -- the cell mix, ``composed_fractions``, the gain ratio, the
 sequential structure -- is the training sampler's, imported not copied.
@@ -72,15 +81,12 @@ class Sampler:
                 self._by_role_fake[(role, fake)] = rows
                 self._weights[(role, fake)] = self._doss_weights(
                     rows.domain_key if not rows.empty else pd.Series(dtype=object))
+            self._match_durations(role)
 
-        # Whole-file rows. Caveat (step 1 of the change list): until the
-        # whole-file branch gets the full DRAW-3/DRAW-4 treatment (tiles, lead,
-        # an uncapped timeline -- docs/processing/03 §6 step 3), a whole-file
-        # draw is one inside-crop whose length IS the timeline, so the row
-        # must cover the timeline floor plus both margins.
+        # Whole-file rows go through the same take/offset/tile rule (D-3:
+        # "every role incl. whole-file"), so the same floor applies.
         whole = df[df.row_kind == "whole_file"]
-        whole_floor = self.cfg.duration_range[0] + 2.0 * self.cfg.edge_margin_s
-        kept = whole[whole.duration_s >= whole_floor]
+        kept = whole[whole.duration_s >= self.cfg.component_floor_s]
         self.n_dropped_short_whole = int(len(whole) - len(kept))
         self._whole_by_cell: dict[int, pd.DataFrame] = {}
         self._whole_weights: dict[int, np.ndarray] = {}
@@ -102,6 +108,45 @@ class Sampler:
         counts = domain.map(domain.value_counts())
         w = np.minimum(counts, self.cfg.domain_cap) / counts
         return (w / w.sum()).to_numpy(dtype=float)
+
+    # -- D-21: duration matching --------------------------------------------- #
+
+    def _usable_bins(self, rows: pd.DataFrame) -> np.ndarray:
+        edges = np.asarray(self.cfg.duration_match_edges_s, dtype=float)
+        usable = rows.duration_s.to_numpy(dtype=float) - 2.0 * self.cfg.edge_margin_s
+        return np.searchsorted(edges, usable, side="right")
+
+    def _match_durations(self, role: str) -> None:
+        """Re-balance the two sides of ``role`` so they draw the same histogram
+        of usable duration (``DrawConfig.duration_match_edges_s``).
+
+        Critical: the take is capped by the file, so the tile count -- a join
+        count the model can hear -- follows the file's length, and the length
+        distribution differs between a role's real and fake pools. Matching the
+        two histograms makes ``P(n_tiles | label)`` flat by construction while
+        keeping every row drawable. A bin only one side populates cannot be
+        matched and is given zero mass on both sides.
+        """
+        if self.cfg.duration_match_edges_s is None:
+            return
+        real, fake = self._by_role_fake[(role, False)], self._by_role_fake[(role, True)]
+        if real.empty or fake.empty:
+            return
+        n_bins = len(self.cfg.duration_match_edges_s) + 1
+        bins = {side: self._usable_bins(rows) for side, rows in (("r", real), ("f", fake))}
+        mass = {side: np.bincount(bins[side], weights=self._weights[(role, side == "f")],
+                                  minlength=n_bins) for side in bins}
+        target = np.where((mass["r"] > 0) & (mass["f"] > 0), 0.5 * (mass["r"] + mass["f"]), 0.0)
+        if target.sum() <= 0:
+            raise ValueError(
+                f"{role}: the real and fake pools share no usable-duration bin under "
+                f"duration_match_edges_s={self.cfg.duration_match_edges_s}; nothing "
+                f"can be matched")
+        target /= target.sum()
+        for side, fake_flag in (("r", False), ("f", True)):
+            ratio = np.divide(target, mass[side], out=np.zeros(n_bins), where=mass[side] > 0)
+            w = self._weights[(role, fake_flag)] * ratio[bins[side]]
+            self._weights[(role, fake_flag)] = w / w.sum()
 
     # -- drawing ------------------------------------------------------------- #
 
@@ -159,7 +204,9 @@ class Sampler:
         rng = spec_rng(sample_id, epoch, seed)
         cfg = self.cfg
 
-        # DRAW-1: the timeline, drawn first.
+        # DRAW-1: the timeline, drawn first -- and it IS the timeline for every
+        # branch. The training sampler caps a whole-file draw at the row's
+        # length, which made pool D's 10 s files a duration cue.
         lo, hi = cfg.duration_range
         duration = float(rng.uniform(lo, hi))
 
@@ -171,9 +218,6 @@ class Sampler:
         if not composed and cell not in self._whole_by_cell:
             composed = True                       # no whole-file row available
 
-        if not composed:
-            return self._whole_file_spec(rng, sample_id, epoch, seed, cell, duration)
-
         vp, mp, vf, mf = CELL_TABLE[cell]
         wanted: list[tuple[str, bool]] = []
         if vp:
@@ -183,9 +227,12 @@ class Sampler:
         if not wanted:
             wanted.append(("noise", False))
 
-        # DRAW-4: structure, lead/tail, the taper. All drawn before any
-        # component is chosen, so none can depend on which file was drawn.
-        sequential = len(wanted) > 1 and rng.random() < cfg.sequential_prob
+        # DRAW-4: structure, the taper, lead/tail. Drawn for EVERY sample,
+        # before any file is chosen, so none can depend on which file was
+        # drawn -- and the whole-file branch gets the same lead the composed
+        # branch does (a lead only composed samples carried would be a
+        # composedness cue).
+        sequential = composed and len(wanted) > 1 and rng.random() < cfg.sequential_prob
         crossfade_ms = float(rng.uniform(*cfg.crossfade_ms_range))
         lead = float(rng.uniform(0.0, cfg.silence_lead_s)) if cfg.silence_lead_s else 0.0
         tail = float(rng.uniform(0.0, cfg.silence_tail_s)) if cfg.silence_tail_s else 0.0
@@ -193,8 +240,26 @@ class Sampler:
             scale = 0.5 * duration / (lead + tail)
             lead, tail = lead * scale, tail * scale
         span = duration - lead - tail
-        is_ratio = len(wanted) > 1
 
+        if not composed:
+            # One row used as-is, DOSS-weighted (D-16), tiled over the span
+            # under the same rule as a component (D-3, D-4). Its role names the
+            # component the cell says is present ("noise" for cell 9); the
+            # labels come from the cell, not the role.
+            rows = self._whole_by_cell[cell]
+            row = rows.iloc[int(rng.choice(len(rows), p=self._whole_weights[cell]))]
+            role = wanted[0][0]
+            tiles = self._tiles(rng, str(row.file_id), role, float(row.duration_s),
+                                lead, span, 0.0)
+            return SampleSpec(
+                sample_id=sample_id, epoch=epoch, seed=seed,
+                scheme_version=cfg.scheme_version,
+                duration_s=duration, cell=cell, render_mode="whole_file",
+                structure="overlap", components=tuple(tiles),
+                crossfade_ms=crossfade_ms,
+            )
+
+        is_ratio = len(wanted) > 1
         draws: list[ComponentDraw] = []
         for i, (role, fake) in enumerate(wanted):
             row = self._draw_component(rng, role, fake)
@@ -213,35 +278,6 @@ class Sampler:
             duration_s=duration, cell=cell, render_mode="composed",
             structure="sequential" if sequential else "overlap",
             components=tuple(draws), crossfade_ms=crossfade_ms,
-        )
-
-    def _whole_file_spec(self, rng: np.random.Generator, sample_id: int, epoch: int,
-                         seed: int, cell: int, duration: float) -> SampleSpec:
-        """A whole-file row used as-is: DOSS-weighted (D-16), cropped strictly
-        inside the file (D-3's margin).
-
-        Caveat: interim. ``SampleSpec`` requires a whole-file spec to be exactly
-        one component, so the crop is a single take whose length is the
-        timeline (capped by the row) -- no tiles, no lead. Step 3 of
-        docs/processing/03 §6 replaces this with the full rule.
-        """
-        cfg = self.cfg
-        rows = self._whole_by_cell[cell]
-        row = rows.iloc[int(rng.choice(len(rows), p=self._whole_weights[cell]))]
-        file_duration = float(row.duration_s)
-        margin = cfg.edge_margin_s
-        take = min(duration, file_duration - 2.0 * margin)
-        role = ("voice" if CELL_TABLE[cell][0] else
-                "music" if CELL_TABLE[cell][1] else "noise")
-        return SampleSpec(
-            sample_id=sample_id, epoch=epoch, seed=seed,
-            scheme_version=cfg.scheme_version,
-            duration_s=take, cell=cell, render_mode="whole_file",
-            structure="overlap",
-            components=(ComponentDraw(
-                file_id=str(row.file_id), role=role,
-                source_offset_s=float(rng.uniform(margin, file_duration - margin - take)),
-                duration_s=take, target_start_s=0.0, gain_db=0.0),),
         )
 
     def epoch_specs(self, n: int, epoch: int = 0, seed: int = 0):
