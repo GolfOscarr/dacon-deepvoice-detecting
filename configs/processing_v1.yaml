@@ -1,0 +1,46 @@
+# The data-processing pipeline's v1 draw -- docs/processing/03 §5, loaded by
+# `processing.config.load_processing_config`. Independent of the training
+# run configs (configs/run_*.yaml): this is what `processing.sampler.Sampler`
+# draws, and nothing else reads it.
+#
+# Every field is written out even where it equals the default, so the ledger
+# row is this file and not whatever the code defaulted to that week. Values
+# marked OPEN are docs/processing/03 §8's -- placeholders, decided by the
+# measurement named there, never silently.
+
+draw:
+  # D-2. The reference mix, verified against C1 and C3. OPEN: sweep vs the
+  # minimax mix {.03 .03 .03 .03 .323 .10 .10 .197 .16} on per-head VAL EER.
+  cell_mix:
+    p: {1: 0.060, 2: 0.130, 3: 0.060, 4: 0.135, 5: 0.155,
+        6: 0.125, 7: 0.125, 8: 0.095, 9: 0.115}
+  # D-1. Strict: every mixed sample composed. Only f8 = 1 balances composedness
+  # on the component heads (02 §4.2). Whole-file rows exist for the sweep only.
+  f8: 1.0
+  single_composed_rate: 0.0
+  noise_composed_rate: 0.0
+  balance_marginal_composedness: true
+  # D-16. DOSS cap as a sampling weight, on component AND whole-file rows.
+  domain_cap: 500
+  # DRAW-1. The competition's own range; drawn first.
+  duration_range: [4.0, 60.0]
+  # D-3. The take: U(3, 8) s, strictly inside the file by edge_margin_s at both
+  # ends, tiled to its span with independent offsets per tile.
+  take_range_s: [3.0, 8.0]
+  edge_margin_s: 0.5
+  # D-5. The component floor (the timeline floor stays duration_range[0]).
+  component_floor_s: 2.0
+  # DRAW-4. The voice/music level ratio, skewed quiet (A-A3).
+  gain_db_range: [-15.0, 15.0]
+  gain_db_mean: -3.6
+  gain_db_sigma: 4.0
+  sequential_prob: 0.25
+  # The taper at every join: the sequential joint and every tile joint.
+  crossfade_ms_range: [10.0, 200.0]
+  # D-6. lead ~ U(0, 3.0) on every sample (0.595 -> 0.553); tail OPEN,
+  # unmeasured -- next harness run with tail in the grid.
+  silence_lead_s: 3.0
+  silence_tail_s: 1.0
+  scheme_version: strategy-v1
+  # Leave false: it exists for the audit's own mutation tests.
+  allow_unsound_mix: false
