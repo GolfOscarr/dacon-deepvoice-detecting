@@ -67,9 +67,12 @@ draw:
   allow_unsound_mix: false
 
 render:
-  # Manifest paths are relative to this. The S-tier manifest's paths resolve
-  # under the EDA's interim root.
-  root: /data/project/private/dacon-corpus/interim
+  # Manifest paths are relative to this: the corpus root. The built manifest
+  # (scripts/build_corpus_manifest.py -> manifests/strategy-v1/) writes paths
+  # with their stage directory (interim/..., raw/... for mlaad), so one root
+  # resolves every source. The EDA's S-tier manifest (eda/out/_strategy/) is
+  # relative to <root>/interim instead.
+  root: /data/project/private/dacon-corpus
   audio:
     sample_rate: 16000
     min_seconds: 4.0

@@ -110,7 +110,13 @@ Status.**
 **Parameters.** none.
 **Targets.** all sources.
 **Code.** `scripts/build_corpus_manifest.py` — **NEW**, successor of `scripts/build_test_corpus.py`
-(which builds the 2,177-row smoke corpus with a placeholder pool D).
+(which builds the 2,177-row smoke corpus with a placeholder pool D). **As built (step 8):** the
+logic is `processing/corpus.py` (`assign_keys`, `apply_worklist`, `dup_groups`,
+`licence_verdicts`, `verdicts`, `check_rules`); the script is its CLI. Output
+`/data/project/private/dacon-corpus/manifests/strategy-v1/{manifest,verdict}.parquet` +
+`build_report.json`; paths carry the stage directory (`interim/…`, `raw/…` for `mlaad`) so one
+render root — the corpus root — resolves every source. Extra columns beyond `REQUIRED_COLUMNS`:
+`noise_has_speech`, `licence_verdict`, `stage`, `reassigned_from`. Build: 30 s.
 **Consumed by.** OFF-2…OFF-5, the sampler.
 **Verify.** `validate_manifest`; every §4.1 rule as an assertion (a real row with a family, a fake
 row without a `domain_key`, a whole-file row with a pool — each must raise); pool coverage
@@ -420,9 +426,9 @@ Admission rule for each: computed per file over `lengths` (rule 2.4); in the shi
 | `ljspeech` | A | null | `ljspeech_LJ` (one atom → one fold or PROBE) | null | `lj:<LJ id>` | reported |
 | `musan-speech` | A | null | `group_key` | null | null | reported |
 | `cfad-fake` | B | `cfad/<vocoder>` (11) | `SSB` speaker prefix | `cfad-fake\|cfad/<vocoder>` | `cfad:<SSB id>` | exact |
-| `wavefake` | B | `wf_melgan` = {melgan, melgan_large} · `wf_gan` = {full_band_melgan, hifiGAN, parallel_wavegan, waveglow} · `wf_mb_melgan` = {multi_band_melgan}; JSUT / CV-prompt subsets: their own vocoder name | `LJ` / JSUT id | `wavefake\|<vocoder>` | `lj:<LJ id>` for the `ljspeech_*` subsets | exact |
-| `mlaad` | B | `mlaad/<generator>` (175); codec > vocoder > backbone merges applied by hand to the 12 `ko` generators first | `<language>/<generator>` | `mlaad\|<generator>` | null | exact |
-| `fma` | C | null | **artist** (156) | null | null | reported |
+| `wavefake` | B | `wf_melgan` = {melgan, melgan_large} · `wf_gan` = {full_band_melgan, hifiGAN, parallel_wavegan, waveglow} · `wf_mb_melgan` = {multi_band_melgan}; JSUT / CV-prompt subsets: `wf_jsut_<vocoder>`, `wf_cv_fastspeech2_pwg` | `ljspeech_LJ` / `jsut` / `common_voice` | `wavefake\|<subset>` | `lj:<LJ id>` for the `ljspeech_*` subsets, only where the LJSpeech twin survives the filters | exact |
+| `mlaad` | B | `mlaad/<generator>` (**205** directories measured, not 175); codec > vocoder > backbone merges applied by hand to the 12 `ko` generators first (not done) | `<language>/<generator>` | `mlaad\|<generator>` | null | exact |
+| `fma` | C | null | **artist** — the id from `tracks.csv` (**2,309** atoms; the EDA's 156 were `fma_small/NNN/` numbering buckets, not artists) | null | null | reported; `licence_verdict` allow 5,084 / derivatives_barred 2,867 / deny 23 dropped |
 | `musan-music` | C | null | `group_key` (82) | null | null | reported |
 | `fakemusiccaps` | D | `fakemusiccaps/<generator>` (5) | parent clip (5,521) | `fakemusiccaps\|<generator>` | null | exact |
 | `sonics` | cell 8 | `suno_chirp` = {chirp-v2-xxl-alpha, chirp-v3, chirp-v3.5} · `udio` = {udio-30s, udio-120s} | generator | `sonics\|<generator>` | null | exact |
@@ -538,7 +544,7 @@ Model config deltas (`configs/a_shared_trunk.yaml`): `segmentation: {mode: whole
 | 5 | SHIP-4/5 | `training/config.py`, `configs/*.yaml` | `render.preprocess` section; `band_hz` value | `test_no_config_field_is_silently_ignored`; I14 on the chain | D-10, D-11, D-12 |
 | 6 | VERIFY | `training/audit.py` — **as built: `processing/audit.py`** (the training invariants over tile-collapsed specs, plus I1c per head over the harness's draw features and I1d edge exposure per pool) | harness features in `_feature_frame` | H1, H2 and the raw lead reproduced as **failing** I1b on the old sampler; passing on the new | — |
 | 7 | OFF-2 | `eda.cli signal` (VAD only) — **as built: `eda.cli vad --partition C --source fma`**, `eda.driver.vad_coverage` (resumable, draw-fingerprinted), `load_signal(with_extra=True)` for `reassign` / G-EDA6 only | `fma` VAD to 100 % | coverage 1.000 — **measured 0.9997** (3 unreadable files) | D-14 |
-| 8 | OFF-1…4 | `scripts/build_corpus_manifest.py` (NEW) | §4.1 rules, D-14 actions, `dup_group`, `noise_has_speech`, verdict sidecar | every §4.1 rule as an assertion; G-EDA gates re-run | D-14, D-15, D-17 |
+| 8 | OFF-1…4 | `scripts/build_corpus_manifest.py` (NEW) — **as built: `processing/corpus.py`** | §4.1 rules, D-14 actions, `dup_group`, `noise_has_speech`, verdict sidecar | every §4.1 rule as an assertion (`check_rules`; a missing pool, a real row with a family, a one-sided pair each refuse the build); G-EDA gates re-run | D-14, D-15, D-17 |
 | 9 | DRAW-5 | `training/sampler.py`, `training/render.py` | noise layer; SNR-to-gain at render | no `noise_has_speech` row under a `voice_present = 0` spec; I1b on `noise_snr` | — |
 | 10 | OFF-5 | `training/folds.py` config | folds, SHADOW re-renders | VG1 A1–A7; G-EDA3/4 | — |
 | 11 | OFF-6 | new `scripts/build_cache.py` | int16 cache | a cached slice equals `load_audio` bit-for-bit after resample | — |
