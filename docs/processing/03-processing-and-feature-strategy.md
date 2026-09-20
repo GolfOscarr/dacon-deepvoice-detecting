@@ -33,9 +33,9 @@ The decisions, in the order the pipeline meets them. `D-` ids are used throughou
 |---|---|---|---|---|
 | D-1 | composition policy `f8` | **1.0** (strict — every mixed sample composed) | FIXED | [02 §4.2](02-analysis-report.md#42-why--derived-not-fitted): only `f8 = 1` balances composedness on the component heads, for any mix |
 | D-2 | cell mix | reference `{.060 .130 .060 .135 .155 .125 .125 .095 .115}` | OPEN (sweep) | [02 §4.3](02-analysis-report.md#43-the-cell-mix-has-the-same-shape-of-gap): 0.60 presence-pattern residual on the component heads; minimax alternative reaches 0.51 |
-| D-3 | component take | `U(3, 8)` s, **strictly inside** the file (`edge_margin 0.5` s), random offset, **every role incl. whole-file** | FIXED | [02 §3](02-analysis-report.md#3--crop-policies): music-only draw AUC 0.993 → 0.497 |
+| D-3 | component take | `U(3, 8)` s, **strictly inside** the file (`edge_margin 0.5` s), random offset, **every role incl. whole-file** — **revised by D-21: `U(2, 3)` s, one take per sample** | FIXED (range OPEN with D-5) | [02 §3](02-analysis-report.md#3--crop-policies): music-only draw AUC 0.993 → 0.497 |
 | D-4 | timeline fill | **tile** the take to its span with sigmoid joins, every role | FIXED | [02 §2](02-analysis-report.md#2--baseline-what-rundefaultyaml-draws-today): 52.8 % vs 13.9 % silence was the largest cue |
-| D-5 | component duration floor | **2.0 s** (timeline floor stays 4.0 s) | FIXED | [02 §11](02-analysis-report.md#11--manifest-actions-in-hours): the 4 s floor drops 22.5 % of pool B's hours; 2 s recovers 63.5 h |
+| D-5 | component duration floor | **2.0 s** (timeline floor stays 4.0 s) — **revised by D-21: 4.0 s**, bound to the take (`floor − 2·margin ≥ take_hi`) | OPEN with D-3 | [02 §11](02-analysis-report.md#11--manifest-actions-in-hours): the 4 s floor drops 22.5 % of pool B's hours; 2 s recovers 63.5 h — reachable only with a 1 s take |
 | D-6 | silence lead / tail | lead `U(0, 3.0)` s, tail `U(0, 1.0)` s, **every sample** | lead FIXED · tail OPEN | [02 §5](02-analysis-report.md#5--silence): 0.595 → 0.553; tail unmeasured |
 | D-7 | silence trimming | **off** | FIXED | A5b asymmetry (A 7.78 pp vs B 4.12 pp) |
 | D-8 | gain jitter | `U(−12, 12)` dB, `p = 1` | FIXED | [02 §6](02-analysis-report.md#6--level): music 0.683 → 0.599, voice 0.586 → 0.579 |
@@ -51,7 +51,7 @@ The decisions, in the order the pipeline meets them. `D-` ids are used throughou
 | D-18 | model input | waveform → SSL frontend; **no handcrafted feature reaches the model**; scalars are sidecars | FIXED | [02 §7–§9](02-analysis-report.md#7--dc-and-the-high-pass): every scalar is a fingerprint |
 | D-19 | segmentation | `whole_file` first; `tiling 5 s / 2.5 s` fallback | FIXED (order) | [architecture/04 §6.1](../architecture/04-heads-and-pooling.md#61--cross-window-aggregation-and-the-duration-trap) |
 | D-20 | Tier-2 input channels | none in v1; ablate one at a time after the first scored model | FIXED (order) | §3 FEAT-2 |
-| D-21 | duration-matched file weights | within each role, real and fake re-weighted to one histogram of usable duration over edges `{3,4,5,6,7,8}` s; `None` = off | FIXED (measured in step 3) | the take is capped by the file, so a short file means more tiles; pool B is short (39 % of fake-voice mass under 3 s of interior vs 15 % real) and the tile count read as `voice_fake` — I1b 0.652 in the mixed stratum on the S-tier stream, 10.1 vs 7.7 tiles; matched: below the gate (`processing/sampler.py::_match_durations`) |
+| D-21 | one take per sample, never capped by a file | `take` drawn once and shared by every role and row kind; `take_hi ≤ component_floor_s − 2·edge_margin_s` asserted | FIXED (measured in steps 3 and 6) | two cues the harness could not see: a take capped by a short file means more tiles, and pool B is short (39 % of fake-voice DOSS mass under 3 s of interior vs 15 % real) — `voice_fake` I1b 0.652; and a take drawn per role makes the larger of two join counts read as "two components" — `voice_present` 0.68–0.81. With both halves: presence 0.59 (the D-2 residual), `voice_fake` 0.50, `music_fake` 0.53; the capped control 0.755. Replaces the duration-matched weights tried first |
 
 ---
 
@@ -225,12 +225,14 @@ for each tile: offset_i ~ U(0, file_duration − take)   # independent per tile
 ```
 
 **Parameters.** `take_lo 3.0`, `take_hi 8.0`, `edge_margin_s 0.5`, `component_floor_s 2.0`
-(all **NEW** `SamplerConfig` fields); `domain_cap 500`; `duration_match_edges_s` (D-21).
-⚠️ **Measured in step 3:** the cap `take ≤ file − 2·margin` makes the tile count follow the file's
-length, and the length distribution differs between a role's pools — the harness did not see it
-because it audited joins per policy on the *training* sampler's file draws, where the cap was one
-margin wide. D-21 closes it; the 2 s floor (D-5) is realised only in bins the real side also
-populates (it does: 15 % of real-voice mass is under 3 s).
+(all **NEW** `SamplerConfig` fields); `domain_cap 500`.
+⚠️ **Measured in steps 3 and 6 (D-21):** the cap `take ≤ file − 2·margin` makes the tile count
+follow the file's length, and a take drawn per role makes the join count follow the presence
+pattern — the harness saw neither, because it audited joins only on the component heads and only
+on the training sampler's draws. As built, the take is drawn **once per sample**, shared by every
+role, and `take_hi ≤ floor − 2·margin` so no file caps it: `take_range_s [2, 3]`,
+`component_floor_s 4.0` (OPEN together — 3.0 / [1.5, 2] keeps 92 % of pool B's hours, 4.0 / [2, 3]
+80 %, 6.0 / [3, 5] 63 %; every pair passes the audit identically).
 **Why these values.** 3–8 s is below pool D's 10 s (so the offset range is never empty) and inside
 the segment grid ★ `[BirdCLEF playbook]` D4 recommends; the audit is flat across 2–8 s (P5/P7/P8
 within 0.03). `edge_margin 0.5` took onset exposure from 20 % → 0.8 % (voice) and 78 % → 1.9 %
@@ -531,7 +533,7 @@ Model config deltas (`configs/a_shared_trunk.yaml`): `segmentation: {mode: whole
 | 3 | DRAW-1/4 | `training/sampler.py` whole-file branch | timeline not capped by the file; lead/tail drawn; same take rule | a whole-file spec has `target_start_s = lead` and `duration_s` from DRAW-1 | D-6 |
 | 4 | DRAW-6/7 | `training/sampler.py`, `training/config.py` | augment and normalize draws from `augments` / `normalize_menu`; drawn before the cell | I1 sees the names; I1b sees every parameter and the normalize keys; a label-conditioned draw injected in a test must fail I1b | D-8, D-13 |
 | 5 | SHIP-4/5 | `training/config.py`, `configs/*.yaml` | `render.preprocess` section; `band_hz` value | `test_no_config_field_is_silently_ignored`; I14 on the chain | D-10, D-11, D-12 |
-| 6 | VERIFY | `training/audit.py` | harness features in `_feature_frame` | H1, H2 and the raw lead reproduced as **failing** I1b on the old sampler; passing on the new | — |
+| 6 | VERIFY | `training/audit.py` — **as built: `processing/audit.py`** (the training invariants over tile-collapsed specs, plus I1c per head over the harness's draw features and I1d edge exposure per pool) | harness features in `_feature_frame` | H1, H2 and the raw lead reproduced as **failing** I1b on the old sampler; passing on the new | — |
 | 7 | OFF-2 | `eda.cli signal` (VAD only) | `fma` VAD to 100 % | coverage 1.000 | D-14 |
 | 8 | OFF-1…4 | `scripts/build_corpus_manifest.py` (NEW) | §4.1 rules, D-14 actions, `dup_group`, `noise_has_speech`, verdict sidecar | every §4.1 rule as an assertion; G-EDA gates re-run | D-14, D-15, D-17 |
 | 9 | DRAW-5 | `training/sampler.py`, `training/render.py` | noise layer; SNR-to-gain at render | no `noise_has_speech` row under a `voice_present = 0` spec; I1b on `noise_snr` | — |

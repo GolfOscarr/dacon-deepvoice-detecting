@@ -187,38 +187,33 @@ def test_the_join_count_is_a_function_of_span_and_take_only(sampler):
 
 
 def test_rows_at_the_floor_are_drawn_and_rows_below_it_are_not(manifest):
-    """Caveat: a 2.0 s row is drawable only while the other side of its role
-    has mass in the same usable-duration bin (D-21) -- the real corpus does
-    (15 % of real-voice mass under 3 s), so the fixture gets real rows there
-    too."""
     df = manifest.copy()
     b = df.index[df.pool == "B"]
     at_floor, below = b[:20], b[20:40]
-    df.loc[at_floor, "duration_s"] = 2.0
-    df.loc[below, "duration_s"] = 1.9
-    df.loc[df.index[df.pool == "A"][:20], "duration_s"] = 2.0
+    df.loc[at_floor, "duration_s"] = 4.0
+    df.loc[below, "duration_s"] = 3.9
     s = Sampler(df)
     assert s.n_dropped_short == 20
     drawn = Counter(c.file_id for spec in s.epoch_specs(3000) for c in spec.components)
     assert any(f in drawn for f in df.loc[at_floor, "file_id"]), \
-        "a 2.0 s row is usable under the tile rule (D-5)"
+        "a row at the floor is usable under the tile rule (D-5)"
     assert not any(f in drawn for f in df.loc[below, "file_id"])
-    # and a 2.0 s row yields tiles no longer than its 1.0 s interior
+    # and a row at the floor yields tiles no longer than its 3.0 s interior
     for spec in s.epoch_specs(3000):
         for c in spec.components:
             if c.file_id in set(df.loc[at_floor, "file_id"]):
-                assert c.duration_s <= 1.0 + 1e-9
+                assert c.duration_s <= 3.0 + 1e-9
 
 
 def test_a_floor_that_leaves_no_interior_is_rejected():
-    with pytest.raises(ValueError, match="component_floor_s"):
-        DrawConfig(component_floor_s=1.0, edge_margin_s=0.5)
-    DrawConfig(component_floor_s=1.01, edge_margin_s=0.5)   # just enough
+    with pytest.raises(ValueError, match="D-21"):
+        DrawConfig(component_floor_s=1.0, edge_margin_s=0.5, take_range_s=(0.5, 0.5))
+    DrawConfig(component_floor_s=1.5, edge_margin_s=0.5, take_range_s=(0.5, 0.5))
 
 
 def test_a_corpus_of_only_short_components_fails_loudly(manifest):
     df = manifest.copy()
-    df.loc[df.row_kind == "component", "duration_s"] = 1.0
+    df.loc[df.row_kind == "component", "duration_s"] = 3.0
     with pytest.raises(ValueError, match="shorter than component_floor_s"):
         Sampler(df)
 
@@ -329,100 +324,59 @@ def test_the_lead_is_drawn_the_same_way_for_both_branches(manifest):
 
 
 # --------------------------------------------------------------------------- #
-# D-21: the tile count must not follow the pool's length distribution
+# D-21: one take per sample, never capped by a file
 
 
-def _short_fake_voice(manifest):
-    """Pool B skewed short, pool A skewed long, over SHARED bins -- the S-tier
-    shape (02 §11): 39 % of the fake-voice mass under 3 s of interior against
-    15 % of the real. Both sides populate every bin, at different rates."""
-    df = manifest.copy()
-    for pool, shares in (("A", (0.15, 0.25, 0.60)), ("B", (0.60, 0.25, 0.15))):
-        idx = df.index[df.pool == pool]
-        n = len(idx)
-        cut1, cut2 = int(shares[0] * n), int((shares[0] + shares[1]) * n)
-        df.loc[idx[:cut1], "duration_s"] = 2.6              # 1.6 s usable
-        df.loc[idx[cut1:cut2], "duration_s"] = 5.0          # 4.0 s usable
-        df.loc[idx[cut2:], "duration_s"] = 30.0             # never capped
-    return df
+def test_the_take_is_shared_by_every_role_of_a_sample(sampler):
+    """Drawn per role, the larger of two join counts reads as "two components"
+    (voice_present 0.68 on the S-tier stream). Overlap components share the
+    span, so their tiles are identical in length."""
+    seen = 0
+    for spec in sampler.epoch_specs(1500):
+        if spec.render_mode != "composed" or spec.structure != "overlap":
+            continue
+        lengths = {round(c.duration_s, 9) for c in spec.components}
+        if len({c.role for c in spec.components}) > 1:
+            seen += 1
+            assert len(lengths) == 1, (spec.sample_id, lengths)
+    assert seen > 300
 
 
-def _voice_tile_auc(df, **cfg):
+def test_no_file_can_cap_the_take(sampler, manifest):
+    """The invariant: every drawn file's interior holds the longest take, so
+    the tile count is a function of (span, take) alone."""
+    dur = _durations(manifest)
+    lo, hi = sampler.cfg.take_range_s
+    m = sampler.cfg.edge_margin_s
+    for spec in sampler.epoch_specs(1000):
+        for c in spec.components:
+            assert dur[c.file_id] - 2 * m >= hi - 1e-9
+
+
+def test_a_take_longer_than_the_floors_interior_is_rejected():
+    with pytest.raises(ValueError, match="D-21"):
+        DrawConfig(take_range_s=(2.0, 3.5), component_floor_s=4.0, edge_margin_s=0.5)
+    DrawConfig(take_range_s=(2.0, 3.0), component_floor_s=4.0, edge_margin_s=0.5)
+    with pytest.raises(ValueError, match="D-21"):
+        DrawConfig(take_range_s=(3.0, 8.0), component_floor_s=2.0)      # the spec's draft
+
+
+def test_the_join_count_does_not_follow_the_pools_length_distribution(manifest):
+    """Pool B short, pool A long (the S-tier shape): under the invariant the
+    tiles-per-second of the voice component cannot read voice_fake."""
     from sklearn.metrics import roc_auc_score
-    s = Sampler(df, DrawConfig(f8=1.0, **cfg))
+    df = manifest.copy()
+    b = df.index[df.pool == "B"]
+    df.loc[b[: len(b) // 2], "duration_s"] = 4.0            # at the floor
+    df.loc[df.index[df.pool == "A"], "duration_s"] = 30.0
+    s = Sampler(df, DrawConfig(f8=1.0))
     x, y = [], []
     for spec in s.epoch_specs(3000):
-        if spec.stratum != "mixed":
-            continue
-        tiles = [c for c in spec.components if c.role == "voice"]
-        x.append(len(tiles) / spec.duration_s)          # tiles per second
-        y.append(spec.voice_fake)
+        if spec.stratum == "mixed":
+            x.append(sum(c.role == "voice" for c in spec.components) / spec.duration_s)
+            y.append(spec.voice_fake)
     a = roc_auc_score(y, x)
-    return max(a, 1.0 - a)
-
-
-def test_the_tile_count_is_label_independent_under_duration_matching(manifest):
-    df = _short_fake_voice(manifest)
-    assert _voice_tile_auc(df) < 0.55
-
-
-def test_without_duration_matching_the_tile_count_is_a_voice_fake_cue(manifest):
-    """Mutation: ``duration_match_edges_s = None`` reproduces the step-3
-    finding -- the tile count reads the pool's length distribution."""
-    df = _short_fake_voice(manifest)
-    assert _voice_tile_auc(df, duration_match_edges_s=None) > 0.60
-
-
-def test_both_sides_draw_the_same_usable_duration_histogram(manifest):
-    df = _short_fake_voice(manifest)
-    s = Sampler(df, DrawConfig(f8=1.0))
-    edges = s.cfg.duration_match_edges_s
-    dur = _durations(df)
-    counts = {0: Counter(), 1: Counter()}
-    for spec in s.epoch_specs(5000):
-        # composed draws only: a whole-file row is its own (unmatched) draw
-        if spec.voice_present and spec.render_mode == "composed":
-            fid = next(c.file_id for c in spec.components if c.role == "voice")
-            usable = dur[fid] - 2 * s.cfg.edge_margin_s
-            counts[spec.voice_fake][sum(usable >= e for e in edges)] += 1
-    for label in (0, 1):
-        total = sum(counts[label].values())
-        assert total > 900, total
-    for b in set(counts[0]) | set(counts[1]):
-        p0 = counts[0][b] / sum(counts[0].values())
-        p1 = counts[1][b] / sum(counts[1].values())
-        assert abs(p0 - p1) < 0.05, (b, p0, p1)
-
-
-def test_a_bin_only_one_side_has_gets_no_mass(manifest):
-    df = _short_fake_voice(manifest)
-    a = df.index[(df.pool == "A") & (df.duration_s == 2.6)]
-    df.loc[a, "duration_s"] = 5.0                   # now only pool B has < 3 s
-    s = Sampler(df, DrawConfig(f8=1.0))
-    dur = _durations(df)
-    for spec in s.epoch_specs(2000):
-        for c in spec.components:
-            if c.role == "voice":
-                assert dur[c.file_id] - 1.0 >= 3.0, "a bin the real side lacks is unmatched"
-
-
-def test_no_shared_bin_at_all_fails_loudly(manifest):
-    df = manifest.copy()
-    df.loc[df.pool == "A", "duration_s"] = 30.0
-    df.loc[df.pool == "B", "duration_s"] = 5.0
-    with pytest.raises(ValueError, match="share no usable-duration bin"):
-        Sampler(df, DrawConfig(f8=1.0))
-    Sampler(df, DrawConfig(f8=1.0, duration_match_edges_s=None))
-
-
-def test_duration_matching_keeps_every_shared_bin_drawable(manifest):
-    """Nothing is discarded: the 5.0 s pool-B rows (a bin both sides have)
-    are still drawn, at the matched rate."""
-    df = _short_fake_voice(manifest)
-    df.loc[df.index[df.pool == "A"][:40], "duration_s"] = 5.0
-    s = Sampler(df, DrawConfig(f8=1.0))
-    drawn = {c.file_id for spec in s.epoch_specs(2000) for c in spec.components}
-    assert drawn & set(df.file_id[(df.pool == "B") & (df.duration_s == 5.0)])
+    assert max(a, 1 - a) < 0.55
 
 
 # --------------------------------------------------------------------------- #
@@ -602,10 +556,9 @@ _KNOBS: dict[str, tuple] = {
     "balance_marginal_composedness": (True, False, "cell9_composed", {}),
     "domain_cap": (500, 1, "component_files", {}),
     "duration_range": ((4.0, 60.0), (4.0, 8.0), "durations", {}),
-    "take_range_s": ((3.0, 8.0), (1.5, 1.5), "tile_lengths", {}),
+    "take_range_s": ((2.0, 3.0), (1.5, 1.5), "tile_lengths", {}),
     "edge_margin_s": (0.5, 0.0, "offsets", {}),
-    "component_floor_s": (2.0, 40.0, "component_files", {}),
-    "duration_match_edges_s": ((3.0, 4.0, 5.0, 6.0, 7.0, 8.0), None, "component_files", {}),
+    "component_floor_s": (4.0, 40.0, "component_files", {}),
     "gain_db_range": ((-15.0, 15.0), (-1.0, 1.0), "gains", {}),
     "gain_db_mean": (-3.6, 6.0, "gains", {}),
     "gain_db_sigma": (4.0, 0.001, "gains", {}),
@@ -672,10 +625,9 @@ _V1_DEFAULTS = {
     "balance_marginal_composedness": True,
     "domain_cap": 500,
     "duration_range": (4.0, 60.0),
-    "take_range_s": (3.0, 8.0),
+    "take_range_s": (2.0, 3.0),
     "edge_margin_s": 0.5,
-    "component_floor_s": 2.0,
-    "duration_match_edges_s": (3.0, 4.0, 5.0, 6.0, 7.0, 8.0),
+    "component_floor_s": 4.0,
     "gain_db_range": (-15.0, 15.0),
     "gain_db_mean": -3.6,
     "gain_db_sigma": 4.0,
@@ -708,9 +660,7 @@ def test_the_v1_defaults_are_pinned():
     {"sequential_prob": 1.5},
     {"crossfade_ms_range": (200.0, 10.0)},
     {"f8": 1.5},
-    {"duration_match_edges_s": (4.0, 3.0)},
-    {"duration_match_edges_s": ()},
-    {"duration_match_edges_s": (0.0, 3.0)},
+    {"take_range_s": (2.0, 3.01)},
     {"augments": (AugmentSpec("gain_jitter", 0.5), AugmentSpec("gain_jitter", 0.5))},
 ])
 def test_malformed_draw_configs_are_rejected(bad):
@@ -750,9 +700,8 @@ def test_a_non_default_config_round_trips(tmp_path):
                            6: 0.095, 7: 0.125, 8: 0.125, 9: 0.115}},
         "f8": 0.5, "single_composed_rate": 0.5, "noise_composed_rate": 0.25,
         "balance_marginal_composedness": False, "domain_cap": 42,
-        "duration_range": [5.0, 30.0], "take_range_s": [2.0, 4.0],
-        "edge_margin_s": 0.25, "component_floor_s": 1.0,
-        "duration_match_edges_s": [2.0, 4.0],
+        "duration_range": [5.0, 30.0], "take_range_s": [1.0, 1.5],
+        "edge_margin_s": 0.25, "component_floor_s": 2.5,
         "gain_db_range": [-10.0, 10.0], "gain_db_mean": -1.0, "gain_db_sigma": 2.0,
         "sequential_prob": 0.75, "crossfade_ms_range": [5.0, 50.0],
         "silence_lead_s": 0.4, "silence_tail_s": 0.3,

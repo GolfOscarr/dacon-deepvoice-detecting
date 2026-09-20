@@ -24,18 +24,16 @@ draw:
   domain_cap: 500
   # DRAW-1. The competition's own range; drawn first.
   duration_range: [4.0, 60.0]
-  # D-3. The take: U(3, 8) s, strictly inside the file by edge_margin_s at both
-  # ends, tiled to its span with independent offsets per tile.
-  take_range_s: [3.0, 8.0]
+  # D-3 / D-21. ONE take per sample, shared by every role and row kind,
+  # strictly inside the file by edge_margin_s at both ends, tiled to its
+  # span with independent offsets per tile. take_range_s[1] must not exceed
+  # component_floor_s - 2 * edge_margin_s (asserted): no file ever caps the
+  # take, so the join count is a function of (span, take) only.
+  take_range_s: [2.0, 3.0]
   edge_margin_s: 0.5
-  # D-5. The component floor (the timeline floor stays duration_range[0]).
-  component_floor_s: 2.0
-  # D-21 (measured during implementation, docs/processing/03 §1). The take is
-  # capped by the file, so short files mean more tiles, and pool B is short:
-  # the tile count was a voice-fake cue (I1b 0.65). Within each role the real
-  # and fake sides are re-weighted to draw the same histogram of usable
-  # duration over these edges; above take_hi the cap never binds. null = off.
-  duration_match_edges_s: [3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+  # D-5 (revised). OPEN with the take: floor 3.0 / take [1.5, 2.0] keeps 92 %
+  # of pool B's hours, 4.0 / [2, 3] keeps 80 %, 6.0 / [3, 5] keeps 63 %.
+  component_floor_s: 4.0
   # DRAW-4. The voice/music level ratio, skewed quiet (A-A3).
   gain_db_range: [-15.0, 15.0]
   gain_db_mean: -3.6

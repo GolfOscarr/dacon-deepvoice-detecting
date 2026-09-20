@@ -19,4 +19,7 @@ Stages, in the order docs/processing/03 §2 runs them:
                         joint (tile and sequential), augment, test chain
     processing.ship     SHIP-3..SHIP-6: the train/test-symmetric chain at the
                         model boundary -- channel policy, dc_offset, band limit
+    processing.audit    VERIFY: training.audit over tile-collapsed specs, plus
+                        the harness's draw features per head (I1c) and the
+                        edge-exposure rate per pool (I1d)
 """

@@ -186,31 +186,25 @@ class DrawConfig:
     duration_range: tuple[float, float] = (4.0, 60.0)
 
     # -- DRAW-3: the take/offset/tile rule ---------------------------------- #
-    #: D-3. Each component *take* is ``U(lo, hi)`` seconds -- below pool D's
-    #: 10 s so the offset range is never empty, and the audit is flat across
-    #: 2-8 s (P5/P7/P8 within 0.03). Music-only draw AUC 0.993 -> 0.497.
-    take_range_s: tuple[float, float] = (3.0, 8.0)
+    #: D-3 (revised, D-21). ONE take per sample, ``U(lo, hi)`` seconds, shared
+    #: by every role and row kind, and never capped by a file: ``take_hi <=
+    #: component_floor_s - 2 * edge_margin_s`` is asserted. Both halves are
+    #: measured (docs/processing/03 D-21): a take capped by a short file means
+    #: more tiles, and pool B is short (voice_fake I1b 0.65); a take drawn per
+    #: role makes the larger of two join counts read as "two components"
+    #: (voice_present 0.68). OPEN with the floor: {3.0 / U(1.5, 2), 4.0 /
+    #: U(2, 3), 6.0 / U(3, 5)} keep 92 / 80 / 63 % of pool B's hours.
+    take_range_s: tuple[float, float] = (2.0, 3.0)
     #: D-3. The take lies *strictly inside* the file: offset >= margin and
     #: offset + take <= file - margin. Took onset exposure from 20 % -> 0.8 %
     #: (voice) and 78 % -> 1.9 % (noise; CompSpoof clips are exactly 4.00 s).
     edge_margin_s: float = 0.5
-    #: D-5. Rows shorter than this are dropped at construction (OFF-4's
-    #: ``usable_duration``). The 4 s floor cost 22.5 % of pool B's hours; 2 s
-    #: recovers 63.5 h. Must exceed ``2 * edge_margin_s`` or a row at the floor
-    #: has no usable interior.
-    component_floor_s: float = 2.0
-    #: D-21 (measured in step 3, not in the spec). The take is capped by the
-    #: file's usable interior, so a short file yields shorter tiles and MORE
-    #: joins -- and pool B is short: under the DOSS weights 39 % of fake-voice
-    #: mass has < 3 s of interior against 15 % of real-voice mass, which made
-    #: the tile count a voice-fake cue (I1b 0.65 in the mixed stratum on the
-    #: S-tier manifest; 10.1 tiles per fake voice component vs 7.7 real).
-    #: Fix: within each role, the file weights are re-balanced so both sides
-    #: draw the same histogram of usable duration over these bin edges
-    #: (``w *= target(bin) / side(bin)``, target = the two sides' mean; a bin
-    #: one side lacks gets 0). Nothing is discarded. Bins only matter below
-    #: ``take_hi``; above it the cap never binds. ``None`` switches it off.
-    duration_match_edges_s: tuple[float, ...] | None = (3.0, 4.0, 5.0, 6.0, 7.0, 8.0)
+    #: D-5 (revised). Rows shorter than this are dropped at construction
+    #: (OFF-4's ``usable_duration``). Bound to the take by D-21: the interior
+    #: ``floor - 2 * margin`` must hold the longest take. 4.0 keeps 80 % of
+    #: pool B's hours (59 % of its rows); the spec's 2.0 is reachable only with
+    #: a 1 s take.
+    component_floor_s: float = 4.0
 
     # -- DRAW-4: placement -------------------------------------------------- #
     gain_db_range: tuple[float, float] = (-15.0, 15.0)
@@ -248,22 +242,20 @@ class DrawConfig:
             raise ValueError(f"take_range_s must be 0 < lo <= hi, got {self.take_range_s}")
         if self.edge_margin_s < 0:
             raise ValueError(f"edge_margin_s must be >= 0, got {self.edge_margin_s}")
-        # Critical: the one invariant the tile rule rests on. A row at the floor
-        # must still have a positive interior to crop from; at
-        # `floor <= 2 * margin` the take collapses to zero and `ComponentDraw`
-        # refuses it -- at draw time, long after the config was accepted.
-        if self.component_floor_s <= 2.0 * self.edge_margin_s:
+        # Critical: the one invariant the tile rule rests on (D-21). The
+        # longest take must fit inside the interior of a row at the floor, so
+        # no file ever caps a take and the join count is a function of
+        # (span, take) alone. Violated, the tile count reads the pool's
+        # length distribution -- measured as voice_fake 0.65 and
+        # voice_present 0.75 on the S-tier stream.
+        interior = self.component_floor_s - 2.0 * self.edge_margin_s
+        if t_hi > interior + 1e-9:
             raise ValueError(
-                f"component_floor_s ({self.component_floor_s}) must exceed "
-                f"2 * edge_margin_s ({2.0 * self.edge_margin_s}): a row at the "
-                f"floor needs a positive interior to take from")
+                f"take_range_s[1] ({t_hi}) must not exceed component_floor_s - "
+                f"2 * edge_margin_s ({interior}): a file at the floor must supply "
+                f"the longest take, or the join count reads the file's length (D-21)")
         if self.domain_cap < 1:
             raise ValueError(f"domain_cap must be >= 1, got {self.domain_cap}")
-        edges = self.duration_match_edges_s
-        if edges is not None and (len(edges) == 0 or min(edges) <= 0
-                                  or list(edges) != sorted(set(edges))):
-            raise ValueError(f"duration_match_edges_s must be strictly increasing "
-                             f"positive edges or null, got {edges}")
         for name in ("silence_lead_s", "silence_tail_s"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
