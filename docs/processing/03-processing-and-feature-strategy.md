@@ -119,12 +119,13 @@ asserted (all five pools non-empty — `validate_manifest` does **not** check th
 ### OFF-2 · Label-evidence actions (D-14)
 
 **Purpose.** Rows whose audio disputes their label get the action the EDA decomposed.
-**In → Out.** `reassignment_worklist.parquet` (2,442 rows, 5 actions) → manifest edits.
+**In → Out.** `reassignment_worklist.parquet` (3,206 rows, 5 actions, at 99.97 % pool-C coverage
+after step 7) → manifest edits.
 **Rule.**
 
 | action | rows | manifest change |
 |---|--:|---|
-| `reassign_cell` C → 5 | 336 | `row_kind = whole_file`, `cell = 5`, `pool = null`, labels `(1,1,0,0)`, `artifact_family = null` |
+| `reassign_cell` C → 5 | 1,100 (336 before step 7; `fma` 1,038 = 13.0 % of its 8,000, `musan-music` 62) | `row_kind = whole_file`, `cell = 5`, `pool = null`, labels `(1,1,0,0)`, `artifact_family = null` |
 | `reassign_cell` D → 8 | 1,006 | `whole_file`, `cell = 8`, labels `(1,1,1,1)`, family kept |
 | `restrict_noise` | 1,032 | **NEW column** `noise_has_speech = True`; row stays in pool E (see DRAW-5) |
 | `degenerate` | 23 | drop (or `label_confidence = low` if per-tier loss is adopted) |
@@ -134,11 +135,13 @@ asserted (all five pools non-empty — `validate_manifest` does **not** check th
 **Targets.** pools C, D, E; the C rows are `fma` and `musan-music`.
 **Code.** `eda.analyze.reassign` produces the list; the builder applies it.
 **Consumed by.** the sampler (cells 5/8 whole-file rows exist only for the `f8` sweep under D-1).
-**Verify.** ⚠️ the C list covers 2,660 of 8,660 measured files — **run the VAD over the remaining
-6,000 `fma` files first** (`eda.cli signal --partition C`, VAD only, ≤ 3 h), then re-run
-`eda.cli reassign` and G-EDA6. G7 review pack (10 examples per source); G4 loss table (C −5.6 % h,
-D −3.7 % h, E −5.3 % h).
-**Status.** NEW (builder); the list EXISTS.
+**Verify.** ✅ step 7 done: `eda.cli vad --partition C --source fma` (the content tier over the
+6,000 files the draw left out, 27 min, `eda/out/C/vad_extra.parquet`; 3 unreadable files are the
+F-S2 finding) → pool-C VAD coverage 8,657 / 8,660; `reassign` and `analyze` re-run. The sampled and
+unsampled halves agree (13.7 % vs 12.7 % of `fma` carries speech at ratio ≥ 0.20). Still to do: G7
+review pack (10 examples per source); G4 loss table (C now −13.0 % of `fma` rows, D −3.7 % h,
+E −5.3 % h).
+**Status.** NEW (builder); the list EXISTS at full coverage.
 
 ### OFF-3 · Duplicates → `dup_group`
 
@@ -534,7 +537,7 @@ Model config deltas (`configs/a_shared_trunk.yaml`): `segmentation: {mode: whole
 | 4 | DRAW-6/7 | `training/sampler.py`, `training/config.py` | augment and normalize draws from `augments` / `normalize_menu`; drawn before the cell | I1 sees the names; I1b sees every parameter and the normalize keys; a label-conditioned draw injected in a test must fail I1b | D-8, D-13 |
 | 5 | SHIP-4/5 | `training/config.py`, `configs/*.yaml` | `render.preprocess` section; `band_hz` value | `test_no_config_field_is_silently_ignored`; I14 on the chain | D-10, D-11, D-12 |
 | 6 | VERIFY | `training/audit.py` — **as built: `processing/audit.py`** (the training invariants over tile-collapsed specs, plus I1c per head over the harness's draw features and I1d edge exposure per pool) | harness features in `_feature_frame` | H1, H2 and the raw lead reproduced as **failing** I1b on the old sampler; passing on the new | — |
-| 7 | OFF-2 | `eda.cli signal` (VAD only) | `fma` VAD to 100 % | coverage 1.000 | D-14 |
+| 7 | OFF-2 | `eda.cli signal` (VAD only) — **as built: `eda.cli vad --partition C --source fma`**, `eda.driver.vad_coverage` (resumable, draw-fingerprinted), `load_signal(with_extra=True)` for `reassign` / G-EDA6 only | `fma` VAD to 100 % | coverage 1.000 — **measured 0.9997** (3 unreadable files) | D-14 |
 | 8 | OFF-1…4 | `scripts/build_corpus_manifest.py` (NEW) | §4.1 rules, D-14 actions, `dup_group`, `noise_has_speech`, verdict sidecar | every §4.1 rule as an assertion; G-EDA gates re-run | D-14, D-15, D-17 |
 | 9 | DRAW-5 | `training/sampler.py`, `training/render.py` | noise layer; SNR-to-gain at render | no `noise_has_speech` row under a `voice_present = 0` spec; I1b on `noise_snr` | — |
 | 10 | OFF-5 | `training/folds.py` config | folds, SHADOW re-renders | VG1 A1–A7; G-EDA3/4 | — |

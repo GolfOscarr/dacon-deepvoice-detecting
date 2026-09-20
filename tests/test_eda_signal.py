@@ -955,3 +955,55 @@ def test_a_census_row_whose_source_left_the_config_is_a_row_not_a_crash():
     assert scalars["signal_ok"] is False
     assert "not in the config" in scalars["signal_error"]
     assert arrays["ltas_native"].shape == (128,)
+
+
+# --------------------------------------------------------------------------- #
+# the VAD-coverage pass -- the content tier over the files the draw left out
+
+
+def test_vad_coverage_measures_exactly_the_files_the_draw_left_out(tmp_path):
+    from eda.driver import load_files, load_signal, signal_partition, vad_coverage
+    from eda.sample import draw, load_sample
+
+    cfg = _signal_corpus(tmp_path)
+    draw(cfg, load_files(cfg, "A"), "A")
+    signal_partition(cfg, "A")
+    res = vad_coverage(cfg, "A")
+    assert res.files == 6 and res.failures == 0 and res.shards_run >= 1
+    extra = pd.read_parquet(res.table)
+    drawn = set(load_sample(cfg, "A").file_ids)
+    assert set(extra["file_id"]).isdisjoint(drawn)
+    assert extra["vad_only"].all() and extra["vad_ok"].all()
+    assert (extra[f"duration_s_decoded_{CHAIN}"] > 0).all()
+    assert "rms_dbfs_native" not in extra.columns          # no S-tier statistics
+
+    # the default reader does not see them; the content readers do
+    plain = load_signal(cfg, "A")
+    assert len(plain) == 6 and not plain["vad_only"].any()
+    both = load_signal(cfg, "A", with_extra=True)
+    assert len(both) == 12 and both["vad_only"].sum() == 6
+    assert both["file_id"].is_unique and "pool" in both.columns
+
+
+def test_vad_coverage_can_be_restricted_to_a_source_and_is_resumable(tmp_path):
+    from eda.driver import load_files, vad_coverage
+    from eda.sample import draw
+
+    cfg = _signal_corpus(tmp_path)
+    draw(cfg, load_files(cfg, "A"), "A")
+    first = vad_coverage(cfg, "A", sources=["src-a"])
+    assert first.files == 3 and first.shards_run == 1
+    assert set(pd.read_parquet(first.table)["source_name"]) == {"src-a"}
+    second = vad_coverage(cfg, "A", sources=["src-a"])
+    assert second.shards_run == 0 and second.shards_skipped == 1
+    # a different scope over the same parts is a refusal, not a silent merge
+    with pytest.raises(RuntimeError, match="sources"):
+        vad_coverage(cfg, "A")
+
+
+def test_vad_coverage_needs_the_draw(tmp_path):
+    from eda.driver import NotProbed, vad_coverage
+
+    cfg = _signal_corpus(tmp_path)
+    with pytest.raises(NotProbed, match="draw"):
+        vad_coverage(cfg, "A")

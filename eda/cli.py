@@ -29,7 +29,8 @@ from eda import groupkeys
 from eda.config import load_eda_config
 from eda.groupkeys import key_report
 from eda.driver import (BlockedSource, NotProbed, consolidate, load_files,
-                        load_signal, probe_source, signal_partition)
+                        load_signal, probe_source, signal_partition,
+                        vad_coverage)
 from eda.sample import SampleExists, draw, load_sample
 from eda.gates import FAIL, run_gates
 from eda.planes import CHAIN, NATIVE, PLANES
@@ -345,12 +346,32 @@ def _content_evidence(cfg, files):
     confused before.
     """
     try:
-        signal = load_signal(cfg)
+        signal = load_signal(cfg, with_extra=True)
     except RuntimeError:
         return None
     if "vad_ok" not in signal.columns:
         return None
     return sig.content_report(signal, files)
+
+
+def cmd_vad(cfg, args) -> int:
+    """The content tier over the files the draw left out (docs/processing/03
+    OFF-2): the same decode and VAD as `signal`, none of the S-tier statistics,
+    written to `vad_extra.parquet` beside the S tier and read only by
+    `reassign` and G-EDA6."""
+    sources = args.source or None
+    try:
+        res = vad_coverage(
+            cfg, args.partition, sources=sources,
+            progress=lambda part, idx, rows: print(
+                f"  [{part}] vad shard {idx:05d}: {rows} rows", flush=True))
+    except (NotProbed, RuntimeError) as exc:
+        print(f"partition {args.partition}: {exc}", file=sys.stderr)
+        return 1
+    print(f"partition {args.partition}: {res.table} ({res.files} rows, "
+          f"{res.shards_run} shard(s) run, {res.shards_skipped} already done, "
+          f"{res.failures} decode failure(s))")
+    return 0
 
 
 def cmd_gates(cfg, args) -> int:
@@ -686,7 +707,7 @@ def cmd_reassign(cfg, args) -> int:
     here changes the corpus -- it writes the list somebody has to work.
     """
     try:
-        signal = load_signal(cfg)
+        signal = load_signal(cfg, with_extra=True)
     except RuntimeError as exc:
         print(f"{exc}", file=sys.stderr)
         return 1
@@ -743,6 +764,13 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("signal", help="S tier: decode the draw on both planes")
     s.add_argument("--partition", help=part_help)
     s.set_defaults(fn=cmd_signal)
+
+    s = sub.add_parser("vad", help="content tier over the files the draw left out "
+                                   "(vad_extra.parquet; read by reassign and G-EDA6)")
+    s.add_argument("--partition", required=True, help=part_help)
+    s.add_argument("--source", action="append",
+                   help="restrict to a source_name (repeatable); default: every source")
+    s.set_defaults(fn=cmd_vad)
 
     s = sub.add_parser("keys", help="the publisher's own grouping key, per source")
     s.add_argument("--partition", help=part_help)

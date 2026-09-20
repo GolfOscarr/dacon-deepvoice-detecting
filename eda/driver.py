@@ -565,14 +565,117 @@ def load_vectors(cfg: EdaConfig, partition: str) -> dict[str, np.ndarray]:
         return {name: npz[name] for name in npz.files}
 
 
-def load_signal(cfg: EdaConfig, partitions: Sequence[str] | None = None
-                ) -> pd.DataFrame:
+#: The content tier over the files the draw did NOT sample (docs/processing/03
+#: OFF-2: "run the VAD over the remaining `fma` files first"). Its own table,
+#: beside `signal.parquet` and never merged into it: the S tier is the recorded
+#: draw and its numbers are quotable as such; these rows carry the VAD and the
+#: decoded duration only, flagged `vad_only`, and reach only the readers that
+#: ask for them (`load_signal(..., with_extra=True)`: G-EDA6 and `reassign`).
+VAD_EXTRA_TABLE = "vad_extra.parquet"
+
+
+def _vad_row(cfg: EdaConfig, row: pd.Series, partition: str,
+             roots: dict[str, Path]) -> dict[str, Any]:
+    """One file, the chain plane, the content tier -- the same decode and the
+    same extractor `_signal_row` uses, without the S- and V-tier statistics."""
+    fixed = {"file_id": row["file_id"], "source_name": row["source_name"],
+             "partition": partition, "vad_only": True}
+    source_name = str(row["source_name"])
+    if source_name not in roots:
+        return {**fixed, "signal_ok": False,
+                "signal_error": f"source {source_name!r} is not in the config",
+                f"duration_s_decoded_{CHAIN}": None, **_failed_content()}
+    path = roots[source_name] / row["path"]
+    declared = row.get("orig_sr")
+    declared = None if declared is None or pd.isna(declared) else int(declared)
+    try:
+        planes = load_planes(path, declared_sr=declared, file_id=str(row["file_id"]))
+    except Exception as exc:                         # noqa: BLE001 -- a row, not a raise
+        return {**fixed, "signal_ok": False, "signal_error": f"{type(exc).__name__}: {exc}",
+                f"duration_s_decoded_{CHAIN}": None, **_failed_content()}
+    chain = planes[CHAIN]
+    return {**fixed, "signal_ok": True, "signal_error": None,
+            f"duration_s_decoded_{CHAIN}": chain.wav.shape[-1] / chain.sample_rate,
+            **run_content(planes)}
+
+
+def vad_coverage(cfg: EdaConfig, partition: str, *, sources: Sequence[str] | None = None,
+                 progress=None) -> SignalResult:
+    """The content tier over every file of `partition` the draw left out.
+
+    Resumable at part granularity like `signal_partition`, with the parts
+    under `vad_parts/` and the DONE marker carrying the draw's fingerprint:
+    the population is "files.parquet minus the draw", so it is only meaningful
+    under the draw that defined it. `sources` restricts the population (the
+    fma pass) and is recorded in the marker for the same reason.
+    """
+    files = load_files(cfg, partition)
+    sample = load_sample(cfg, partition)
+    if sample is None:
+        raise NotProbed(
+            f"partition {partition}: no {SAMPLE_FILE} -- the draw defines which "
+            f"files this pass covers (everything the draw did not)")
+    rows = files[~files["file_id"].isin(set(sample.file_ids))]
+    if sources is not None:
+        rows = rows[rows["source_name"].isin(list(sources))]
+    rows = rows.reset_index(drop=True)
+    roots = stage_roots(cfg)
+    parts_dir = cfg.out / partition / "vad_parts"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    table = cfg.out / partition / VAD_EXTRA_TABLE
+    scope = sorted(sources) if sources is not None else None
+    run = skipped = failures = 0
+    with ThreadPoolExecutor(max_workers=cfg.probe.workers) as pool:
+        for idx, batch in shards(list(range(len(rows))), cfg.sample.shard_size):
+            part = parts_dir / f"{idx:05d}.parquet"
+            done = part.with_suffix(".DONE")
+            if done.exists():
+                marker = json.loads(done.read_text(encoding="utf-8"))
+                if (marker.get("fingerprint") != sample.fingerprint
+                        or marker.get("shard_size") != cfg.sample.shard_size
+                        or marker.get("sources") != scope):
+                    raise RuntimeError(
+                        f"partition {partition}: {part.name} was written under draw "
+                        f"{marker.get('fingerprint')}, shard_size "
+                        f"{marker.get('shard_size')}, sources {marker.get('sources')}; "
+                        f"now {sample.fingerprint}, {cfg.sample.shard_size}, {scope}. "
+                        f"Delete {parts_dir} and re-run")
+                skipped += 1
+                continue
+            frame = pd.DataFrame(list(pool.map(
+                lambda i: _vad_row(cfg, rows.iloc[i], partition, roots), batch)))
+            frame.to_parquet(part, index=False)
+            done.write_text(json.dumps({"fingerprint": sample.fingerprint,
+                                        "shard_size": cfg.sample.shard_size,
+                                        "sources": scope}), encoding="utf-8")
+            run += 1
+            failures += int((~frame["signal_ok"].astype(bool)).sum())
+            if progress is not None:
+                progress(partition, idx, len(frame))
+    parts = sorted(parts_dir.glob("*.parquet"))
+    if parts:
+        merged = pd.concat([pd.read_parquet(x) for x in parts], ignore_index=True)
+        merged.to_parquet(table, index=False)
+    else:
+        merged = pd.DataFrame(columns=["file_id"])
+    return SignalResult(partition=partition, files=len(merged), shards_run=run,
+                        shards_skipped=skipped, failures=failures, table=table)
+
+
+def load_signal(cfg: EdaConfig, partitions: Sequence[str] | None = None,
+                *, with_extra: bool = False) -> pd.DataFrame:
     """Every partition's `signal.parquet`, concatenated and joined to the M tier.
 
     The join is an inner one on `file_id` and that is the contract: an S-tier
     row with no census row cannot be labelled, and a census row outside the
     draw has no S-tier statistics. `missing_partitions` carries the partitions
     that have no signal table yet, the same way `load_files` does.
+
+    `with_extra` appends each partition's `vad_extra.parquet` -- the content
+    tier over the files the draw left out (`vad_coverage`) -- for the rows not
+    already in the S tier. Off by default: those rows carry no S-tier
+    statistics, so every reader of level, spectrum or vectors must not see
+    them; `reassign` and G-EDA6 read the VAD and ask for them.
     """
     if isinstance(partitions, str):
         partitions = [partitions]
@@ -589,6 +692,15 @@ def load_signal(cfg: EdaConfig, partitions: Sequence[str] | None = None
             f"no {SIGNAL_TABLE} under {cfg.out} for partition(s) {partitions}. "
             f"Run `eda signal` first")
     signal = pd.concat(frames, ignore_index=True)
+    if "vad_only" not in signal.columns:
+        signal["vad_only"] = False
+    if with_extra:
+        extras = [pd.read_parquet(cfg.out / p / VAD_EXTRA_TABLE)
+                  for p in partitions if (cfg.out / p / VAD_EXTRA_TABLE).exists()]
+        if extras:
+            extra = pd.concat(extras, ignore_index=True)
+            extra = extra[~extra["file_id"].isin(set(signal["file_id"]))]
+            signal = pd.concat([signal, extra], ignore_index=True)
     files = load_files(cfg, [p for p in partitions if p not in missing])
     merged = signal.merge(files.drop(columns=["source_name"]), on="file_id",
                           how="inner", validate="one_to_one")
