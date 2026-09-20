@@ -9,6 +9,7 @@ Working documentation for **DACON 236749 — 딥보이스 범죄 대응을 위�
 | **[kaggle/](kaggle/)** | Practical competition intelligence: winners' EDA, augmentation, synthesis, validation and inference tricks | [README](kaggle/README.md) |
 | **[data/](data/)** | Our data strategy: rules check, label taxonomy, sources, synthesis, augmentation spec, build plan | [README](data/README.md) |
 | **[EDA/](EDA/)** | The per-pool analysis plan: what to measure in each pool, why, and which processing knob each answer sets | [README](EDA/README.md) |
+| **[processing/](processing/)** | From EDA results to a processing strategy: the stream harness, the decision threads, the per-slice strategies, the acceptance gates | [README](processing/README.md) |
 | **[validation/](validation/)** | How we measure: split scheme, metric harness, decision protocol, gates, LB decomposition | [README](validation/README.md) |
 | **[architecture/](architecture/)** | How we build the model: the design envelope, pretrained candidates, ensembling, runtime budget | [README](architecture/README.md) |
 | **[pipelines/](pipelines/)** | How data reaches the model: the sample contract, sampler, transform registries, collation, invariants | [README](pipelines/README.md) |
