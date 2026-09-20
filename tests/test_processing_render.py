@@ -43,12 +43,18 @@ def cfg(corpus):
     return RenderConfig(root=corpus[0])
 
 
+#: The placement tests look at the COMPOSED canvas -- the lead exactly silent,
+#: nothing outside the intervals -- so the menus are off: additive noise and
+#: the codec chain (REN-3/4) fill the lead by design.
+PLACEMENT = dict(duration_range=(4.0, 12.0), augments=(), normalize_menu=None)
+
+
 @pytest.fixture(scope="module")
 def drawn(corpus):
     """Specs the processing sampler actually draws -- tiles, leads and all --
     short enough to render quickly."""
     _, manifest, _ = corpus
-    s = Sampler(manifest, DrawConfig(duration_range=(4.0, 12.0)))
+    s = Sampler(manifest, DrawConfig(**PLACEMENT))
     return [spec for spec in s.epoch_specs(40) if spec.render_mode == "composed"]
 
 
@@ -366,7 +372,7 @@ def test_the_test_chain_is_applied_last(corpus, cfg):
 def whole(corpus):
     """Whole-file specs of every cell the corpus scrapes whole."""
     _, manifest, _ = corpus
-    s = Sampler(manifest, DrawConfig(f8=0.0, duration_range=(4.0, 12.0)))
+    s = Sampler(manifest, DrawConfig(f8=0.0, **PLACEMENT))
     out = {}
     for spec in s.epoch_specs(600):
         if spec.render_mode == "whole_file" and spec.cell not in out:
@@ -417,6 +423,25 @@ def test_whole_file_frame_intervals_match_the_audio(corpus, cfg, whole):
         for s, e, _ in r.frame_intervals["file"]:
             mask[int(round(s * SR)):int(round(e * SR))] = True
         assert np.all(wav[~mask] == 0) and wav[mask].mean() > 0
+
+
+def test_a_fully_drawn_spec_renders_through_the_augment_and_test_chains(corpus, cfg):
+    """DRAW-6/7 -> REN-3/4: the v1 menus, as drawn, reach the renderer -- the
+    length is the timeline, the channel draw is honoured, and the render is
+    still bitwise reproducible with noise and a codec in the chain."""
+    _, manifest, index = corpus
+    s = Sampler(manifest, DrawConfig(duration_range=(4.0, 6.0)))
+    specs = list(s.epoch_specs(12))
+    assert any(spec.transforms for spec in specs)
+    assert any(spec.normalize.get("container") == "mp3" for spec in specs)
+    for spec in specs:
+        r = render(spec, index, cfg)
+        assert r.wav.shape[-1] == int(round(spec.duration_s * SR))
+        if spec.normalize.get("channels") == "mono":
+            assert r.wav.shape[0] == 1
+        elif spec.normalize.get("channels") == "stereo":
+            assert r.wav.shape[0] == 2
+        assert torch.equal(r.wav, render(spec, index, cfg).wav)
 
 
 def test_an_invalid_crossfade_shape_is_rejected(cfg):

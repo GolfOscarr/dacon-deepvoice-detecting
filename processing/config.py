@@ -28,11 +28,138 @@ import yaml
 from models.config import ConfigError, _build
 from processing.render import RenderConfig
 from training.config import RESAMPLERS, _cell_mix_from
+from training.registries import AUGMENT
+from training.render import CODEC_CONTAINERS
 from training.sampler import CellMix, check_mix, composed_fractions
 
-__all__ = ["RESAMPLERS", "SECTIONS", "ConfigError", "DrawConfig", "ProcessingConfig",
-           "RenderConfig", "dump_processing_config", "load_processing_config",
-           "processing_config_from_dict"]
+__all__ = ["AUGMENTS_V1", "NORMALIZE_MENU_V1", "RESAMPLERS", "SECTIONS", "AugmentSpec",
+           "ConfigError", "DrawConfig", "NormalizeMenu", "ProcessingConfig", "RenderConfig",
+           "dump_processing_config", "load_processing_config", "processing_config_from_dict"]
+
+
+# --------------------------------------------------------------------------- #
+# DRAW-6 / DRAW-7 menus
+
+
+@dataclass(frozen=True)
+class AugmentSpec:
+    """One entry of the augment menu: a registered name, its per-sample rate,
+    and its parameter ranges.
+
+    Critical: ``p`` is per SAMPLE, never per pool or label (R2), and the
+    entry is drawn before the cell. A key ``k_range`` whose augment accepts a
+    scalar ``k`` is drawn to that scalar at spec time, so I1b sees the value;
+    a range the augment draws from itself (``rawboost_ssi``'s) is passed
+    through and drawn inside the augment from ``spec.rng`` -- label-blind by
+    the registry's signature.
+    """
+
+    name: str
+    p: float
+    params: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.name not in AUGMENT:
+            raise ValueError(
+                f"augment {self.name!r} is not registered; known: {AUGMENT.names()}. "
+                f"Register it in training.registries first (docs/processing/03 §6 step 12)")
+        if not 0.0 <= self.p <= 1.0:
+            raise ValueError(f"augment {self.name!r}: p must be in [0, 1], got {self.p}")
+        accepted = set(AUGMENT.params_of(self.name))
+        for key, value in self.params.items():
+            drawn = key[:-len("_range")] if key.endswith("_range") else None
+            if key not in accepted and drawn not in accepted:
+                raise ValueError(
+                    f"augment {self.name!r} has no parameter {key!r}; it takes "
+                    f"{sorted(accepted)}")
+            if key.endswith("_range"):
+                if not (isinstance(value, (tuple, list)) and len(value) == 2
+                        and value[0] <= value[1]):
+                    raise ValueError(
+                        f"augment {self.name!r}: {key} must be [lo, hi], got {value!r}")
+
+    @classmethod
+    def from_flat(cls, raw: Mapping[str, Any], path: str) -> AugmentSpec:
+        """``{name, p, <param>: ...}`` as the YAML writes it."""
+        if not isinstance(raw, Mapping) or "name" not in raw or "p" not in raw:
+            raise ConfigError(f"{path}: an augment entry needs `name` and `p`, got {raw!r}")
+        params = {k: (tuple(v) if isinstance(v, list) else v)
+                  for k, v in raw.items() if k not in ("name", "p")}
+        try:
+            return cls(str(raw["name"]), float(raw["p"]), params)
+        except ValueError as exc:
+            raise ConfigError(f"{path}: {exc}") from None
+
+    def to_flat(self) -> dict[str, Any]:
+        return {"name": self.name, "p": self.p,
+                **{k: (list(v) if isinstance(v, tuple) else v) for k, v in self.params.items()}}
+
+
+#: D-8 and data/06 A-A5/A-A6/A-B3, at the spec's v1 rates. Caveat: `pink_noise`
+#: (docs/processing/03 DRAW-6, p 0.3) is absent until its registry entry lands
+#: (§6 step 12) -- an unregistered name is refused at construction, not at
+#: render.
+AUGMENTS_V1: tuple[AugmentSpec, ...] = (
+    AugmentSpec("gain_jitter", 1.0, {"db_range": (-12.0, 12.0)}),
+    AugmentSpec("rawboost_ssi", 0.5, {"snr_db_range": (10.0, 40.0),
+                                      "tilt_db_range": (-12.0, 12.0)}),
+    AugmentSpec("gaussian_noise", 0.3, {"snr_db_range": (10.0, 30.0)}),
+    AugmentSpec("stereo_imbalance", 0.3, {"db_range": (-4.0, 4.0)}),
+)
+
+
+def _distribution(name: str, d: Mapping[str, float], allowed: set[str] | None) -> None:
+    if not d:
+        raise ValueError(f"normalize_menu.{name} must not be empty")
+    if allowed is not None:
+        bad = sorted(set(d) - allowed)
+        if bad:
+            raise ValueError(f"normalize_menu.{name}: unknown option(s) {bad}; "
+                             f"allowed: {sorted(allowed)}")
+    if any(v < 0 for v in d.values()):
+        raise ValueError(f"normalize_menu.{name}: probabilities must be >= 0")
+    total = sum(d.values())
+    if abs(total - 1.0) > 1e-6:
+        raise ValueError(f"normalize_menu.{name} must sum to 1, got {total}")
+
+
+@dataclass(frozen=True)
+class NormalizeMenu:
+    """D-13: what the organizers did to the test set, drawn per sample from
+    ONE menu for every cell (docs/processing/03 DRAW-7).
+
+    ``container`` options are ``wav``, ``flac`` and ``mp3_<kbps>``;
+    ``telephone`` options are ``none``, ``ulaw``, ``alaw`` (8 kHz + companding)
+    and ``plain`` (the 8 kHz leg alone). The draw's keys are a subset of
+    ``training.render.NORMALIZE_KEYS``.
+    """
+
+    container: dict[str, float]
+    channels: dict[str, float]
+    telephone: dict[str, float]
+    telephone_hz: int = 8000
+
+    def __post_init__(self) -> None:
+        _distribution("container", self.container, None)
+        for key in self.container:
+            base, _, rate = key.partition("_")
+            if base not in CODEC_CONTAINERS or (base == "mp3") != bool(rate) \
+                    or (rate and not rate.isdigit()):
+                raise ValueError(
+                    f"normalize_menu.container: {key!r} is not wav | flac | mp3_<kbps>")
+        _distribution("channels", self.channels, {"mono", "stereo"})
+        _distribution("telephone", self.telephone, {"none", "ulaw", "alaw", "plain"})
+        if self.telephone_hz <= 0:
+            raise ValueError(f"telephone_hz must be > 0, got {self.telephone_hz}")
+
+
+#: D-13, the v1 menu (docs/processing/03 §5).
+NORMALIZE_MENU_V1 = NormalizeMenu(
+    container={"wav": 0.30, "flac": 0.15, "mp3_64": 0.15, "mp3_96": 0.15,
+               "mp3_128": 0.15, "mp3_192": 0.10},
+    channels={"mono": 0.5, "stereo": 0.5},
+    telephone={"none": 0.80, "ulaw": 0.10, "alaw": 0.05, "plain": 0.05},
+)
 
 
 @dataclass(frozen=True)
@@ -97,6 +224,14 @@ class DrawConfig:
     silence_lead_s: float = 3.0
     silence_tail_s: float = 1.0
 
+    # -- DRAW-6 / DRAW-7: the augment and normalize draws ------------------- #
+    #: The augment menu, drawn per sample before the cell into
+    #: ``spec.transforms`` (REN-3 applies it). ``()`` = no augmentation.
+    augments: tuple[AugmentSpec, ...] = AUGMENTS_V1
+    #: The test-chain menu, drawn per sample before the cell into
+    #: ``spec.normalize`` (REN-4 applies it). ``None`` = as rendered.
+    normalize_menu: NormalizeMenu | None = NORMALIZE_MENU_V1
+
     scheme_version: str = "strategy-v1"
     #: The audit's mutation-test hatch, as in ``training.sampler``. A run that
     #: sets it is not quotable.
@@ -132,6 +267,9 @@ class DrawConfig:
                 raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
         if not 0.0 <= self.sequential_prob <= 1.0:
             raise ValueError(f"sequential_prob must be in [0, 1], got {self.sequential_prob}")
+        names = [a.name for a in self.augments]
+        if len(set(names)) != len(names):
+            raise ValueError(f"augments lists a name twice: {names}")
         c_lo, c_hi = self.crossfade_ms_range
         if not 0 <= c_lo <= c_hi:
             raise ValueError(f"crossfade_ms_range must be 0 <= lo <= hi, "
@@ -165,9 +303,15 @@ SECTIONS: dict[str, type] = {"draw": DrawConfig, "render": RenderConfig}
 def _draw_from_dict(d: Mapping[str, Any]) -> DrawConfig:
     d = dict(d)
     mix = d.pop("cell_mix", None)
+    augments = d.pop("augments", None)
     cfg = _build(DrawConfig, d, "draw")
     if mix is not None:
         cfg = dataclasses.replace(cfg, cell_mix=_cell_mix_from(mix, "draw.cell_mix"))
+    if augments is not None:
+        if not isinstance(augments, list):
+            raise ConfigError("draw.augments: expected a list of {name, p, ...} entries")
+        cfg = dataclasses.replace(cfg, augments=tuple(
+            AugmentSpec.from_flat(a, f"draw.augments[{i}]") for i, a in enumerate(augments)))
     return cfg
 
 
@@ -220,6 +364,8 @@ def dump_processing_config(cfg: ProcessingConfig) -> dict:
         for key, value in list(section.items()):
             if isinstance(value, Path):
                 section[key] = str(value)
+            elif key == "augments":
+                section[key] = [a.to_flat() for a in getattr(cfg, name).augments]
             elif isinstance(value, tuple):
                 section[key] = list(value)
             elif callable(value):

@@ -21,6 +21,9 @@ What differs from ``training.sampler.Sampler``, and why (02 §2-§3):
   component. Under ``f8 = 1`` the branch is drawn only in the ``f8`` sweep.
 * **Lead/tail silence on every sample (D-6)** at the measured values -- drawn
   before the branch, so the whole-file branch carries the same lead.
+* **The augment and test-chain draws exist (DRAW-6, DRAW-7).** The training
+  sampler never fills ``spec.transforms`` or ``spec.normalize``; here both are
+  drawn per sample from the config's menus, before the cell.
 * **Duration-matched file weights (D-21, measured in step 3).** The take is
   capped by the file, so a short file means more tiles; pool B is short and
   the tile count became a voice-fake cue (I1b 0.65). Within each role the two
@@ -38,8 +41,11 @@ import math
 import numpy as np
 import pandas as pd
 
+from typing import Any
+
 from processing.config import DrawConfig
 from training.manifest import POOL_IS_FAKE, ROLE_POOLS
+from training.registries import AUGMENT
 from training.spec import CELL_TABLE, ComponentDraw, SampleSpec, spec_rng
 
 __all__ = ["Sampler"]
@@ -148,6 +154,54 @@ class Sampler:
             w = self._weights[(role, fake_flag)] * ratio[bins[side]]
             self._weights[(role, fake_flag)] = w / w.sum()
 
+    # -- DRAW-6 / DRAW-7 ----------------------------------------------------- #
+
+    def _draw_transforms(self, rng: np.random.Generator) -> tuple[tuple[str, dict[str, Any]], ...]:
+        """DRAW-6: with probability ``p`` per entry, ``(name, params)`` with every
+        drawable ``*_range`` drawn to its scalar. Drawn BEFORE the cell."""
+        out: list[tuple[str, dict[str, Any]]] = []
+        for entry in self.cfg.augments:
+            take = rng.random() < entry.p
+            params: dict[str, Any] = {}
+            accepted = AUGMENT.params_of(entry.name)
+            for key, value in entry.params.items():
+                scalar = key[:-len("_range")] if key.endswith("_range") else None
+                if scalar is not None and scalar in accepted:
+                    # Critical: the draw happens whether or not the entry is
+                    # taken, so the later stream does not shift with `p`.
+                    drawn = float(rng.uniform(*value))
+                    params[scalar] = drawn
+                else:
+                    params[key] = value
+            if take:
+                out.append((entry.name, params))
+        return tuple(out)
+
+    def _draw_normalize(self, rng: np.random.Generator) -> dict[str, Any]:
+        """DRAW-7: one test chain per sample from the menu, keys a subset of
+        ``training.render.NORMALIZE_KEYS``. Drawn BEFORE the cell."""
+        menu = self.cfg.normalize_menu
+        if menu is None:
+            return {}
+
+        def pick(d: dict[str, float]) -> str:
+            keys = sorted(d)
+            return str(keys[int(rng.choice(len(keys), p=[d[k] for k in keys]))])
+
+        out: dict[str, Any] = {}
+        container = pick(menu.container)
+        base, _, rate = container.partition("_")
+        out["container"] = base
+        if rate:
+            out["bitrate"] = int(rate)
+        out["channels"] = pick(menu.channels)
+        telephone = pick(menu.telephone)
+        if telephone != "none":
+            out["telephone_hz"] = int(menu.telephone_hz)
+            if telephone != "plain":
+                out["companding"] = telephone
+        return out
+
     # -- drawing ------------------------------------------------------------- #
 
     def _draw_component(self, rng: np.random.Generator, role: str, fake: bool) -> pd.Series:
@@ -210,6 +264,11 @@ class Sampler:
         lo, hi = cfg.duration_range
         duration = float(rng.uniform(lo, hi))
 
+        # DRAW-6 / DRAW-7: the augment and test-chain draws, BEFORE the cell,
+        # so nothing about the labels can reach them (docs/processing/03).
+        transforms = self._draw_transforms(rng)
+        normalize = self._draw_normalize(rng)
+
         # DRAW-2: cell and composition. Labels are fixed here.
         cell = cfg.cell_mix.draw(rng)
         composed = bool(rng.random() < cfg.f[cell])
@@ -256,7 +315,7 @@ class Sampler:
                 scheme_version=cfg.scheme_version,
                 duration_s=duration, cell=cell, render_mode="whole_file",
                 structure="overlap", components=tuple(tiles),
-                crossfade_ms=crossfade_ms,
+                crossfade_ms=crossfade_ms, transforms=transforms, normalize=normalize,
             )
 
         is_ratio = len(wanted) > 1
@@ -278,6 +337,7 @@ class Sampler:
             duration_s=duration, cell=cell, render_mode="composed",
             structure="sequential" if sequential else "overlap",
             components=tuple(draws), crossfade_ms=crossfade_ms,
+            transforms=transforms, normalize=normalize,
         )
 
     def epoch_specs(self, n: int, epoch: int = 0, seed: int = 0):
