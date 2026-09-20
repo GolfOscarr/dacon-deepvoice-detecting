@@ -1,4 +1,4 @@
-"""The draw configuration -- docs/processing/03 §5, as a dataclass and as YAML.
+"""The processing configuration -- docs/processing/03 §5, as dataclasses and as YAML.
 
 Critical: every value the sampler reads is a field here, and every field is
 read. A knob that validates, round-trips through a config file and is read
@@ -26,11 +26,12 @@ from typing import Any, Mapping
 import yaml
 
 from models.config import ConfigError, _build
-from training.config import _cell_mix_from
+from processing.render import RenderConfig
+from training.config import RESAMPLERS, _cell_mix_from
 from training.sampler import CellMix, check_mix, composed_fractions
 
-__all__ = ["SECTIONS", "ConfigError", "DrawConfig", "ProcessingConfig",
-           "dump_processing_config", "load_processing_config",
+__all__ = ["RESAMPLERS", "SECTIONS", "ConfigError", "DrawConfig", "ProcessingConfig",
+           "RenderConfig", "dump_processing_config", "load_processing_config",
            "processing_config_from_dict"]
 
 
@@ -141,7 +142,7 @@ class DrawConfig:
 
 
 #: The sections a processing config is made of. Grows as the stages land.
-SECTIONS: dict[str, type] = {"draw": DrawConfig}
+SECTIONS: dict[str, type] = {"draw": DrawConfig, "render": RenderConfig}
 
 
 def _draw_from_dict(d: Mapping[str, Any]) -> DrawConfig:
@@ -153,12 +154,29 @@ def _draw_from_dict(d: Mapping[str, Any]) -> DrawConfig:
     return cfg
 
 
-_BUILDERS = {"draw": _draw_from_dict}
+def _render_from_dict(d: Mapping[str, Any]) -> RenderConfig:
+    """``resampler`` is a callable: YAML carries its name and
+    ``training.config.RESAMPLERS`` resolves it; an unknown name raises."""
+    d = dict(d)
+    named = d.pop("resampler", None)
+    cfg = _build(RenderConfig, d, "render")
+    cfg = dataclasses.replace(cfg, root=Path(cfg.root))
+    if named is not None:
+        if named not in RESAMPLERS:
+            raise ConfigError(
+                f"render.resampler: {named!r} is not a resampler this build can "
+                f"resolve; known: {sorted(RESAMPLERS)}")
+        cfg = dataclasses.replace(cfg, resampler=RESAMPLERS[named])
+    return cfg
+
+
+_BUILDERS = {"draw": _draw_from_dict, "render": _render_from_dict}
 
 
 @dataclass(frozen=True)
 class ProcessingConfig:
     draw: DrawConfig = dataclasses.field(default_factory=DrawConfig)
+    render: RenderConfig = dataclasses.field(default_factory=RenderConfig)
 
 
 def processing_config_from_dict(d: Mapping[str, Any]) -> ProcessingConfig:
@@ -187,5 +205,7 @@ def dump_processing_config(cfg: ProcessingConfig) -> dict:
                 section[key] = str(value)
             elif isinstance(value, tuple):
                 section[key] = list(value)
+            elif callable(value):
+                section[key] = f"{value.__module__}.{value.__qualname__}"
         out[name] = section
     return out

@@ -44,3 +44,24 @@ draw:
   scheme_version: strategy-v1
   # Leave false: it exists for the audit's own mutation tests.
   allow_unsound_mix: false
+
+render:
+  # Manifest paths are relative to this. The S-tier manifest's paths resolve
+  # under the EDA's interim root.
+  root: /data/project/private/dacon-corpus/interim
+  audio:
+    sample_rate: 16000
+    min_seconds: 4.0
+    max_seconds: 60.0
+    # Caveat: `channels` and `band_hz` are the SHIPPED chain's (SHIP-3, SHIP-5)
+    # and are not applied by the renderer; band_hz is set when that stage
+    # lands (docs/processing/03 §6 step 5), not before.
+    channels: downmix
+    band_hz: null
+  # A callable, so YAML carries its NAME and `training.config.RESAMPLERS`
+  # resolves it (A-S1).
+  resampler: training.render.resample_poly_to
+  # sigmoid beats a hard cut, which becomes a splice shortcut (A-A4).
+  crossfade_shape: sigmoid
+  # I12, the length-regime guard.
+  check_duration: true

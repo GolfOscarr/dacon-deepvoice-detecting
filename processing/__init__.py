@@ -15,4 +15,6 @@ Stages, in the order docs/processing/03 §2 runs them:
     processing.sampler  DRAW-1..DRAW-4: timeline, cell, the take/offset/tile
                         rule (D-3, D-4, D-5), DOSS on every row kind (D-16),
                         lead/tail silence (D-6)
+    processing.render   REN-1..REN-4: sample-exact placement, a taper at every
+                        joint (tile and sequential), augment, test chain
 """

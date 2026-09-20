@@ -23,6 +23,7 @@ from models.config import (
     validate_model_config,
 )
 from eda.config import load_eda_config
+from processing.config import load_processing_config
 from training.config import load_run_config
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -64,6 +65,9 @@ LOADERS = {
     # catch, and hiding it in another directory would have satisfied the test by
     # removing it from the population.
     "eda": load_eda_config,
+    # configs/processing_v1.yaml -- the data-processing pipeline's own
+    # sections (`draw`, `render`), independent of the run configs.
+    "processing": load_processing_config,
 }
 
 
@@ -149,9 +153,10 @@ def test_a_config_two_loaders_accept_is_ambiguous_rather_than_the_first_one(tmp_
     defaults = tmp_path / "nothing_but_defaults.yaml"
     defaults.write_text("{}\n")
     accepted = _classify(defaults)
-    assert accepted == ["train", "run"], (
-        "an all-defaults config is genuinely ambiguous between the train and "
-        "run loaders; _classify resolved it instead of reporting the tie")
+    assert accepted == ["train", "run", "processing"], (
+        "an all-defaults config is genuinely ambiguous between the train, run "
+        "and processing loaders; _classify resolved it instead of reporting "
+        "the tie")
     # `test_every_shipped_config_loads` asserts `len(accepted) == 1` on exactly
     # this value, so a tie that survives _classify is a red sweep. Asserting the
     # tie here rather than re-running the sweep keeps the message in one place.

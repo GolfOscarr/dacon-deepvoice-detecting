@@ -427,7 +427,12 @@ def test_the_v1_config_file_names_every_field_and_equals_the_defaults():
     assert set(raw) == set(SECTIONS)
     for name, cls in SECTIONS.items():
         assert set(raw[name]) == {f.name for f in dataclasses.fields(cls)}, name
-    assert load_processing_config(REPO / "configs" / "processing_v1.yaml") == ProcessingConfig()
+    cfg = load_processing_config(REPO / "configs" / "processing_v1.yaml")
+    assert cfg.draw == ProcessingConfig().draw
+    # the render section is the defaults except the corpus root, which is a
+    # property of this machine and not of the strategy
+    assert dataclasses.replace(cfg.render, root=Path(".")) == ProcessingConfig().render
+    assert cfg.render.root.is_absolute()
 
 
 def test_a_non_default_config_round_trips(tmp_path):
