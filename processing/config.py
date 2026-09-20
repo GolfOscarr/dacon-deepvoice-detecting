@@ -27,6 +27,7 @@ import yaml
 
 from models.config import ConfigError, _build
 from processing.render import RenderConfig
+from processing.ship import PreprocessStep, ShipConfig
 from training.config import RESAMPLERS, _cell_mix_from
 from training.registries import AUGMENT
 from training.render import CODEC_CONTAINERS
@@ -34,7 +35,8 @@ from training.sampler import CellMix, check_mix, composed_fractions
 
 __all__ = ["AUGMENTS_V1", "NORMALIZE_MENU_V1", "RESAMPLERS", "SECTIONS", "AugmentSpec",
            "ConfigError", "DrawConfig", "NormalizeMenu", "ProcessingConfig", "RenderConfig",
-           "dump_processing_config", "load_processing_config", "processing_config_from_dict"]
+           "ShipConfig", "dump_processing_config", "load_processing_config",
+           "processing_config_from_dict"]
 
 
 # --------------------------------------------------------------------------- #
@@ -297,7 +299,7 @@ class DrawConfig:
 
 
 #: The sections a processing config is made of. Grows as the stages land.
-SECTIONS: dict[str, type] = {"draw": DrawConfig, "render": RenderConfig}
+SECTIONS: dict[str, type] = {"draw": DrawConfig, "render": RenderConfig, "ship": ShipConfig}
 
 
 def _draw_from_dict(d: Mapping[str, Any]) -> DrawConfig:
@@ -331,13 +333,29 @@ def _render_from_dict(d: Mapping[str, Any]) -> RenderConfig:
     return cfg
 
 
-_BUILDERS = {"draw": _draw_from_dict, "render": _render_from_dict}
+def _ship_from_dict(d: Mapping[str, Any]) -> ShipConfig:
+    d = dict(d)
+    steps = d.pop("preprocess", None)
+    cfg = _build(ShipConfig, d, "ship")
+    if steps is not None:
+        if not isinstance(steps, list):
+            raise ConfigError("ship.preprocess: expected a list of step names or {name, ...}")
+        try:
+            cfg = dataclasses.replace(cfg, preprocess=tuple(
+                PreprocessStep.from_flat(x, f"ship.preprocess[{i}]") for i, x in enumerate(steps)))
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from None
+    return cfg
+
+
+_BUILDERS = {"draw": _draw_from_dict, "render": _render_from_dict, "ship": _ship_from_dict}
 
 
 @dataclass(frozen=True)
 class ProcessingConfig:
     draw: DrawConfig = dataclasses.field(default_factory=DrawConfig)
     render: RenderConfig = dataclasses.field(default_factory=RenderConfig)
+    ship: ShipConfig = dataclasses.field(default_factory=ShipConfig)
 
 
 def processing_config_from_dict(d: Mapping[str, Any]) -> ProcessingConfig:
@@ -366,6 +384,8 @@ def dump_processing_config(cfg: ProcessingConfig) -> dict:
                 section[key] = str(value)
             elif key == "augments":
                 section[key] = [a.to_flat() for a in getattr(cfg, name).augments]
+            elif key == "preprocess":
+                section[key] = [s.to_flat() for s in getattr(cfg, name).preprocess]
             elif isinstance(value, tuple):
                 section[key] = list(value)
             elif callable(value):

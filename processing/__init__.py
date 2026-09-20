@@ -17,4 +17,6 @@ Stages, in the order docs/processing/03 §2 runs them:
                         lead/tail silence (D-6)
     processing.render   REN-1..REN-4: sample-exact placement, a taper at every
                         joint (tile and sequential), augment, test chain
+    processing.ship     SHIP-3..SHIP-6: the train/test-symmetric chain at the
+                        model boundary -- channel policy, dc_offset, band limit
 """

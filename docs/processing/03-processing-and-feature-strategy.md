@@ -348,6 +348,12 @@ All registered steps have `group_delay = 0`; the same `preprocess_chain` object 
 `script.py`; startup assertions per
 [competition/02](../competition/02-submission.md#-guard-against-a-silently-broken-submission).
 
+⚠️ **As built (step 5):** the pipeline is independent of the training loop, so the chain lives in
+`processing/ship.py` — `ShipConfig` is the `ship:` section of `configs/processing_v1.yaml`
+(`channels`, `preprocess: [dc_offset]`, `band_hz: [0, 7200]`) and `ship()` is the one function
+both the loop and `script.py` will call. `render.audio.band_hz` stays `null`: the renderer does not
+apply the band, the shipped chain does.
+
 ### MODEL-1 · Frontend (= FEAT-1a)
 
 | knob | v1 | why |

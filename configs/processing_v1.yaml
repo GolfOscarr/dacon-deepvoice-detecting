@@ -88,3 +88,17 @@ render:
   crossfade_shape: sigmoid
   # I12, the length-regime guard.
   check_duration: true
+
+ship:
+  # The shipped chain (`processing.ship.ship`): what happens between the
+  # decoded waveform and the model, identically in training and in
+  # submit.zip, per file over its valid prefix (I14). One function, one
+  # call site.
+  sample_rate: 16000
+  # SHIP-3. downmix | left | mid_side.
+  channels: downmix
+  # SHIP-4 / D-10. DC is a generator id that inverts across archives.
+  preprocess: [dc_offset]
+  # SHIP-5. D-11: no high-pass (low edge 0). D-12, OPEN: 7200 Hz upper edge
+  # vs the resampler shelf and SONICS' 7.3 kHz rolloff -- ablate vs null.
+  band_hz: [0.0, 7200.0]
