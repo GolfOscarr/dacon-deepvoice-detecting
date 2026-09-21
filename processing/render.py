@@ -40,6 +40,7 @@ import torch
 
 from models.config import AudioConfig
 from models.losses import TARGET_FOR_COLUMN
+from processing.cache import cache_path, read_slice
 from training.registries import augment_chain
 from training.render import (DecodeError, ManifestIndex, RenderedSample, _fade,
                              _normalize, _to_channels, load_audio, resample_poly_to)
@@ -66,6 +67,10 @@ class RenderConfig:
     crossfade_shape: str = "sigmoid"
     #: I12 -- the rendered duration must sit in the length regime.
     check_duration: bool = True
+    #: OFF-6. Set: every component is read as a slice of its cached 16 kHz
+    #: int16 decode (`processing.cache`), and a file missing from the cache is
+    #: an error, not a fallback -- a run mixes no decode regimes. None: decode.
+    cache_root: Path | None = None
 
     def __post_init__(self) -> None:
         if self.crossfade_shape not in ("sigmoid", "linear"):
@@ -247,10 +252,15 @@ def render(spec: SampleSpec, manifest: pd.DataFrame | ManifestIndex,
                 f"not in the manifest") from None
         # Critical: exactly `place.n` samples, from the grid, not from
         # `draw.duration_s` -- see `placements_for`.
-        piece = load_audio(
-            Path(cfg.root) / str(row["path"]), sample_rate=sr,
-            offset_s=draw.source_offset_s, duration_s=place.n / sr,
-            resampler=cfg.resampler, file_id=draw.file_id)
+        if cfg.cache_root is not None:
+            piece = read_slice(cache_path(cfg.cache_root, draw.file_id), sample_rate=sr,
+                               offset_s=draw.source_offset_s, duration_s=place.n / sr,
+                               file_id=draw.file_id)
+        else:
+            piece = load_audio(
+                Path(cfg.root) / str(row["path"]), sample_rate=sr,
+                offset_s=draw.source_offset_s, duration_s=place.n / sr,
+                resampler=cfg.resampler, file_id=draw.file_id)
         if piece.shape[-1] != place.n:                          # pragma: no cover
             raise DecodeError(
                 f"{draw.file_id}: decoded {piece.shape[-1]} samples, wanted {place.n}")

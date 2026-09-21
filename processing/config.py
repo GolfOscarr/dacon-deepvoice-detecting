@@ -331,7 +331,8 @@ def _render_from_dict(d: Mapping[str, Any]) -> RenderConfig:
     d = dict(d)
     named = d.pop("resampler", None)
     cfg = _build(RenderConfig, d, "render")
-    cfg = dataclasses.replace(cfg, root=Path(cfg.root))
+    cfg = dataclasses.replace(cfg, root=Path(cfg.root),
+                              cache_root=None if cfg.cache_root is None else Path(cfg.cache_root))
     if named is not None:
         if named not in RESAMPLERS:
             raise ConfigError(

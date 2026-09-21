@@ -212,7 +212,16 @@ drawn under `f8 = 1`).
 `/data/project/private`. The resampler object is the one SHIP-2 uses.
 **Size.** 2,676 h = 308 GB mono; SONICS is 1,971 h of it and is not drawn under D-1 → **≈ 81 GB**
 for the five component pools (stereo-native sources larger). Cache SONICS only for the `f8` sweep.
-**Status.** NEW.
+**As built (step 11).** `processing/cache.py` + `scripts/build_cache.py`; `render.cache_root` in
+`configs/processing_v1.yaml`. `.npy` int16 `(C, n)` per file (not `.pt`: `numpy.load(mmap_mode="r")`
+reads the slice without touching the rest), native channels, the resampler is `RenderConfig`'s. The
+contract, stated exactly: a cached file is `quantise(resample(full decode))`, and a slice read back is
+**bit-identical to that slice of that array** — not to `load_audio` of the slice (int16 < 1 LSB, and
+`load_audio` resamples the *slice* while the cache slices the *resample*: they differ at each tile's
+edges by the resampler's transient, ~0.02 peak, < 2 % RMS). So a renderer with `cache_root` set reads
+the cache and nothing else — a missing file is an error, not a fallback — and one run uses one
+regime. Build: 228,801 files (cell 8 skipped), 621 audio-h, ~6 min on 32 threads, ~80 GB; resumable.
+**Status.** built.
 
 ---
 
@@ -569,7 +578,7 @@ Model config deltas (`configs/a_shared_trunk.yaml`): `segmentation: {mode: whole
 | 8 | OFF-1…4 | `scripts/build_corpus_manifest.py` (NEW) — **as built: `processing/corpus.py`** | §4.1 rules, D-14 actions, `dup_group`, `noise_has_speech`, verdict sidecar | every §4.1 rule as an assertion (`check_rules`; a missing pool, a real row with a family, a one-sided pair each refuse the build); G-EDA gates re-run | D-14, D-15, D-17 |
 | 9 | DRAW-5 | `training/sampler.py`, `training/render.py` — **as built: `processing/sampler.py`, `processing/render.py`, `ComponentDraw.snr_db`** | noise layer; SNR-to-gain at render | no `noise_has_speech` row under a `voice_present = 0` spec (mutation: unflagged rows do go under); the rate per sample equal across labels and cells; the rendered layer at its SNR ± 0.05 dB; I1c on the layer's features | — |
 | 10 | OFF-5 | `training/folds.py` config — **as built: `processing/splits.py`, `scripts/build_folds.py`, three `_seal_probe` fixes** | folds, SHADOW re-renders (S-a needs re-rendered files: OPEN) | VG1 A1–A7 ✅; the seal starvation, order and budget each tested | D-22 |
-| 11 | OFF-6 | new `scripts/build_cache.py` | int16 cache | a cached slice equals `load_audio` bit-for-bit after resample | — |
+| 11 | OFF-6 | new `scripts/build_cache.py` — **as built: `processing/cache.py`, `.npy`** | int16 cache | a cached slice equals `load_audio` bit-for-bit after resample — **as built: equals the quantised full-file resample's slice bit-for-bit; `load_audio` of the slice differs at the edges by design (see OFF-6)** | — |
 | 12 | DRAW-6 | `training/registries.py` | `pink_noise`, later `rir` | registry probe (length, `group_delay`) | — |
 | 13 | FEAT-2 | `models/frontends.py` | one channel at a time, after the first scored model | I14; harness residues; promotion protocol | D-20 |
 

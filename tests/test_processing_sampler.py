@@ -793,8 +793,9 @@ def test_the_v1_config_file_names_every_field_and_equals_the_defaults():
     assert cfg.draw == ProcessingConfig().draw
     # the render section is the defaults except the corpus root, which is a
     # property of this machine and not of the strategy
-    assert dataclasses.replace(cfg.render, root=Path(".")) == ProcessingConfig().render
-    assert cfg.render.root.is_absolute()
+    assert dataclasses.replace(cfg.render, root=Path("."), cache_root=None) == \
+        ProcessingConfig().render
+    assert cfg.render.root.is_absolute() and cfg.render.cache_root.is_absolute()
     assert cfg.ship == ProcessingConfig().ship
     assert cfg.folds == ProcessingConfig().folds and cfg.folds.n_folds == 4
 

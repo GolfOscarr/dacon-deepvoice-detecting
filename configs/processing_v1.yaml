@@ -95,6 +95,10 @@ render:
   crossfade_shape: sigmoid
   # I12, the length-regime guard.
   check_duration: true
+  # OFF-6. Set: every component is a slice of its cached 16 kHz int16 decode
+  # (scripts/build_cache.py), and a file missing from the cache is an error --
+  # one decode regime per run. null: decode from the corpus.
+  cache_root: /data/project/private/dacon-corpus/cache16k
 
 ship:
   # The shipped chain (`processing.ship.ship`): what happens between the
