@@ -18,6 +18,9 @@ path or the publisher's metadata and each asserted after the build
 * ``mlaad`` has **205** generator directories, not 175.
 * WaveFake's JSUT and Common-Voice subsets get their own families
   (``wf_jsut_<vocoder>``, ``wf_cv_fastspeech2_pwg``), as D-15 says.
+* ``fakemusiccaps``'s ``speaker_ref_id`` is the parent clip **scoped to the
+  generator**: shared across generators it fused the five families into one
+  fold atom.
 
 Paths are written **relative to the corpus root** (``<root>/interim/...`` or
 ``<root>/raw/...``), because a source's stage is a property of the EDA config
@@ -43,11 +46,18 @@ __all__ = ["EXTRA_COLUMNS", "SCHEME_VERSION", "BuildInputs", "apply_worklist", "
 
 SCHEME_VERSION = "strategy-v1"
 
-#: Columns beyond ``training.manifest.REQUIRED_COLUMNS``. ``noise_has_speech``
+#: Columns beyond ``training.manifest.REQUIRED_COLUMNS``. ``corpus`` is the
+#: EDA's source name (``cfad-real``, ``wavefake``, ...): the manifest's own
+#: ``source_name`` is the publisher's ATOM -- the family for a fake row, the
+#: sub-corpus / speaker / artist for a real one -- because
+#: ``training.folds`` unions every row sharing a ``source_name`` into one
+#: indivisible fold atom (docs/validation/01 §1: "track / artist / speaker
+#: granularity"), and at corpus granularity the 278k rows are 13 atoms and no
+#: fold is feasible. ``noise_has_speech``
 #: is D-14's `restrict_noise` flag (DRAW-5 reads it); ``licence_verdict`` is
 #: the fma ledger's word for the row (`allow` | `derivatives_barred`); the
 #: rest are provenance a reviewer wants beside the row.
-EXTRA_COLUMNS: tuple[str, ...] = ("noise_has_speech", "licence_verdict", "stage",
+EXTRA_COLUMNS: tuple[str, ...] = ("corpus", "noise_has_speech", "licence_verdict", "stage",
                                   "reassigned_from")
 
 _LABELS = ("label_voice_present", "label_music_present", "label_voice_fake", "label_music_fake")
@@ -138,6 +148,12 @@ def assign_keys(files: pd.DataFrame, fma_tracks: pd.DataFrame | None = None) -> 
     gen = _rx(path[m], r"/zenodo-15063698/([^/]+)/")
     fam[m] = "fakemusiccaps/" + gen
     dom[m] = "fakemusiccaps|" + gen
+    # Caveat: NOT the bare parent clip §4.1 names. Every generator renders every
+    # caption, so a clip key shared across generators unions the five families
+    # into one fold atom and no 5-fold is feasible for the music head. The
+    # generators share a caption, not a recording; the key is scoped to the
+    # generator.
+    spk[m] = "fakemusiccaps/" + gen + "/" + gk[m].str.replace("fakemusiccaps/", "", regex=False)
 
     m = src == "sonics"
     gen = gk[m].str.replace("sonics/", "", regex=False)
@@ -316,7 +332,13 @@ def build_manifest(inp: BuildInputs) -> tuple[pd.DataFrame, pd.DataFrame, dict[s
     fake_row = (comp & keyed["pool"].map(POOL_IS_FAKE).fillna(False).astype(bool)) | (
         ~comp & cell.map(lambda c: pd.notna(c) and is_fake_cell(int(c))).fillna(False))
     m["artifact_family"] = keyed["artifact_family"].where(fake_row)
-    m["source_name"] = keyed["source_name"]
+    m["corpus"] = keyed["source_name"]
+    # docs/validation/01 §1: source_name at the publisher's granularity. A fake
+    # row's atom is its family; a real row's is its group key (cfad-real's
+    # sub-corpus, zeroth's speaker, musan's partition, CompSpoof's parent) --
+    # except fma, whose key is the artist (its path buckets are numbering).
+    real_key = keyed["speaker_ref_id"].where(keyed["source_name"] == "fma", keyed["group_key"])
+    m["source_name"] = keyed["artifact_family"].where(fake_row, real_key)
     m["speaker_ref_id"] = keyed["speaker_ref_id"]
     m["pair_id"] = keyed["pair_id"]
     m["dup_group"] = dup_groups(keyed, inp.duplicates).to_numpy()
@@ -333,7 +355,7 @@ def build_manifest(inp: BuildInputs) -> tuple[pd.DataFrame, pd.DataFrame, dict[s
     m = apply_worklist(m, inp.worklist)
     dropped = side[side["verdict"] == "drop"].groupby("file_id")["filter"].apply(list)
     m = m[~m["file_id"].isin(dropped.index)].reset_index(drop=True)
-    m["pair_id"] = _both_sides(m["pair_id"], m["source_name"])
+    m["pair_id"] = _both_sides(m["pair_id"], m["corpus"])
     m["cell"] = m["cell"].astype("Int64")
     m = m[list(REQUIRED_COLUMNS) + list(EXTRA_COLUMNS)]
     validate_manifest(m)
@@ -349,7 +371,8 @@ def build_manifest(inp: BuildInputs) -> tuple[pd.DataFrame, pd.DataFrame, dict[s
         "hours": {k: round(float(v) / 3600, 1) for k, v in m.groupby(
             m["pool"].fillna("cell" + m["cell"].astype(str)))["duration_s"].sum().items()},
         "noise_has_speech": int(m["noise_has_speech"].sum()),
-        "licence": m.loc[m["source_name"] == "fma", "licence_verdict"].value_counts().to_dict(),
+        "licence": m.loc[m["corpus"] == "fma", "licence_verdict"].value_counts().to_dict(),
+        "source_atoms": int(m["source_name"].nunique()),
         "scheme_version": SCHEME_VERSION,
     }
     return m, side, report
@@ -370,22 +393,26 @@ def check_rules(m: pd.DataFrame) -> None:
     bad(real_comp & m["artifact_family"].notna(), "real components carrying an artifact_family")
     bad(real_comp & m["domain_key"].notna(), "real components carrying a domain_key")
     bad(m["speaker_ref_id"].isna(), "without a speaker_ref_id")
-    wf = m["source_name"] == "wavefake"
+    wf = m["corpus"] == "wavefake"
     bad(wf & ~m["artifact_family"].isin(set(WAVEFAKE_FAMILY.values())),
         "wavefake outside D-15's families")
-    so = m["source_name"] == "sonics"
+    so = m["corpus"] == "sonics"
     bad(so & ~m["artifact_family"].isin({"suno_chirp", "udio"}), "sonics outside D-15's families")
     bad(so & (m["row_kind"] != "whole_file"), "sonics not whole_file")
     # pairs resolve on both sides
-    pairs = m.dropna(subset=["pair_id"]).groupby("pair_id")["source_name"].nunique()
+    pairs = m.dropna(subset=["pair_id"]).groupby("pair_id")["corpus"].nunique()
     lonely = pairs[pairs < 2]
     if len(lonely):
         raise AssertionError(f"{len(lonely)} pair_id(s) with one side only, e.g. "
                              f"{lonely.index[:3].tolist()}")
     bad(comp & m["noise_has_speech"] & (m["pool"] != "E"), "noise_has_speech outside pool E")
     bad(m["licence_verdict"].eq("deny"), "with a denied licence still present")
-    bad((m["source_name"] == "fma") & m["licence_verdict"].isna(),
+    bad((m["corpus"] == "fma") & m["licence_verdict"].isna(),
         "fma rows without a licence verdict")
+    bad(m["source_name"].isna(), "without a source_name atom")
+    fake = m["artifact_family"].notna()
+    bad(fake & (m["source_name"] != m["artifact_family"]),
+        "fake rows whose source_name atom is not their family")
     bad(m["aug_strength"] != 1.0, "with aug_strength != 1.0 (D-17)")
 
 

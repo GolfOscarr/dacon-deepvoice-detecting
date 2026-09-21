@@ -113,7 +113,8 @@ def test_keys_per_source(built):
     assert r.at["ml1", "artifact_family"] == "mlaad/Edge-TTS" and r.at["ml1", "speaker_ref_id"] == "ko/Edge-TTS"
     assert r.at["fm2", "speaker_ref_id"] == "fma_artist_10"
     assert r.at["fc2", "artifact_family"] == "fakemusiccaps/MusicGen_medium"
-    assert r.at["fc2", "speaker_ref_id"] == "fakemusiccaps/SLdVSirZMSI"
+    assert r.at["fc2", "speaker_ref_id"] == "fakemusiccaps/MusicGen_medium/SLdVSirZMSI"
+    assert r.at["fc1", "speaker_ref_id"] == "fakemusiccaps/musicldm/SLdVSirZMSI"
     assert r.at["so1", "artifact_family"] == "suno_chirp" and r.at["so2", "artifact_family"] == "udio"
     assert r.at["so1", "row_kind"] == "whole_file" and r.at["so1", "cell"] == 8
 
@@ -128,6 +129,22 @@ def test_paths_carry_the_stage_and_labels_come_from_the_tables(built):
     assert r.at["cf1", "label_confidence"] == "exact" and r.at["cr1", "label_confidence"] == "reported"
     assert (m["aug_strength"] == 1.0).all() and (m["scheme_version"] == "strategy-v1").all()
     assert list(m.columns) == list(REQUIRED_COLUMNS) + list(EXTRA_COLUMNS)
+
+
+def test_source_name_is_the_publishers_atom_and_corpus_keeps_the_name(built):
+    """docs/validation/01 §1: a fold atom is a family / sub-corpus / speaker /
+    artist, never a whole corpus (13 atoms over 278k rows was infeasible)."""
+    m, _, _ = built
+    r = m.set_index("file_id")
+    assert r.at["cf1", "corpus"] == "cfad-fake" and r.at["cf1", "source_name"] == "cfad/gl"
+    assert r.at["cr1", "source_name"] == "cfad-real/dev_clean/real_clean/aishell3"
+    assert r.at["cr3", "source_name"] == "cfad-real/dev_clean/real_clean/thchs30"
+    assert r.at["wf1", "source_name"] == "wf_melgan" and r.at["wf2", "source_name"] == "wf_gan"
+    assert r.at["fm2", "source_name"] == "fma_artist_10" and r.at["fm2", "corpus"] == "fma"
+    assert r.at["fm1", "source_name"] == "fma_artist_10"          # reassigned, still its artist
+    assert r.at["so1", "source_name"] == "suno_chirp"
+    assert r.at["fc2", "source_name"] == "fakemusiccaps/MusicGen_medium"
+    assert r.at["zk1", "source_name"] == "zeroth-korean/train_data_01/003/104"
 
 
 # --------------------------------------------------------------------------- #

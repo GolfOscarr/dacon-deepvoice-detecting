@@ -51,6 +51,7 @@ The decisions, in the order the pipeline meets them. `D-` ids are used throughou
 | D-18 | model input | waveform → SSL frontend; **no handcrafted feature reaches the model**; scalars are sidecars | FIXED | [02 §7–§9](02-analysis-report.md#7--dc-and-the-high-pass): every scalar is a fingerprint |
 | D-19 | segmentation | `whole_file` first; `tiling 5 s / 2.5 s` fallback | FIXED (order) | [architecture/04 §6.1](../architecture/04-heads-and-pooling.md#61--cross-window-aggregation-and-the-duration-trap) |
 | D-20 | Tier-2 input channels | none in v1; ablate one at a time after the first scored model | FIXED (order) | §3 FEAT-2 |
+| D-22 | fold count | **4** folds, `probe_share 0.10`, PROBE row budget 2× | FIXED (measured in step 10) | the music head has 5 composable fake families (FakeMusicCaps) + SONICS' 2 whole-file-only; PROBE seals one and every VAL side needs a composable one, so 5 folds is infeasible with a music PROBE. Built: PROBE 20 % of rows, VAL folds 102k / 46k / 40k / 36k rows, music 1–2 families per fold (variance caveat), VG1 A1–A7 pass. OPEN: 5 folds with `allow_no_probe`, or a sixth fake-music family |
 | D-21 | one take per sample, never capped by a file | `take` drawn once and shared by every role and row kind; `take_hi ≤ component_floor_s − 2·edge_margin_s` asserted | FIXED (measured in steps 3 and 6) | two cues the harness could not see: a take capped by a short file means more tiles, and pool B is short (39 % of fake-voice DOSS mass under 3 s of interior vs 15 % real) — `voice_fake` I1b 0.652; and a take drawn per role makes the larger of two join counts read as "two components" — `voice_present` 0.68–0.81. With both halves: presence 0.59 (the D-2 residual), `voice_fake` 0.50, `music_fake` 0.53; the capped control 0.755. Replaces the duration-matched weights tried first |
 
 ---
@@ -187,9 +188,22 @@ at **artist** granularity (156 atoms) so every VAL side has real music.
 **SHADOW.** S-a re-renders of VAL: telephone chain, mp3 64/96, stereo, component SNR −15…−3 dB,
 4 s and 60 s. S-b slices: Korean (`zeroth` vs MLAAD `ko`), sung (SONICS whole files — their only
 scoring under D-1).
-**Code.** `training.folds.build_folds`, `configs/run_v1.yaml` `folds:`.
-**Verify.** VG1 A1–A7, G-EDA3, G-EDA4.
-**Status.** EXISTS (config values CHANGE).
+**Code.** `training.folds.build_folds`, `configs/run_v1.yaml` `folds:` — **as built:
+`processing/splits.py` + `scripts/build_folds.py`, the `folds:` section of `configs/processing_v1.yaml`,
+outputs beside the manifest (`folds.parquet`, `folds.caveats.txt`, `folds.vg1.txt`,
+`folds_report.json`).** Three fixes to `training.folds._seal_probe` were needed on the real corpus
+(step 10): composable groups are sealed before whole-file-only ones (SONICS advanced the music
+target while giving PROBE nothing it could draw from); a seal never leaves a head below `n_folds`
+*composable* rotating families (the D→8 rows make every FakeMusicCaps family a voice family too, and
+all seven music families were sealed for the voice target); a family-advancing seal has a row
+budget (`PROBE_ROW_BUDGET = 2` × `probe_share` of the rows — the LJSpeech pair atom, 32 % of the
+corpus, was sealed forever by family count). `source_name` is recorded at the publisher's atom
+(family / sub-corpus / speaker / artist) — at corpus granularity the manifest was 13 atoms.
+S-b (Korean, sung) is **OPEN**: a shadow row is invisible outside its fold, and holding all Korean
+out of TRAIN is not what the target domain wants; SONICS rows rotate as ordinary cell-8 rows (never
+drawn under `f8 = 1`).
+**Verify.** VG1 A1–A7 ✅ (4 folds), G-EDA3, G-EDA4.
+**Status.** built (D-22).
 
 ### OFF-6 · Decode cache
 
@@ -554,7 +568,7 @@ Model config deltas (`configs/a_shared_trunk.yaml`): `segmentation: {mode: whole
 | 7 | OFF-2 | `eda.cli signal` (VAD only) — **as built: `eda.cli vad --partition C --source fma`**, `eda.driver.vad_coverage` (resumable, draw-fingerprinted), `load_signal(with_extra=True)` for `reassign` / G-EDA6 only | `fma` VAD to 100 % | coverage 1.000 — **measured 0.9997** (3 unreadable files) | D-14 |
 | 8 | OFF-1…4 | `scripts/build_corpus_manifest.py` (NEW) — **as built: `processing/corpus.py`** | §4.1 rules, D-14 actions, `dup_group`, `noise_has_speech`, verdict sidecar | every §4.1 rule as an assertion (`check_rules`; a missing pool, a real row with a family, a one-sided pair each refuse the build); G-EDA gates re-run | D-14, D-15, D-17 |
 | 9 | DRAW-5 | `training/sampler.py`, `training/render.py` — **as built: `processing/sampler.py`, `processing/render.py`, `ComponentDraw.snr_db`** | noise layer; SNR-to-gain at render | no `noise_has_speech` row under a `voice_present = 0` spec (mutation: unflagged rows do go under); the rate per sample equal across labels and cells; the rendered layer at its SNR ± 0.05 dB; I1c on the layer's features | — |
-| 10 | OFF-5 | `training/folds.py` config | folds, SHADOW re-renders | VG1 A1–A7; G-EDA3/4 | — |
+| 10 | OFF-5 | `training/folds.py` config — **as built: `processing/splits.py`, `scripts/build_folds.py`, three `_seal_probe` fixes** | folds, SHADOW re-renders (S-a needs re-rendered files: OPEN) | VG1 A1–A7 ✅; the seal starvation, order and budget each tested | D-22 |
 | 11 | OFF-6 | new `scripts/build_cache.py` | int16 cache | a cached slice equals `load_audio` bit-for-bit after resample | — |
 | 12 | DRAW-6 | `training/registries.py` | `pink_noise`, later `rir` | registry probe (length, `group_delay`) | — |
 | 13 | FEAT-2 | `models/frontends.py` | one channel at a time, after the first scored model | I14; harness residues; promotion protocol | D-20 |

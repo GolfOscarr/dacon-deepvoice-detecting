@@ -29,13 +29,14 @@ from models.config import ConfigError, _build
 from processing.render import RenderConfig
 from processing.ship import PreprocessStep, ShipConfig
 from training.config import RESAMPLERS, _cell_mix_from
+from training.folds import FoldConfig
 from training.registries import AUGMENT
 from training.render import CODEC_CONTAINERS
 from training.sampler import CellMix, check_mix, composed_fractions
 
 __all__ = ["AUGMENTS_V1", "NORMALIZE_MENU_V1", "RESAMPLERS", "SECTIONS", "AugmentSpec",
-           "ConfigError", "DrawConfig", "NormalizeMenu", "ProcessingConfig", "RenderConfig",
-           "ShipConfig", "dump_processing_config", "load_processing_config",
+           "ConfigError", "DrawConfig", "FoldConfig", "NormalizeMenu", "ProcessingConfig",
+           "RenderConfig", "ShipConfig", "dump_processing_config", "load_processing_config",
            "processing_config_from_dict"]
 
 
@@ -305,7 +306,8 @@ class DrawConfig:
 
 
 #: The sections a processing config is made of. Grows as the stages land.
-SECTIONS: dict[str, type] = {"draw": DrawConfig, "render": RenderConfig, "ship": ShipConfig}
+SECTIONS: dict[str, type] = {"draw": DrawConfig, "render": RenderConfig, "ship": ShipConfig,
+                             "folds": FoldConfig}
 
 
 def _draw_from_dict(d: Mapping[str, Any]) -> DrawConfig:
@@ -354,7 +356,12 @@ def _ship_from_dict(d: Mapping[str, Any]) -> ShipConfig:
     return cfg
 
 
-_BUILDERS = {"draw": _draw_from_dict, "render": _render_from_dict, "ship": _ship_from_dict}
+def _folds_from_dict(d: Mapping[str, Any]) -> FoldConfig:
+    return _build(FoldConfig, dict(d), "folds")
+
+
+_BUILDERS = {"draw": _draw_from_dict, "render": _render_from_dict, "ship": _ship_from_dict,
+             "folds": _folds_from_dict}
 
 
 @dataclass(frozen=True)
@@ -362,6 +369,9 @@ class ProcessingConfig:
     draw: DrawConfig = dataclasses.field(default_factory=DrawConfig)
     render: RenderConfig = dataclasses.field(default_factory=RenderConfig)
     ship: ShipConfig = dataclasses.field(default_factory=ShipConfig)
+    #: OFF-5. ``training.folds.FoldConfig``; D-22: four folds, the number of
+    #: composable fake-music families minus PROBE's one.
+    folds: FoldConfig = dataclasses.field(default_factory=lambda: FoldConfig(n_folds=4))
 
 
 def processing_config_from_dict(d: Mapping[str, Any]) -> ProcessingConfig:

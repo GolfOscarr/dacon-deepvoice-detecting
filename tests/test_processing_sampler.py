@@ -796,6 +796,7 @@ def test_the_v1_config_file_names_every_field_and_equals_the_defaults():
     assert dataclasses.replace(cfg.render, root=Path(".")) == ProcessingConfig().render
     assert cfg.render.root.is_absolute()
     assert cfg.ship == ProcessingConfig().ship
+    assert cfg.folds == ProcessingConfig().folds and cfg.folds.n_folds == 4
 
 
 def test_a_non_default_config_round_trips(tmp_path):

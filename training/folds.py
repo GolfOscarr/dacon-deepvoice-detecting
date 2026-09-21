@@ -96,6 +96,13 @@ _COVERAGE = (("voice", False), ("voice", True), ("music", False), ("music", True
              ("noise", False))
 
 
+#: How many times `probe_share` of the ROWS a family-advancing PROBE seal may
+#: reach before the group rotates instead (see `_seal_probe`). 2.0: PROBE is a
+#: ~10 % family share and may not, by atom size alone, become a fifth of the
+#: corpus that is never trained on.
+PROBE_ROW_BUDGET = 2.0
+
+
 class FoldInfeasible(ValueError):
     """The corpus cannot support the requested split. Never silently downgraded."""
 
@@ -298,10 +305,26 @@ def _seal_probe(facts: dict[str, dict], cfg: FoldConfig) -> set[str]:
     totals = {h: len({f for g in facts.values() for f in g["families"][h]})
               for h in HEADS}
     target = {h: cfg.probe_share * totals[h] for h in HEADS}
+    # The families a VAL side can actually DRAW from: those some group carries
+    # as component rows of the head's fake pool. A family present only as
+    # whole-file rows (SONICS under docs/processing/03 D-1) counts toward the
+    # sealing target but not toward the rotating floor below -- a fold whose
+    # only fake-music family is uncomposable fails coverage all the same.
+    composable = {h: {fam for g in facts.values() for fam in g["families"][h]
+                      if (h, True) in g["provides"]} for h in HEADS}
     got: dict[str, set] = {h: set() for h in HEADS}
     covered: set[tuple[str, bool]] = set()
     probe: set[str] = set()
+    total_rows = sum(g["n_rows"] for g in facts.values())
+    probe_rows = 0
+    # Critical: among groups with the same family count, the ones that can
+    # COMPOSE (`provides` non-empty) come first. A group of whole-file rows
+    # only -- SONICS' two families under docs/processing/03 D-1 -- advances a
+    # head's family target while giving PROBE nothing it can draw a composed
+    # sample from; sealed first by size, it left PROBE with "fake music" it
+    # could not compose.
     for group in sorted(facts, key=lambda g: (-facts[g]["n_families"],
+                                              -len(facts[g]["provides"]),
                                               -facts[g]["n_rows"], g)):
         f = facts[group]
         # Take the group if it advances the family target on some head, or if
@@ -312,7 +335,44 @@ def _seal_probe(facts: dict[str, dict], cfg: FoldConfig) -> set[str]:
         advances = any(totals[h] and f["families"][h] and len(got[h]) < target[h]
                        for h in HEADS)
         closes = len(covered) < len(_COVERAGE) and bool(f["provides"] - covered)
-        if advances or closes:
+        # Critical: a group may carry families on BOTH heads (a cell-8 whole
+        # file is fake on both; docs/processing/03 D-14 keeps its family), and
+        # such groups sort first. Sealing them to advance the larger head
+        # can strip the smaller head of every rotating family -- measured on
+        # the built corpus: 7 music families, all 7 sealed for the voice
+        # target, 0 rotating. So a group is never sealed if that would leave
+        # any head below `n_folds` rotating families, which is precisely the
+        # condition `_check_feasible` refuses.
+        starves = any(
+            composable[h] and (f["families"][h] & composable[h])
+            and len(composable[h] - (got[h] | f["families"][h])) < cfg.n_folds
+            for h in HEADS)
+        # PROBE's target is a FAMILY share, but it is sealed forever (VG6), so
+        # a family-advancing seal also has a ROW budget: the LJSpeech pair atom
+        # (LJSpeech + seven WaveFake families, 89k rows, 32 % of the built
+        # corpus) reached PROBE first by family count and 64 % of the corpus
+        # was sealed. Over budget, the group rotates instead -- one fold's VAL
+        # is then large, which the A8 caveat below says out loud.
+        over_budget = (probe_rows + f["n_rows"]
+                       > PROBE_ROW_BUDGET * cfg.probe_share * total_rows)
+        # A seal that closes a coverage gap is taken even if it starves a
+        # head: coverage is not optional, and the floor then fails loudly in
+        # `_check_feasible` with the message it should. The budget binds on
+        # both -- the second pass below closes what the budget left open.
+        if not over_budget and (closes or (advances and not starves)):
+            probe.add(group)
+            probe_rows += f["n_rows"]
+            for h in HEADS:
+                got[h] |= f["families"][h]
+            covered |= f["provides"]
+    # Coverage the budget left open is closed from the SMALLEST groups that
+    # can close it, budget or not: PROBE that cannot compose a cell is unusable,
+    # and the cheapest closer costs the rotation the least.
+    for group in sorted(facts, key=lambda g: (facts[g]["n_rows"], g)):
+        if group in probe or len(covered) >= len(_COVERAGE):
+            continue
+        f = facts[group]
+        if f["provides"] - covered:
             probe.add(group)
             for h in HEADS:
                 got[h] |= f["families"][h]

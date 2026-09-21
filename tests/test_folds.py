@@ -434,3 +434,25 @@ def test_the_shipped_fold_defaults_are_pinned():
     assert set(_SHIPPED_FOLD_DEFAULTS) == {f.name for f in dataclasses.fields(FoldConfig)}
     for name, want in _SHIPPED_FOLD_DEFAULTS.items():
         assert getattr(cfg, name) == want, name
+
+
+def test_sealing_probe_never_starves_the_smaller_head(manifest):
+    """Critical: a cell-8 whole file is fake on both heads and keeps its family
+    (docs/processing/03 D-14), so a music family is a voice family too, and
+    such groups carry two families and sort first. Sealing them to advance
+    the voice target stripped the built corpus's music head of all 7 of its
+    families. PROBE must stop short of any head's `n_folds` floor."""
+    df = manifest.copy()
+    music = df["artifact_family"].notna() & (
+        (df["pool"] == "D") | (df["cell"] == 8) | (df["cell"] == 4))
+    fams = sorted(df.loc[music, "artifact_family"].unique())
+    seven = {f: fams[i % 7] for i, f in enumerate(fams)}
+    df.loc[music, "artifact_family"] = df.loc[music, "artifact_family"].map(seven)
+    df.loc[music, "domain_key"] = df.loc[music, "artifact_family"]
+    df.loc[music, "source_name"] = df.loc[music, "artifact_family"]
+    plan = build_folds(df, FoldConfig(assigned_at="x"))
+    f = plan.frame
+    rotating = f[(f["slice"] == "train_val") & f["artifact_family"].isin(seven.values())]
+    assert rotating["artifact_family"].nunique() >= N_FOLDS
+    sealed = f[(f["slice"] == "probe") & f["artifact_family"].isin(seven.values())]
+    assert sealed["artifact_family"].nunique() <= 7 - N_FOLDS

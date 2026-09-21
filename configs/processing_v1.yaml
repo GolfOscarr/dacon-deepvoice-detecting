@@ -109,3 +109,18 @@ ship:
   # SHIP-5. D-11: no high-pass (low edge 0). D-12, OPEN: 7200 Hz upper edge
   # vs the resampler shelf and SONICS' 7.3 kHz rolloff -- ablate vs null.
   band_hz: [0.0, 7200.0]
+
+folds:
+  # OFF-5, `training.folds.FoldConfig`. D-22: FOUR folds. The music head has
+  # five composable fake families (FakeMusicCaps) plus SONICS' two whole-file
+  # only ones; PROBE seals one, and five VAL sides need five composable --
+  # four is what the corpus supports. Each VAL fold validates the music head
+  # on 1-2 families (the variance caveat in folds.caveats.txt). OPEN: five
+  # folds with allow_no_probe, or a sixth fake-music family.
+  n_folds: 4
+  probe_share: 0.10
+  scheme_version: null
+  caveat_families_per_val_fold: 2
+  require_component_coverage: true
+  allow_no_probe: false
+  assigned_at: null
