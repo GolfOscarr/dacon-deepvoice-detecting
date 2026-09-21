@@ -54,12 +54,17 @@ draw:
   # DRAW-6. name, per-sample p, parameter ranges; drawn before the cell into
   # spec.transforms. A `<k>_range` the augment accepts as scalar `<k>` is
   # drawn at spec time (I1b sees the value); the others are drawn inside the
-  # augment from spec.rng. `pink_noise` (p 0.3) joins once registered (step 12).
+  # augment from spec.rng. `rir` (A-A10): RIRS' 218 real responses (the
+  # `_rir_` files beside the isotropic noises), direct path aligned to 0,
+  # dry/wet U(0.3, 1.0), level preserved.
   augments:
     - {name: gain_jitter,      p: 1.0, db_range: [-12.0, 12.0]}        # D-8
     - {name: rawboost_ssi,     p: 0.5, snr_db_range: [10.0, 40.0], tilt_db_range: [-12.0, 12.0]}
     - {name: gaussian_noise,   p: 0.3, snr_db_range: [10.0, 30.0]}
+    - {name: pink_noise,       p: 0.3, snr_db_range: [10.0, 30.0]}
     - {name: stereo_imbalance, p: 0.3, db_range: [-4.0, 4.0]}
+    - {name: rir, p: 0.2, wet_range: [0.3, 1.0], max_rir_s: 1.0, pattern: "*_rir_*.wav",
+       bank_dir: /data/project/private/dacon-corpus/interim/rirs-noises/openslr-28/RIRS_NOISES/real_rirs_isotropic_noises}
   # DRAW-7 / D-13. One menu for every cell, drawn per sample into
   # spec.normalize: container (+ bitrate for mp3), channels, and the 8 kHz
   # telephone leg with mu-law / A-law / no companding ("plain").

@@ -98,15 +98,16 @@ class AugmentSpec:
                 **{k: (list(v) if isinstance(v, tuple) else v) for k, v in self.params.items()}}
 
 
-#: D-8 and data/06 A-A5/A-A6/A-B3, at the spec's v1 rates. Caveat: `pink_noise`
-#: (docs/processing/03 DRAW-6, p 0.3) is absent until its registry entry lands
-#: (§6 step 12) -- an unregistered name is refused at construction, not at
-#: render.
+#: D-8 and data/06 A-A5/A-A6/A-B3, at the spec's v1 rates, plus `pink_noise`
+#: (step 12). Caveat: `rir` (A-A10, p 0.2) is in `configs/processing_v1.yaml`
+#: and not here: its bank is a directory of measured responses on this
+#: machine, and a code default may not name a path.
 AUGMENTS_V1: tuple[AugmentSpec, ...] = (
     AugmentSpec("gain_jitter", 1.0, {"db_range": (-12.0, 12.0)}),
     AugmentSpec("rawboost_ssi", 0.5, {"snr_db_range": (10.0, 40.0),
                                       "tilt_db_range": (-12.0, 12.0)}),
     AugmentSpec("gaussian_noise", 0.3, {"snr_db_range": (10.0, 30.0)}),
+    AugmentSpec("pink_noise", 0.3, {"snr_db_range": (10.0, 30.0)}),
     AugmentSpec("stereo_imbalance", 0.3, {"db_range": (-4.0, 4.0)}),
 )
 

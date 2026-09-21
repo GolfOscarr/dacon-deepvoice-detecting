@@ -35,8 +35,11 @@ sampler into the submission.
 
 from __future__ import annotations
 
+import functools
 import inspect
+import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
@@ -627,6 +630,100 @@ def stereo_imbalance(wav: Tensor, rng: np.random.Generator, *,
     for c in range(wav.shape[0]):
         out[c] = wav[c] * float(10.0 ** (float(rng.uniform(*db_range)) / 20.0))
     return out
+
+
+@AUGMENT.register("pink_noise")
+def pink_noise(wav: Tensor, rng: np.random.Generator, *,
+               snr_db: float | None = None,
+               snr_db_range: tuple[float, float] = (10.0, 30.0)) -> Tensor:
+    """A-A6-shaped additive noise with a 1/f power spectrum (docs/processing/03
+    DRAW-6), at a per-file SNR against the file's own RMS.
+
+    White noise is shaped in the rFFT domain by ``1 / sqrt(f)`` (the DC bin is
+    zeroed), which is the -3 dB/octave slope of pink noise; `gaussian_noise` is
+    the flat case. ``snr_db`` drawn at spec time wins.
+    """
+    if snr_db is None:
+        snr_db = float(rng.uniform(*snr_db_range))
+    n = wav.shape[-1]
+    white = torch.from_numpy(
+        rng.standard_normal(tuple(wav.shape)).astype(np.float32)).to(wav.device)
+    spec = torch.fft.rfft(white.double(), dim=-1)
+    f = torch.arange(spec.shape[-1], dtype=torch.float64, device=spec.device)
+    shape = torch.where(f > 0, 1.0 / torch.sqrt(torch.clamp(f, min=1.0)), torch.zeros_like(f))
+    pink = torch.fft.irfft(spec * shape, n=n, dim=-1).to(wav.dtype)
+    scale = _rms(wav) / _rms(pink) * float(10.0 ** (-snr_db / 20.0))
+    return wav + pink * scale
+
+
+#: A-A10's fallback bank: without a directory of measured responses the
+#: augment convolves with a synthetic one -- a unit direct path at 0 followed
+#: by exponentially decaying noise (RT60 ~0.4 s) -- so the registry probe and
+#: any machine without the corpus can run it. Built once per (seed, length).
+_SYNTHETIC_RIR_N = 8_000
+
+
+def _synthetic_rir(rng: np.random.Generator, n: int = _SYNTHETIC_RIR_N) -> np.ndarray:
+    t = np.arange(n, dtype=np.float64) / 16_000.0
+    h = rng.standard_normal(n) * np.exp(-t / 0.06) * 0.05
+    h[0] = 1.0
+    return h.astype(np.float32)
+
+
+@functools.lru_cache(maxsize=8)
+def _rir_bank(bank_dir: str, pattern: str) -> tuple[str, ...]:
+    files = tuple(sorted(str(p) for p in Path(bank_dir).glob(pattern)))
+    if not files:
+        raise RegistryError(f"rir: no file matches {pattern!r} under {bank_dir}")
+    return files
+
+
+def _load_rir(path: str, channel: int, max_s: float) -> np.ndarray:
+    """One response: the drawn channel, resampled to 16 kHz if needed, the
+    direct path moved to sample 0, truncated, L2-normalised."""
+    import soundfile as sf
+
+    h, sr = sf.read(path, dtype="float32", always_2d=True)
+    h = h[:, channel % h.shape[1]].astype(np.float64)
+    if sr != 16_000:
+        from scipy.signal import resample_poly
+        g = math.gcd(int(sr), 16_000)
+        h = resample_poly(h, 16_000 // g, int(sr) // g)
+    h = h[int(np.argmax(np.abs(h))):][:int(max_s * 16_000)]
+    return (h / max(np.linalg.norm(h), 1e-12)).astype(np.float32)
+
+
+@AUGMENT.register("rir")
+def rir(wav: Tensor, rng: np.random.Generator, *,
+        bank_dir: str | None = None, pattern: str = "*.wav",
+        wet: float | None = None, wet_range: tuple[float, float] = (0.3, 1.0),
+        max_rir_s: float = 1.0) -> Tensor:
+    """A-A10 -- room reverberation by convolution with a measured impulse
+    response (docs/processing/03 DRAW-6), dry/wet mixed, level preserved.
+
+    Critical: an augment may not move audio, and a raw response does -- the
+    RIRS real responses put the direct path ~2,100 samples in. The response is
+    therefore aligned so its direct path sits at sample 0 before convolving,
+    which the registry's time-warp probe verifies (lag 0 at head and tail).
+    ``bank_dir`` unset uses the synthetic response, so registration and the
+    probe need no corpus; the v1 config points it at RIRS' 218 real responses.
+    The output is rescaled to the input's RMS: reverberation is not a gain.
+    """
+    if wet is None:
+        wet = float(rng.uniform(*wet_range))
+    if bank_dir is None:
+        h = _synthetic_rir(rng)
+    else:
+        bank = _rir_bank(str(bank_dir), pattern)
+        h = _load_rir(bank[int(rng.integers(len(bank)))], int(rng.integers(8)), max_rir_s)
+    n = wav.shape[-1]
+    size = 1 << int(np.ceil(np.log2(n + len(h))))
+    x = wav.detach().cpu().double()
+    hk = torch.fft.rfft(torch.from_numpy(h.astype(np.float64)), size)
+    wet_sig = torch.fft.irfft(torch.fft.rfft(x, size) * hk, size)[..., :n]
+    out = (1.0 - wet) * x + wet * wet_sig
+    out = out * (_rms(x) / _rms(out).clamp_min(1e-12))
+    return out.to(wav.dtype).to(wav.device)
 
 
 # --------------------------------------------------------------------------- #

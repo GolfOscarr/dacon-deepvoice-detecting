@@ -596,7 +596,7 @@ def test_a_label_conditioned_draw_is_caught_by_i1b(manifest):
 
 def test_an_unregistered_augment_is_refused_at_construction():
     with pytest.raises(ValueError, match="not registered"):
-        AugmentSpec("pink_noise", 0.3, {"snr_db_range": (10.0, 30.0)})
+        AugmentSpec("brown_noise", 0.3, {"snr_db_range": (10.0, 30.0)})
     with pytest.raises(ValueError, match="no parameter"):
         AugmentSpec("gain_jitter", 0.3, {"snr_db_range": (10.0, 30.0)})
     with pytest.raises(ValueError, match="p must be"):
@@ -790,7 +790,12 @@ def test_the_v1_config_file_names_every_field_and_equals_the_defaults():
     for name, cls in SECTIONS.items():
         assert set(raw[name]) == {f.name for f in dataclasses.fields(cls)}, name
     cfg = load_processing_config(REPO / "configs" / "processing_v1.yaml")
-    assert cfg.draw == ProcessingConfig().draw
+    # the file adds `rir` with this machine's response bank; the defaults may
+    # not name a path
+    without_rir = dataclasses.replace(
+        cfg.draw, augments=tuple(a for a in cfg.draw.augments if a.name != "rir"))
+    assert without_rir == ProcessingConfig().draw
+    assert [a.name for a in cfg.draw.augments][-1] == "rir"
     # the render section is the defaults except the corpus root, which is a
     # property of this machine and not of the strategy
     assert dataclasses.replace(cfg.render, root=Path("."), cache_root=None) == \

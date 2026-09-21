@@ -324,9 +324,9 @@ draw cannot see it) from the sample's RNG.
 | `gain_jitter` | exists | `db ~ U(−12, 12)` (D-8) | 1.0 | value CHANGE |
 | `rawboost_ssi` | exists | `snr_db_range (10, 40)`, `tilt_db_range (−12, 12)` | 0.5 | EXISTS |
 | `gaussian_noise` | exists | `snr_db_range (10, 30)` | 0.3 | EXISTS |
-| `pink_noise` | **NEW** registry entry | `snr_db_range (10, 30)`, 1/f spectrum | 0.3 | NEW |
+| `pink_noise` | **built (step 12)** | `snr_db_range (10, 30)`, 1/f spectrum | 0.3 | built |
 | `stereo_imbalance` | exists | `db_range (−4, 4)` | 0.3 (stereo samples) | EXISTS |
-| `rir` | **NEW** | RIRS isotropic set (92 files), dry/wet `U(0.3, 1.0)`, **`group_delay` declared** | 0.2 | NEW (later) |
+| `rir` | **built (step 12)** | RIRS' **218 real responses** (not the 92 isotropic noises — those are pool E), dry/wet `U(0.3, 1.0)`, direct path aligned to 0 so **no delay is declared** (an augment may not declare one) | 0.2 | built |
 | SpecAugment / structured dropout | inside the frontend (spectrogram domain) | 2 masks, 15 % F / 20 % T | 0.5 | NEW (later) |
 | pitch shift, time stretch, loudness normalisation | — | — | — | **not in v1** (D-9; resynthesis manufactures label noise) |
 
@@ -579,7 +579,7 @@ Model config deltas (`configs/a_shared_trunk.yaml`): `segmentation: {mode: whole
 | 9 | DRAW-5 | `training/sampler.py`, `training/render.py` — **as built: `processing/sampler.py`, `processing/render.py`, `ComponentDraw.snr_db`** | noise layer; SNR-to-gain at render | no `noise_has_speech` row under a `voice_present = 0` spec (mutation: unflagged rows do go under); the rate per sample equal across labels and cells; the rendered layer at its SNR ± 0.05 dB; I1c on the layer's features | — |
 | 10 | OFF-5 | `training/folds.py` config — **as built: `processing/splits.py`, `scripts/build_folds.py`, three `_seal_probe` fixes** | folds, SHADOW re-renders (S-a needs re-rendered files: OPEN) | VG1 A1–A7 ✅; the seal starvation, order and budget each tested | D-22 |
 | 11 | OFF-6 | new `scripts/build_cache.py` — **as built: `processing/cache.py`, `.npy`** | int16 cache | a cached slice equals `load_audio` bit-for-bit after resample — **as built: equals the quantised full-file resample's slice bit-for-bit; `load_audio` of the slice differs at the edges by design (see OFF-6)** | — |
-| 12 | DRAW-6 | `training/registries.py` | `pink_noise`, later `rir` | registry probe (length, `group_delay`) | — |
+| 12 | DRAW-6 | `training/registries.py` | `pink_noise`, later `rir` — **built: both**. `pink_noise` = white noise shaped `1/√f` (−3 dB/octave) at a drawn SNR; `rir` = convolution with one of RIRS' 218 real responses (the `_rir_` files beside its isotropic noises), the direct path aligned to sample 0 (the raw responses put it ~2,100 samples in, and an augment may not move audio), dry/wet `U(0.3, 1.0)`, output rescaled to the input RMS; a synthetic response when no bank is configured, so the registry probe needs no corpus. In the v1 menu at p 0.3 / 0.2 | registry probe (length, `group_delay`) ✅ lag 0 at head and tail; the pink slope 8–10 dB over 3 octaves; SNR ± 0.1 dB; `wet = 0` is the identity; a burst's onset does not move through a real response | — |
 | 13 | FEAT-2 | `models/frontends.py` | one channel at a time, after the first scored model | I14; harness residues; promotion protocol | D-20 |
 
 Steps 1–6 are one day and unblock training on the S-tier manifest; 7–11 are the corpus build
