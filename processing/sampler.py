@@ -22,6 +22,11 @@ What differs from ``training.sampler.Sampler``, and why (02 §2-§3):
   component. Under ``f8 = 1`` the branch is drawn only in the ``f8`` sweep.
 * **Lead/tail silence on every sample (D-6)** at the measured values -- drawn
   before the branch, so the whole-file branch carries the same lead.
+* **The noise layer (DRAW-5).** With ``p_noise_layer`` a pool-E row goes
+  under the composite of ANY cell at ``U(10, 30)`` dB SNR, tiled like a
+  component; rows flagged ``noise_has_speech`` never go under a
+  ``voice_present = 0`` cell. The layer decision and its SNR are drawn before
+  the cell; the SNR is resolved at render (``ComponentDraw.snr_db``).
 * **The augment and test-chain draws exist (DRAW-6, DRAW-7).** The training
   sampler never fills ``spec.transforms`` or ``spec.normalize``; here both are
   drawn per sample from the config's menus, before the cell.
@@ -39,6 +44,7 @@ sequential structure -- is the training sampler's, imported not copied.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -89,6 +95,19 @@ class Sampler:
                 self._by_role_fake[(role, fake)] = rows
                 self._weights[(role, fake)] = self._doss_weights(
                     rows.domain_key if not rows.empty else pd.Series(dtype=object))
+
+        # DRAW-5: the pool-E rows a layer may draw from. `noise_has_speech`
+        # (D-14 `restrict_noise`) is an optional manifest column; absent, no
+        # row is restricted.
+        noise = comp[comp.pool == "E"]
+        flagged = (noise["noise_has_speech"].fillna(False).astype(bool)
+                   if "noise_has_speech" in noise.columns
+                   else pd.Series(False, index=noise.index))
+        self._layer_rows = {
+            True: noise, False: noise[~flagged]}          # keyed by voice_present
+        self._layer_weights = {k: self._doss_weights(v.domain_key) if len(v) else np.empty(0)
+                               for k, v in self._layer_rows.items()}
+        self.n_noise_restricted = int(flagged.sum())
 
         # Whole-file rows go through the same take/offset/tile rule (D-3:
         # "every role incl. whole-file"), so the same floor applies.
@@ -164,6 +183,27 @@ class Sampler:
                 out["companding"] = telephone
         return out
 
+    # -- DRAW-5 ---------------------------------------------------------------- #
+
+    def _draw_layer(self, rng: np.random.Generator, voice_present: bool,
+                    exclude: str | None, lead: float, span: float, take: float,
+                    snr_db: float) -> list[ComponentDraw]:
+        """One pool-E row, tiled over the span at ``snr_db``. Rows flagged
+        ``noise_has_speech`` are excluded under a ``voice_present = 0`` cell
+        (they would mislabel a music-only composite); ``exclude`` keeps a
+        cell-9 sample from layering a file under itself."""
+        rows, w = self._layer_rows[voice_present], self._layer_weights[voice_present]
+        if exclude is not None and len(rows):
+            keep = (rows["file_id"] != exclude).to_numpy()
+            rows, w = rows[keep], w[keep]
+            w = w / w.sum() if w.sum() > 0 else w
+        if not len(rows):
+            return []
+        row = rows.iloc[int(rng.choice(len(rows), p=w))]
+        tiles = self._tiles(rng, str(row.file_id), "noise", float(row.duration_s),
+                            lead, span, 0.0, take)
+        return [replace(t, snr_db=snr_db) for t in tiles]
+
     # -- drawing ------------------------------------------------------------- #
 
     def _draw_component(self, rng: np.random.Generator, role: str, fake: bool) -> pd.Series:
@@ -236,6 +276,10 @@ class Sampler:
         # so nothing about the labels can reach them (docs/processing/03).
         transforms = self._draw_transforms(rng)
         normalize = self._draw_normalize(rng)
+        # DRAW-5: whether a noise layer is added, and at what SNR -- BEFORE the
+        # cell (R2: per sample, never per cell); the row is drawn after it.
+        layer = rng.random() < cfg.p_noise_layer
+        layer_snr = float(rng.uniform(*cfg.noise_snr_db_range))
 
         # DRAW-2: cell and composition. Labels are fixed here.
         cell = cfg.cell_mix.draw(rng)
@@ -280,6 +324,9 @@ class Sampler:
             role = wanted[0][0]
             tiles = self._tiles(rng, str(row.file_id), role, float(row.duration_s),
                                 lead, span, 0.0, take)
+            if layer:
+                tiles += self._draw_layer(rng, bool(vp), str(row.file_id), lead, span, take,
+                                          layer_snr)
             return SampleSpec(
                 sample_id=sample_id, epoch=epoch, seed=seed,
                 scheme_version=cfg.scheme_version,
@@ -300,6 +347,9 @@ class Sampler:
             gain = self._gain_db(rng) if (is_ratio and role == "voice") else 0.0
             draws.extend(self._tiles(rng, str(row.file_id), role, float(row.duration_s),
                                      start, slot, gain, take))
+        if layer:
+            own = draws[0].file_id if wanted[0][0] == "noise" else None
+            draws.extend(self._draw_layer(rng, bool(vp), own, lead, span, take, layer_snr))
 
         return SampleSpec(
             sample_id=sample_id, epoch=epoch, seed=seed,

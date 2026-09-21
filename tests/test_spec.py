@@ -177,3 +177,15 @@ def test_round_trips_through_a_dict():
               transforms=(("gain_jitter", {"db": 2.1}),),
               normalize={"container": "mp3", "bitrate": 96})
     assert SampleSpec.from_dict(s.to_dict()) == s
+
+
+def test_a_layer_is_a_noise_draw_and_may_ride_under_a_whole_file():
+    """DRAW-5: `snr_db` marks a pool-E layer; only a noise draw can carry it,
+    and a whole-file spec stays one row when a layer rides under it."""
+    with pytest.raises(ValueError, match="only a noise draw"):
+        _draw(snr_db=20.0)
+    layer = _draw(file_id="E00001", role="noise", snr_db=20.0)
+    _spec(render_mode="whole_file", components=(_draw(), layer))
+    with pytest.raises(ValueError, match="exactly one row"):
+        _spec(render_mode="whole_file",
+              components=(_draw(), _draw(file_id="A00002", role="noise")))

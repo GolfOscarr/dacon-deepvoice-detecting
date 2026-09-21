@@ -113,10 +113,18 @@ class ComponentDraw:
     target_start_s: float          # where it lands on the sample timeline
     gain_db: float
     is_mixup_partner: bool = False
+    #: A noise LAYER (docs/processing/03 DRAW-5): a pool-E draw added under
+    #: the composite at this SNR, resolved at render against the RMS of the
+    #: non-layer pieces over its span. ``None`` for every ordinary component.
+    #: A layer carries no frame target -- it is not a component the cell
+    #: describes -- and ``gain_db`` is ignored in its favour.
+    snr_db: float | None = None
 
     def __post_init__(self) -> None:
         if self.role not in ("voice", "music", "noise"):
             raise ValueError(f"role must be voice|music|noise, got {self.role!r}")
+        if self.snr_db is not None and self.role != "noise":
+            raise ValueError(f"only a noise draw can be a layer (snr_db), got role {self.role!r}")
         for name in ("source_offset_s", "duration_s", "target_start_s"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
@@ -169,8 +177,9 @@ class SampleSpec:
         # that every component names the same file and the same role; a second
         # file would be a composition wearing the whole-file label.
         if self.render_mode == "whole_file":
-            files = {c.file_id for c in self.components}
-            roles = {c.role for c in self.components}
+            own = [c for c in self.components if c.snr_db is None]   # layers are not the row
+            files = {c.file_id for c in own}
+            roles = {c.role for c in own}
             if len(files) != 1 or len(roles) != 1:
                 raise ValueError(
                     f"a whole_file spec is exactly one row used as-is: every "

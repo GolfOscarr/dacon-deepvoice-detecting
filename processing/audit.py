@@ -76,18 +76,18 @@ def collapse_tiles(spec: SampleSpec) -> SampleSpec:
     end)``; the gain is shared by construction. Labels, transforms and the
     normalize draw are untouched.
     """
-    groups: dict[tuple[str, str], list[ComponentDraw]] = {}
+    groups: dict[tuple[str, str, float | None], list[ComponentDraw]] = {}
     for c in spec.components:
-        groups.setdefault((c.role, c.file_id), []).append(c)
+        groups.setdefault((c.role, c.file_id, c.snr_db), []).append(c)
     merged = []
-    for (role, fid), tiles in groups.items():
+    for (role, fid, snr), tiles in groups.items():
         tiles.sort(key=lambda c: c.target_start_s)
         start = tiles[0].target_start_s
         end = max(c.target_start_s + c.duration_s for c in tiles)
         merged.append(ComponentDraw(
             file_id=fid, role=role, source_offset_s=tiles[0].source_offset_s,
             duration_s=end - start, target_start_s=start, gain_db=tiles[0].gain_db,
-            is_mixup_partner=tiles[0].is_mixup_partner))
+            is_mixup_partner=tiles[0].is_mixup_partner, snr_db=snr))
     return replace(spec, components=tuple(merged))
 
 
@@ -118,12 +118,17 @@ def draw_features(specs: Sequence[SampleSpec], manifest: pd.DataFrame) -> pd.Dat
             "composed": float(s.render_mode == "composed"),
             "sequential": float(s.structure == "sequential"),
         }
-        drawn_lead = min(c.target_start_s for c in s.components)
-        drawn_tail = s.duration_s - max(c.target_start_s + c.duration_s for c in s.components)
+        own = [c for c in s.components if c.snr_db is None]
+        layer = [c for c in s.components if c.snr_db is not None]
+        f["noise_layer"] = float(bool(layer))
+        f["noise_layer_snr_db"] = float(layer[0].snr_db) if layer else 0.0
+        f["noise_layer_joins"] = float(max(0, len(layer) - 1))
+        drawn_lead = min(c.target_start_s for c in own)
+        drawn_tail = s.duration_s - max(c.target_start_s + c.duration_s for c in own)
         f["drawn_lead_s"], f["drawn_tail_s"] = drawn_lead, drawn_tail
         covered = np.zeros(int(np.ceil(s.duration_s / HOP_S)) + 1, dtype=bool)
         groups: dict[str, list[ComponentDraw]] = {}
-        for c in s.components:
+        for c in own:
             groups.setdefault(c.role, []).append(c)
         # a whole-file row is every role its cell says is present
         roles_of = {role: groups.get(role, []) for role in ROLES}
@@ -176,7 +181,8 @@ def _head_frame(features: pd.DataFrame, head: str) -> pd.DataFrame:
     residual of the cell mix (02 §4.3, D-2 OPEN).
     """
     common = ["sample_duration_s", "composed", "sequential", "uncovered_frac",
-              "drawn_lead_s", "drawn_tail_s", "max_joins"]
+              "drawn_lead_s", "drawn_tail_s", "max_joins",
+              "noise_layer", "noise_layer_snr_db", "noise_layer_joins"]
     if head in ("voice_fake", "music_fake"):
         role = head.split("_")[0]
         cols = common + [c for c in features.columns if c.startswith(f"{role}_")]

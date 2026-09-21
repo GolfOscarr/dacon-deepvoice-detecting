@@ -279,6 +279,14 @@ at chance on every head; mutation: `edge_margin_s → 0` must make the pool-D te
 **Why.** ★ `[BC2026]` SNR 10–30 at p 0.5; the EDA's 1,032 speech-carrying noise files would
 mislabel any music-only composite they are mixed into.
 **Verify.** I1b on `noise_take`, `noise_snr`; no flagged row under a `voice_present = 0` spec.
+**As built (step 9).** The layer is a `ComponentDraw(role="noise", snr_db=…)` — `snr_db` is a
+new optional field of the shared spec type — tiled by DRAW-3 with the sample's take; the decision
+and the SNR are drawn before the cell (R2), the row after it (the `noise_has_speech` exclusion needs
+`voice_present`); under **every** cell including 9 (a cell-9 sample never layers its own file) and
+under whole-file rows. The renderer builds the composite first and scales each layer once so its
+RMS over its span sits `snr_db` below the composite's; a silent composite skips the layer. A layer
+carries no frame target. Measured on the S-tier stream at n = 20 000: every gate passes with the
+layer on and off; `voice_present` 0.587 vs 0.590, `voice_fake` 0.532 vs 0.530.
 
 ### DRAW-6 · Augment draw → `spec.transforms` — **NEW**
 
@@ -545,7 +553,7 @@ Model config deltas (`configs/a_shared_trunk.yaml`): `segmentation: {mode: whole
 | 6 | VERIFY | `training/audit.py` — **as built: `processing/audit.py`** (the training invariants over tile-collapsed specs, plus I1c per head over the harness's draw features and I1d edge exposure per pool) | harness features in `_feature_frame` | H1, H2 and the raw lead reproduced as **failing** I1b on the old sampler; passing on the new | — |
 | 7 | OFF-2 | `eda.cli signal` (VAD only) — **as built: `eda.cli vad --partition C --source fma`**, `eda.driver.vad_coverage` (resumable, draw-fingerprinted), `load_signal(with_extra=True)` for `reassign` / G-EDA6 only | `fma` VAD to 100 % | coverage 1.000 — **measured 0.9997** (3 unreadable files) | D-14 |
 | 8 | OFF-1…4 | `scripts/build_corpus_manifest.py` (NEW) — **as built: `processing/corpus.py`** | §4.1 rules, D-14 actions, `dup_group`, `noise_has_speech`, verdict sidecar | every §4.1 rule as an assertion (`check_rules`; a missing pool, a real row with a family, a one-sided pair each refuse the build); G-EDA gates re-run | D-14, D-15, D-17 |
-| 9 | DRAW-5 | `training/sampler.py`, `training/render.py` | noise layer; SNR-to-gain at render | no `noise_has_speech` row under a `voice_present = 0` spec; I1b on `noise_snr` | — |
+| 9 | DRAW-5 | `training/sampler.py`, `training/render.py` — **as built: `processing/sampler.py`, `processing/render.py`, `ComponentDraw.snr_db`** | noise layer; SNR-to-gain at render | no `noise_has_speech` row under a `voice_present = 0` spec (mutation: unflagged rows do go under); the rate per sample equal across labels and cells; the rendered layer at its SNR ± 0.05 dB; I1c on the layer's features | — |
 | 10 | OFF-5 | `training/folds.py` config | folds, SHADOW re-renders | VG1 A1–A7; G-EDA3/4 | — |
 | 11 | OFF-6 | new `scripts/build_cache.py` | int16 cache | a cached slice equals `load_audio` bit-for-bit after resample | — |
 | 12 | DRAW-6 | `training/registries.py` | `pink_noise`, later `rir` | registry probe (length, `group_delay`) | — |

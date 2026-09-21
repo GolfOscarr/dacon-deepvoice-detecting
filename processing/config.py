@@ -220,6 +220,15 @@ class DrawConfig:
     silence_lead_s: float = 3.0
     silence_tail_s: float = 1.0
 
+    # -- DRAW-5: the noise layer ------------------------------------------- #
+    #: With this probability a pool-E row is added UNDER the composite (any
+    #: cell, both branches) at ``snr_db ~ U(*noise_snr_db_range)``, as a
+    #: ``ComponentDraw(role="noise", snr_db=...)`` tiled by DRAW-3. Drawn before
+    #: the cell; the row itself after it, because a row flagged
+    #: ``noise_has_speech`` may not go under a ``voice_present = 0`` cell.
+    p_noise_layer: float = 0.5
+    noise_snr_db_range: tuple[float, float] = (10.0, 30.0)
+
     # -- DRAW-6 / DRAW-7: the augment and normalize draws ------------------- #
     #: The augment menu, drawn per sample before the cell into
     #: ``spec.transforms`` (REN-3 applies it). ``()`` = no augmentation.
@@ -261,6 +270,11 @@ class DrawConfig:
                 raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
         if not 0.0 <= self.sequential_prob <= 1.0:
             raise ValueError(f"sequential_prob must be in [0, 1], got {self.sequential_prob}")
+        if not 0.0 <= self.p_noise_layer <= 1.0:
+            raise ValueError(f"p_noise_layer must be in [0, 1], got {self.p_noise_layer}")
+        s_lo, s_hi = self.noise_snr_db_range
+        if s_lo > s_hi:
+            raise ValueError(f"noise_snr_db_range must be lo <= hi, got {self.noise_snr_db_range}")
         names = [a.name for a in self.augments]
         if len(set(names)) != len(names):
             raise ValueError(f"augments lists a name twice: {names}")

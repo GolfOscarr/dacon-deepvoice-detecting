@@ -18,6 +18,9 @@ What differs from ``training.render``, and why (docs/processing/03 REN-2):
   a splice shortcut). Overlap components share a start and get none.
 * **Tiles merge into one frame interval.** A component's tiles are one span
   of one label; ``frame_intervals`` describe spans, not tiles.
+* **A noise layer is scaled to its SNR here** (DRAW-5): the composite is
+  built first, then each layer is scaled once so its RMS over its span sits
+  ``snr_db`` below the composite's. Layers carry no frame target.
 
 Decode (REN-1), the augment chain (REN-3) and the test-chain normalisation
 (REN-4) are the training renderer's, imported not copied: they are the parts
@@ -133,9 +136,7 @@ def _compose(spec: SampleSpec, placements: Sequence[Placement],
     xfade = int(round(spec.crossfade_ms / 1000.0 * sample_rate))
     fade_in, fade_out = _joints(placements)
 
-    for place, piece in zip(placements, pieces):
-        draw = spec.components[place.index]
-        piece = _to_channels(piece, channels) * np.float32(10.0 ** (draw.gain_db / 20.0))
+    def taper(place: Placement, piece: np.ndarray) -> np.ndarray:
         n = place.n
         k = min(xfade, n // 2)
         if k > 1:
@@ -144,7 +145,37 @@ def _compose(spec: SampleSpec, placements: Sequence[Placement],
                 piece[:, :k] *= ramp
             if place.index in fade_out:
                 piece[:, n - k:] *= ramp[::-1]
+        return piece
+
+    # the composite first: every piece that is not a layer
+    layers: list[tuple[Placement, np.ndarray]] = []
+    for place, piece in zip(placements, pieces):
+        draw = spec.components[place.index]
+        piece = _to_channels(piece, channels)
+        if draw.snr_db is not None:
+            layers.append((place, piece))
+            continue
+        piece = taper(place, piece * np.float32(10.0 ** (draw.gain_db / 20.0)))
         canvas[:, place.start:place.end] += piece
+
+    # DRAW-5: each layer -- all the tiles of one (file, snr) -- is scaled ONCE
+    # so that its RMS over its span sits `snr_db` below the composite's RMS
+    # over the same span. A silent composite (cell 9 with a silent file, a
+    # span inside the lead) gives no reference and the layer is skipped.
+    groups: dict[tuple[str, float], list[tuple[Placement, np.ndarray]]] = {}
+    for place, piece in layers:
+        d = spec.components[place.index]
+        groups.setdefault((d.file_id, float(d.snr_db)), []).append((place, piece))
+    for (_, snr_db), tiles in groups.items():
+        ref = np.concatenate([canvas[:, p.start:p.end] for p, _ in tiles], axis=-1)
+        noise = np.concatenate([x for _, x in tiles], axis=-1)
+        rms_ref = float(np.sqrt(np.mean(ref.astype(np.float64) ** 2)))
+        rms_noise = float(np.sqrt(np.mean(noise.astype(np.float64) ** 2)))
+        if rms_ref <= 0.0 or rms_noise <= 0.0:
+            continue
+        scale = np.float32(rms_ref / rms_noise * 10.0 ** (-snr_db / 20.0))
+        for place, piece in tiles:
+            canvas[:, place.start:place.end] += taper(place, piece * scale)
     return canvas
 
 
@@ -170,6 +201,8 @@ def frame_intervals_for(spec: SampleSpec) -> dict[str, tuple[tuple[float, float,
     whole_roles = tuple(r for r, present in (("voice", spec.voice_present),
                                              ("music", spec.music_present)) if present)
     for draw in spec.components:
+        if draw.snr_db is not None:
+            continue                      # a layer is not a component the cell describes
         start = max(0.0, float(draw.target_start_s))
         end = min(float(spec.duration_s), start + float(draw.duration_s))
         if end <= start:

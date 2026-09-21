@@ -444,6 +444,72 @@ def test_a_fully_drawn_spec_renders_through_the_augment_and_test_chains(corpus, 
         assert torch.equal(r.wav, render(spec, index, cfg).wav)
 
 
+# --------------------------------------------------------------------------- #
+# DRAW-5 -- the noise layer at render
+
+
+def _layered(manifest, snr_db, n_tiles=2, lead=0.5):
+    voice = _ids(manifest, "A")[0]
+    noise = _ids(manifest, "E")[0]
+    tile = 2.0
+    comps = [ComponentDraw(voice, "voice", 0.5 + 0.3 * i, tile, lead + i * tile, 0.0)
+             for i in range(n_tiles)]
+    comps += [ComponentDraw(noise, "noise", 0.5 + 0.3 * i, tile, lead + i * tile, 0.0,
+                            snr_db=snr_db) for i in range(n_tiles)]
+    return SampleSpec(sample_id=0, epoch=0, seed=0, scheme_version="x",
+                      duration_s=lead + n_tiles * tile + 0.5, cell=1, render_mode="composed",
+                      structure="overlap", components=tuple(comps), crossfade_ms=0.0)
+
+
+def _rms(x):
+    return float(x.double().pow(2).mean().sqrt())
+
+
+def test_a_layer_sits_at_its_snr_below_the_composite(corpus, cfg):
+    _, manifest, index = corpus
+    for snr in (10.0, 20.0):
+        spec = _layered(manifest, snr)
+        dry = render(SampleSpec.from_dict({**spec.to_dict(), "components": [
+            c for c in spec.to_dict()["components"] if c["snr_db"] is None]}), index, cfg).wav
+        wet = render(spec, index, cfg).wav
+        span = slice(int(0.5 * SR), int(4.5 * SR))
+        noise = wet[:, span] - dry[:, span]
+        measured = 20 * np.log10(_rms(dry[:, span]) / _rms(noise))
+        assert measured == pytest.approx(snr, abs=0.05), (snr, measured)
+        # the composite itself is untouched, and the lead stays silent
+        assert float(wet[:, :int(0.5 * SR)].abs().max()) == 0.0
+
+
+def test_a_layer_carries_no_frame_target(corpus):
+    _, manifest, _ = corpus
+    iv = frame_intervals_for(_layered(manifest, 20.0))
+    assert iv["voice"] == ((0.5, 4.5, 0),) and iv["file"] == ((0.5, 4.5, 0),)
+
+
+def test_a_layer_under_a_silent_composite_is_skipped(corpus, cfg):
+    """No reference RMS, no layer -- rather than a divide by zero or a layer at
+    full scale."""
+    _, manifest, index = corpus
+    voice, noise = _ids(manifest, "A")[0], _ids(manifest, "E")[0]
+    spec = SampleSpec(sample_id=0, epoch=0, seed=0, scheme_version="x", duration_s=5.0, cell=1,
+                      render_mode="composed", structure="overlap",
+                      components=(ComponentDraw(voice, "voice", 0.5, 4.0, 0.0, -400.0),
+                                  ComponentDraw(noise, "noise", 0.5, 4.0, 0.0, 0.0, snr_db=20.0)))
+    wav = render(spec, index, cfg).wav
+    assert float(wav.abs().max()) < 1e-6
+
+
+def test_drawn_specs_with_layers_render_reproducibly(corpus, cfg):
+    _, manifest, index = corpus
+    s = Sampler(manifest, DrawConfig(**{**PLACEMENT, "p_noise_layer": 1.0}))
+    specs = [sp for sp in s.epoch_specs(8)]
+    assert all(any(c.snr_db is not None for c in sp.components) for sp in specs)
+    for sp in specs:
+        r = render(sp, index, cfg)
+        assert r.wav.shape[-1] == int(round(sp.duration_s * SR))
+        assert torch.equal(r.wav, render(sp, index, cfg).wav)
+
+
 def test_an_invalid_crossfade_shape_is_rejected(cfg):
     with pytest.raises(ValueError, match="crossfade_shape"):
         RenderConfig(root=cfg.root, crossfade_shape="cosine")

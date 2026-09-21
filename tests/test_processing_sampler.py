@@ -126,9 +126,12 @@ def sampler_manifest_of(sampler):
 
 
 def _slots(spec):
-    """``(role, file_id) -> sorted tiles`` for a spec of either render mode."""
+    """``(role, file_id) -> sorted tiles`` for a spec of either render mode;
+    a noise layer (``snr_db`` set) is not a component of the composition."""
     out = {}
     for c in spec.components:
+        if c.snr_db is not None:
+            continue
         out.setdefault((c.role, c.file_id), []).append(c)
     return {k: sorted(v, key=lambda c: c.target_start_s) for k, v in out.items()}
 
@@ -273,8 +276,9 @@ def test_whole_file_draws_are_tiled_inside_the_file_under_the_same_rule(manifest
         if spec.render_mode != "whole_file":
             continue
         n += 1
-        assert len({c.file_id for c in spec.components}) == 1
-        assert len({c.role for c in spec.components}) == 1
+        own = [c for c in spec.components if c.snr_db is None]     # the row, not a layer
+        assert len({c.file_id for c in own}) == 1
+        assert len({c.role for c in own}) == 1
         for c in spec.components:
             assert c.source_offset_s >= 0.5 - 1e-9
             assert c.source_offset_s + c.duration_s <= dur[c.file_id] - 0.5 + 1e-9
@@ -298,7 +302,8 @@ def test_a_whole_file_spec_keeps_the_drawn_timeline_and_starts_at_the_lead(manif
     leads = [min(c.target_start_s for c in sp.components) for sp in whole]
     assert max(leads) > 1.0 and max(leads) <= 3.0 + 1e-9, "lead ~ U(0, 3) on whole-file draws"
     for sp in whole:
-        tiles = sorted(sp.components, key=lambda c: c.target_start_s)
+        tiles = sorted((c for c in sp.components if c.snr_db is None),
+                       key=lambda c: c.target_start_s)
         for a, b in zip(tiles, tiles[1:]):
             assert b.target_start_s == pytest.approx(a.target_start_s + a.duration_s)
         end = tiles[-1].target_start_s + tiles[-1].duration_s
@@ -377,6 +382,98 @@ def test_the_join_count_does_not_follow_the_pools_length_distribution(manifest):
             y.append(spec.voice_fake)
     a = roc_auc_score(y, x)
     assert max(a, 1 - a) < 0.55
+
+
+# --------------------------------------------------------------------------- #
+# DRAW-5: the noise layer
+
+
+def _flagged(manifest):
+    df = manifest.copy()
+    df["noise_has_speech"] = False
+    e = df.index[df.pool == "E"]
+    df.loc[e[: len(e) // 2], "noise_has_speech"] = True
+    return df
+
+
+def test_the_layer_is_a_noise_draw_at_its_snr_tiled_over_the_span(manifest):
+    s = Sampler(manifest, DrawConfig())
+    seen = 0
+    for spec in s.epoch_specs(600):
+        layer = [c for c in spec.components if c.snr_db is not None]
+        if not layer:
+            continue
+        seen += 1
+        assert {c.role for c in layer} == {"noise"} and len({c.file_id for c in layer}) == 1
+        assert len({c.snr_db for c in layer}) == 1 and 10.0 <= layer[0].snr_db <= 30.0
+        own = [c for c in spec.components if c.snr_db is None]
+        lead = min(c.target_start_s for c in own)
+        end = max(c.target_start_s + c.duration_s for c in own)
+        assert min(c.target_start_s for c in layer) == pytest.approx(lead)
+        assert max(c.target_start_s + c.duration_s for c in layer) == pytest.approx(end)
+        assert len({round(c.duration_s, 9) for c in layer + own if spec.structure == "overlap"}) <= 1
+    assert seen > 200
+
+
+def test_the_layer_rate_is_per_sample_and_equal_across_labels_and_cells(manifest):
+    specs = list(Sampler(manifest, DrawConfig(f8=0.0)).epoch_specs(6000))
+    has = lambda sp: any(c.snr_db is not None for c in sp.components)         # noqa: E731
+    for label in (0, 1):
+        g = [sp for sp in specs if sp.file_fake == label]
+        assert abs(sum(map(has, g)) / len(g) - 0.5) < 0.04
+    for cell in range(1, 10):
+        g = [sp for sp in specs if sp.cell == cell]
+        assert abs(sum(map(has, g)) / len(g) - 0.5) < 0.08, cell
+    assert any(has(sp) for sp in specs if sp.render_mode == "whole_file")
+    assert any(has(sp) for sp in specs if sp.cell == 9)
+
+
+def test_a_flagged_row_never_goes_under_a_voice_absent_cell(manifest):
+    df = _flagged(manifest)
+    flagged = set(df.loc[df.noise_has_speech, "file_id"])
+    s = Sampler(df, DrawConfig(f8=0.0))
+    assert s.n_noise_restricted == len(flagged)
+    under_absent = under_present = 0
+    for spec in s.epoch_specs(4000):
+        for c in spec.components:
+            if c.snr_db is not None and c.file_id in flagged:
+                if spec.voice_present:
+                    under_present += 1
+                else:
+                    under_absent += 1
+    assert under_absent == 0 and under_present > 100
+
+
+def test_without_the_flag_every_noise_row_may_be_a_layer(manifest):
+    """Mutation: the same rows unflagged do go under voice-absent cells."""
+    df = _flagged(manifest)
+    flagged = set(df.loc[df.noise_has_speech, "file_id"])
+    df["noise_has_speech"] = False
+    s = Sampler(df, DrawConfig(f8=0.0))
+    assert s.n_noise_restricted == 0
+    assert any(c.snr_db is not None and c.file_id in flagged and not spec.voice_present
+               for spec in s.epoch_specs(2000) for c in spec.components)
+
+
+def test_a_cell_nine_sample_never_layers_its_own_file(manifest):
+    s = Sampler(manifest, DrawConfig(f8=1.0, p_noise_layer=1.0))
+    n = 0
+    for spec in s.epoch_specs(3000):
+        if spec.cell == 9:
+            n += 1
+            own = {c.file_id for c in spec.components if c.snr_db is None}
+            layer = {c.file_id for c in spec.components if c.snr_db is not None}
+            assert layer and not (own & layer)
+    assert n > 100
+
+
+def test_the_layer_decision_is_taken_before_the_cell(manifest):
+    a = Sampler(manifest, DrawConfig())
+    b = Sampler(manifest, DrawConfig(cell_mix=CellMix({**REFERENCE_MIX, 6: 0.095, 8: 0.125})))
+    for i in range(300):
+        la = [c.snr_db for c in a.sample_spec(i).components if c.snr_db is not None]
+        lb = [c.snr_db for c in b.sample_spec(i).components if c.snr_db is not None]
+        assert bool(la) == bool(lb) and (not la or la[0] == lb[0])
 
 
 # --------------------------------------------------------------------------- #
@@ -566,6 +663,8 @@ _KNOBS: dict[str, tuple] = {
     "crossfade_ms_range": ((10.0, 200.0), (300.0, 400.0), "crossfades", {}),
     "silence_lead_s": (3.0, 0.0, "starts", {}),
     "silence_tail_s": (1.0, 0.0, "ends", {}),
+    "p_noise_layer": (0.5, 0.0, "layers", {}),
+    "noise_snr_db_range": ((10.0, 30.0), (5.0, 5.0), "layer_snrs", {}),
     "augments": (AUGMENTS_V1, (), "transforms", {}),
     "normalize_menu": (NORMALIZE_MENU_V1, None, "normalize", {}),
     "scheme_version": ("strategy-v1", "strategy-v2", "scheme", {}),
@@ -595,6 +694,9 @@ def _observables(manifest, n=400, **overrides):
         "starts": tuple(round(c.target_start_s, 9) for s in composed for c in s.components),
         "ends": tuple(round(c.target_start_s + c.duration_s, 9)
                       for s in composed for c in s.components),
+        "layers": sum(any(c.snr_db is not None for c in s.components) for s in specs),
+        "layer_snrs": tuple(round(c.snr_db, 6) for s in specs for c in s.components
+                            if c.snr_db is not None),
         "transforms": tuple(str(s.transforms) for s in specs),
         "normalize": tuple(str(sorted(s.normalize.items())) for s in specs),
         "scheme": {s.scheme_version for s in specs},
@@ -635,6 +737,8 @@ _V1_DEFAULTS = {
     "crossfade_ms_range": (10.0, 200.0),
     "silence_lead_s": 3.0,
     "silence_tail_s": 1.0,
+    "p_noise_layer": 0.5,
+    "noise_snr_db_range": (10.0, 30.0),
     "augments": AUGMENTS_V1,
     "normalize_menu": NORMALIZE_MENU_V1,
     "scheme_version": "strategy-v1",
@@ -705,6 +809,7 @@ def test_a_non_default_config_round_trips(tmp_path):
         "gain_db_range": [-10.0, 10.0], "gain_db_mean": -1.0, "gain_db_sigma": 2.0,
         "sequential_prob": 0.75, "crossfade_ms_range": [5.0, 50.0],
         "silence_lead_s": 0.4, "silence_tail_s": 0.3,
+        "p_noise_layer": 0.2, "noise_snr_db_range": [15.0, 25.0],
         "augments": [{"name": "gain_jitter", "p": 0.5, "db_range": [-3.0, 3.0]},
                      {"name": "gaussian_noise", "p": 0.1, "snr_db_range": [20.0, 25.0]}],
         "normalize_menu": {"container": {"wav": 0.5, "mp3_64": 0.5},

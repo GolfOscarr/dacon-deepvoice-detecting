@@ -39,14 +39,20 @@ def manifest():
     return df
 
 
+#: The presence heads sit at the D-2 residual (~0.59 against the 0.60 gate),
+#: so the probe needs the acceptance-size draw to resolve it; at 6,000 the
+#: logistic fit over ten columns lands on either side of the gate.
+N_AUDIT = 12_000
+
+
 @pytest.fixture(scope="module")
 def new_report(manifest):
-    return run_audit(Sampler(manifest, DrawConfig()), manifest, n=6000)
+    return run_audit(Sampler(manifest, DrawConfig()), manifest, n=N_AUDIT)
 
 
 @pytest.fixture(scope="module")
 def old_report(manifest):
-    return run_audit(TrainingSampler(manifest, SamplerConfig(f8=1.0)), manifest, n=6000)
+    return run_audit(TrainingSampler(manifest, SamplerConfig(f8=1.0)), manifest, n=N_AUDIT)
 
 
 # --------------------------------------------------------------------------- #
@@ -197,3 +203,16 @@ def test_the_manifest_is_required(manifest):
 
 def test_hop_matches_the_harness():
     assert HOP_S == 0.05
+
+
+def test_layers_are_collapsed_apart_from_components_and_read_by_the_features(manifest):
+    s = Sampler(manifest, DrawConfig(p_noise_layer=1.0))
+    specs = list(s.epoch_specs(200))
+    f = draw_features(specs, manifest)
+    assert (f["noise_layer"] == 1).all() and f["noise_layer_snr_db"].between(10, 30).all()
+    for spec in specs:
+        c = collapse_tiles(spec)
+        layers = [d for d in c.components if d.snr_db is not None]
+        assert len(layers) == 1 and layers[0].role == "noise"
+        assert len([d for d in c.components if d.snr_db is None]) == len(
+            {(d.role, d.file_id) for d in spec.components if d.snr_db is None})

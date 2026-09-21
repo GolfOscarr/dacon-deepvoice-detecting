@@ -45,6 +45,12 @@ draw:
   # unmeasured -- next harness run with tail in the grid.
   silence_lead_s: 3.0
   silence_tail_s: 1.0
+  # DRAW-5. With p_noise_layer a pool-E row goes under the composite of ANY
+  # cell at U(10, 30) dB SNR, tiled like a component and scaled at render.
+  # Rows flagged noise_has_speech (D-14) never go under a voice_present = 0
+  # cell. The decision and the SNR are drawn before the cell.
+  p_noise_layer: 0.5
+  noise_snr_db_range: [10.0, 30.0]
   # DRAW-6. name, per-sample p, parameter ranges; drawn before the cell into
   # spec.transforms. A `<k>_range` the augment accepts as scalar `<k>` is
   # drawn at spec time (I1b sees the value); the others are drawn inside the
