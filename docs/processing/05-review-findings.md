@@ -1,5 +1,7 @@
 # 05 — Pre-PR review: bugs and risks in the strategy-v1 pipeline
 
+*Resolution: every §A item and the §B / §C items the owner did not defer are fixed under [06](06-remediation-plan.md); the re-measured state is [04](04-verification-report.md).*
+
 *Four independent read-only reviews of `feat/eda` at `ee23f2f` on 2026-09-24, one per slice
 (draw · render/ship/cache · corpus/folds · audit and training seams). Every finding was
 confirmed by running code against the built artifacts; the reviewers' scripts are not in the

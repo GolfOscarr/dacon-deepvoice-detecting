@@ -155,6 +155,17 @@ through three seams only, each with a tripwire:
 
 ### P9 — PR to `main`.
 
+## 2b · Status (2026-09-24)
+
+P1–P8 are built and committed on `feat/eda` (P1 `2431bbb`, P2 `406a834` + `146e2e9`, P4
+`20dc735`, P5 `17cd9f7`, P6 `a0142f7`, P8 `acae940`); P3 rebuilt the cache to 301,226 files.
+The measured state is [04](04-verification-report.md). Three rules changed on the way, each
+measured before it was changed: the music bucket is the whole pool per side, not the generator
+family (a 25-file family exhausts under a 40-tile slot and reads the label); an exhausted voice
+bucket is reused round-robin rather than left for the pool (speakers-per-slot read the label at
+0.81); tiles are level-equalised before placement (stitched loudness read `music_fake` at 0.78).
+P9 is the PR.
+
 ## 3 · What is deliberately not in this plan
 
 Korean fake voice (the owner sources it), the S-a / S-b shadow slices, FEAT-2 channels (D10's
