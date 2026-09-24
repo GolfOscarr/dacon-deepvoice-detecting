@@ -42,7 +42,15 @@ echo "node=$(hostname) job=${SLURM_ARRAY_JOB_ID:-?}_${TASK} gpu=${CUDA_VISIBLE_D
 nvidia-smi --query-gpu=name,memory.free --format=csv,noheader
 
 cd "$REPO"
+# outputs on wekafs, not /home (EFS): ~1 GB checkpoints x 18 passes x 8 tasks
+: "${RUNS_ROOT:=/data/project/private/dacon-runs}"
+mkdir -p "$RUNS_ROOT/$RUN" runs
+[ -e "runs/$RUN" ] || ln -sfn "$RUNS_ROOT/$RUN" "runs/$RUN"
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+# CUDA JIT cache on NODE-LOCAL disk: in ~/.nv (EFS) eight tasks serialised on its index
+# over NFS -- 22 s/step with the GPUs idle (docs/training/07 §3).
+export CUDA_CACHE_PATH="/tmp/cuda-cache-${SLURM_ARRAY_JOB_ID:-x}-${TASK}" CUDA_CACHE_MAXSIZE=4294967296
+mkdir -p "$CUDA_CACHE_PATH"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 exec "$DACON_VENV/bin/python" scripts/train.py \
   --manifest-dir "$MANIFEST_DIR" \
@@ -51,7 +59,7 @@ exec "$DACON_VENV/bin/python" scripts/train.py \
   --train configs/train_first_run.yaml \
   --weights "$WEIGHTS" \
   --stages joint \
-  --out "runs/$RUN" \
+  --out "$RUNS_ROOT/$RUN" \
   --device cuda \
   --draws 48000 \
   --eval-n 6000 \
