@@ -155,6 +155,16 @@ class FrontendConfig:
     #: EAT / SSLAM tokenise a mel spectrogram into a (F', T') grid and the wrapper
     #: needs F' to reshape. Must be set exactly when freq_pool.kind != "none".
     n_freq: int | None = None
+    #: BEATs only (docs/training/07 §3): encode the patch grid in windows of
+    #: this many patch columns (62 = 9.92 s, BEATs' 10 s pretraining length)
+    #: instead of as one sequence. Attention cost then grows linearly with
+    #: duration: a 60 s row was 3,000 tokens and 3.7 of a 3.9 s step. None =
+    #: one sequence per row (candidate A as specified).
+    window_patches: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.window_patches is not None and self.window_patches < 1:
+            raise ValueError(f"window_patches must be >= 1 or None, got {self.window_patches}")
 
 
 @dataclass(frozen=True)

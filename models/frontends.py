@@ -539,6 +539,8 @@ class BEATsFrontend(Frontend):
         widths = [int(self._frames_for(int(n))) for n in lengths.tolist()]
         t_max = max(widths)
 
+        if self.cfg.window_patches is not None:
+            return self._encode_windowed(wav, lengths, widths, t_max)
         out = wav.new_zeros(b, self.N_MELS // self.PATCH, t_max, self.output_dim)
         for i in range(b):
             n = int(lengths[i].item())
@@ -563,6 +565,46 @@ class BEATsFrontend(Frontend):
             grid = x.view(1, widths[i], self.N_MELS // self.PATCH,
                           self.output_dim)                         # (1, T', F', D)
             out[i, :, :widths[i], :] = grid[0].permute(1, 0, 2)    # -> (F', T', D)
+        return out
+
+    def _tokens(self, wav_1d: Tensor, width: int) -> Tensor:
+        """One row's valid prefix -> its projected patch tokens, (T' * F', D),
+        time-major: each patch column's F' frequency tokens are adjacent."""
+        fbank = self._fbank(wav_1d)
+        usable = width * self.PATCH
+        if fbank.shape[0] < usable:
+            fbank = torch.cat([fbank, fbank[-1:].expand(usable - fbank.shape[0], -1)], 0)
+        x = self.patch_embedding(fbank[:usable].unsqueeze(0).unsqueeze(0))
+        x = x.reshape(1, x.shape[1], -1).transpose(1, 2)
+        x = self.layer_norm(x)
+        if self.post_extract_proj is not None:
+            x = self.post_extract_proj(x)
+        return x[0]
+
+    def _encode_windowed(self, wav: Tensor, lengths: Tensor, widths: list[int],
+                         t_max: int) -> Tensor:
+        """`FrontendConfig.window_patches`: each row's patch grid is cut into
+        windows of W patch columns (the filterbank is computed over the whole
+        valid prefix first, so frame counts and masks are unchanged). Every
+        window is encoded on its own -- no window ever sees padding or another
+        row, so rule 2.4 holds -- and windows of equal length share one
+        encoder call across the batch, which is where the speed comes from.
+        """
+        f = self.N_MELS // self.PATCH
+        w = int(self.cfg.window_patches)
+        pieces: dict[int, list[tuple[int, int, Tensor]]] = {}
+        for i in range(wav.shape[0]):
+            tok = self._tokens(wav[i, :int(lengths[i].item())], widths[i])
+            for start in range(0, widths[i], w):
+                cols = min(w, widths[i] - start)
+                pieces.setdefault(cols, []).append(
+                    (i, start, tok[start * f:(start + cols) * f]))
+        out = wav.new_zeros(wav.shape[0], f, t_max, self.output_dim)
+        for cols, group in pieces.items():
+            x, _ = self.encoder(torch.stack([g[2] for g in group]))
+            grid = x.view(len(group), cols, f, self.output_dim)
+            for (i, start, _), g in zip(group, grid):
+                out[i, :, start:start + cols, :] = g.permute(1, 0, 2).to(out.dtype)
         return out
 
 
