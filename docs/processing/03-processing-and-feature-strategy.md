@@ -589,6 +589,8 @@ Steps 1–6 are one day and unblock training on the S-tier manifest; 7–11 are 
 
 ## 7 — Acceptance: the strategy is implemented when
 
+**Measured 2026-09-24 on the built artifacts: [04-verification-report.md](04-verification-report.md)** — items 1, 2, 5, 6 pass; 3 passes its first half (the DC and near-Nyquist residues are gone) and fails its second on level; 4 is written and G-EDA7 fires on the duration floor; 7 is measurable only on the metric half until `script.py` exists. The four open issues are in 04 §9.
+
 1. `training.audit.run_audit(n = 20_000)` on `configs/run_v1.yaml` over the built manifest:
    **13 of 13** pass (I2 = I2c = 0.000; I8 inside `[0.2, 0.8]`; I21 ≥ 3 families per fake role).
 2. `scripts/strategy/stream_harness.py` on the same stream: every **draw** feature < 0.60 ungrouped
