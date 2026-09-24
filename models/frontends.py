@@ -109,6 +109,15 @@ class Frontend(nn.Module):
         """
         return frames_for(n_samples, self.audio.sample_rate, self.fps)
 
+    def enable_grad_checkpointing(self) -> int:
+        """Checkpoint the transformer layers; returns how many. A frontend with
+        none (the stub) returns 0."""
+        layers = self._transformer_layers()
+        return enable_layer_checkpointing(layers) if layers is not None else 0
+
+    def _transformer_layers(self) -> nn.ModuleList | None:
+        return None
+
     def forward(self, wav: Tensor, lengths: Tensor | None = None) -> tuple[Tensor, Tensor]:
         """``wav`` is (B, S) at ``audio.sample_rate``; ``lengths`` is (B,) in samples."""
         if wav.dim() != 2:
@@ -283,6 +292,36 @@ def _apply_lora(module: nn.Module, targets: tuple[str, ...], rank: int,
     return sum(counts.values())
 
 
+def enable_layer_checkpointing(layers: nn.ModuleList) -> int:
+    """Recompute each transformer layer in the backward pass instead of storing
+    its activations (docs/training/07 §3: a 60 s clip held ~17 GiB of attention
+    maps across both trunks, and batch 8 ran the H200 out of memory).
+
+    The layer's ``forward`` is replaced on the INSTANCE, not wrapped in a new
+    module, so parameter names -- and every checkpoint and state_dict -- are
+    unchanged. Active only in training mode with grad enabled; evaluation and
+    inference run the original forward. ``torch.utils.checkpoint`` restores
+    the RNG state for the recompute, so dropout draws are the same.
+    """
+    from torch.utils.checkpoint import checkpoint
+
+    n = 0
+    for layer in layers:
+        if "_uncheckpointed_forward" in layer.__dict__:
+            continue
+        orig = layer.forward
+
+        def forward(*args, _orig=orig, _layer=layer, **kwargs):
+            if _layer.training and torch.is_grad_enabled():
+                return checkpoint(_orig, *args, use_reentrant=False, **kwargs)
+            return _orig(*args, **kwargs)
+
+        layer.__dict__["_uncheckpointed_forward"] = orig
+        layer.forward = forward
+        n += 1
+    return n
+
+
 class BEATsFrontend(Frontend):
     """BEATs (microsoft/unilm, MIT), truncated and LoRA-adapted.
 
@@ -398,6 +437,9 @@ class BEATsFrontend(Frontend):
         if "cfg" not in blob or "model" not in blob:
             raise ValueError(f"{path} is not a BEATs checkpoint (keys: {list(blob)})")
         return blob["cfg"], blob["model"]
+
+    def _transformer_layers(self) -> nn.ModuleList:
+        return self.encoder.layers
 
     def _truncate(self, layers: int | None, available: int) -> int:
         """Keep the first `layers` transformer blocks and DELETE the rest.
@@ -650,6 +692,9 @@ class XLSRFrontend(Frontend):
         self._apply_freeze()
         for p in self.model.feature_extractor.parameters():
             p.requires_grad_(False)
+
+    def _transformer_layers(self) -> nn.ModuleList:
+        return self.model.encoder.layers
 
     def _truncate(self, layers: int | None, available: int) -> int:
         """Keep the first `layers` blocks and DELETE the rest (as BEATs does)."""

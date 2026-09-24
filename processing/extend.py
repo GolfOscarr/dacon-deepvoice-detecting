@@ -8,7 +8,7 @@ filter decision kept) plus rows for:
 
 | corpus | pool | from |
 |---|---|---|
-| `ko-synth` | B (fake voice, ko) | `interim/ko-synth/<family>/metadata.csv` (docs/training/07 D-a) |
+| `ko-synth` | B (fake voice, ko) | `interim/ko-synth/<family>/metadata.csv` (07 D-a) |
 | `sonics-sep` | D (fake music) | `interim/sonics-sep/metadata.csv` (D-b) |
 | `realmusic-sep` | C (real music) | `interim/realmusic-sep/metadata.csv` (D-b) |
 | `libritts-r` | A (real voice, en) | a directory listing (D-c) |

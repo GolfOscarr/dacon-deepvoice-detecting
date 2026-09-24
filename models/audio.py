@@ -46,6 +46,23 @@ def prepare_waveform(wav: Tensor, cfg: AudioConfig) -> Tensor:
     raise ValueError(f"unknown channel policy {cfg.channels!r}")
 
 
+#: cuFFT caches one plan per transform length, with its workspace outside
+#: PyTorch's allocator (~70 MB each at these lengths). Filtering each row at
+#: its own length makes nearly every length new: a training run leaked ~0.75
+#: GB per step until cuFFT itself failed to allocate, and 1,200 test files of
+#: distinct lengths would do the same on the L4 (docs/training/07 §3).
+CUFFT_PLAN_CACHE_MAX = 8
+
+
+def _cap_cufft_plan_cache(device: torch.device) -> None:
+    if device.type != "cuda":
+        return
+    idx = device.index if device.index is not None else torch.cuda.current_device()
+    cache = torch.backends.cuda.cufft_plan_cache[idx]
+    if cache.max_size > CUFFT_PLAN_CACHE_MAX:
+        cache.max_size = CUFFT_PLAN_CACHE_MAX
+
+
 def bandpass(wav: Tensor, cfg: AudioConfig, lengths: Tensor | None = None) -> Tensor:
     """Restrict a waveform to ``cfg.band_hz``, or return it unchanged if None.
 
@@ -64,6 +81,7 @@ def bandpass(wav: Tensor, cfg: AudioConfig, lengths: Tensor | None = None) -> Te
     while doing exactly the wrong thing. The padding is not part of the file's
     signal under any framing.
     """
+    _cap_cufft_plan_cache(wav.device)
     if cfg.band_hz is None:
         return wav
     if wav.dim() != 2:

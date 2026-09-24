@@ -128,3 +128,5 @@ loop:
   frontend_lr_scale: 1.0
   # 0 = no per-step log; N = mean loss parts to <out_dir>/train_log.jsonl every N steps
   log_every: 0
+  # recompute the frontends' transformer layers in backward (same numbers, less memory)
+  grad_checkpointing: false

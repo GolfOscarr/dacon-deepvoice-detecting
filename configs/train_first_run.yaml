@@ -8,8 +8,10 @@ teachers:                       # frozen, training-only; never enter the inferen
   audio_teacher:  {name: sslam,   weights: null, freeze: true, output_dim: 768,  fps: 50.0,
                    adapter: {kind: none}, freq_pool: {kind: none}}
 epochs: 20
-batch_size: 32
-lr: 3.0e-4
+# 16: with layer checkpointing (loop.grad_checkpointing) a 60 s clip costs
+# ~2.8 GiB in training (8 x 60 s = 22 GiB measured), vs ~12.5 GiB without.
+batch_size: 16
+lr: 2.0e-4
 weight_decay: 1.0e-5
 precision: bf16
 seed: 0

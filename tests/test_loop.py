@@ -74,6 +74,9 @@ _OUT_DIR = "out_dir"
 _NOT_VARIABLE_ON_THIS_HARDWARE = {
     "device": "the test hardware has one device; a cuda probe would skip rather "
               "than check, which is the failure mode this table exists to avoid",
+    "grad_checkpointing": "must NOT move the run (a recompute); the stub has no "
+                          "transformer layers, and tests/test_grad_checkpointing.py "
+                          "asserts equal outputs and gradients on real layers",
     "render_workers": "must NOT move the run: tests/test_loop_pool.py asserts pooled "
                       "rendering trains the inline model bitwise",
 }

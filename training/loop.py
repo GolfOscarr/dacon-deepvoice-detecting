@@ -115,6 +115,10 @@ class LoopConfig:
     #: 0 = no per-step log. N > 0 appends the mean loss parts of the last N
     #: steps to `<out_dir>/train_log.jsonl` every N steps.
     log_every: int = 0
+    #: Recompute the frontends' transformer layers in the backward pass
+    #: (`models.frontends.enable_layer_checkpointing`): the same numbers at a
+    #: fraction of the activation memory (docs/training/07 §3).
+    grad_checkpointing: bool = False
 
     def __post_init__(self) -> None:
         if self.n_buckets < 1:
@@ -318,6 +322,9 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
     plan = stage_plan(stage, model.cfg)
     device = torch.device(loop_cfg.device)
     model.to(device)
+    if loop_cfg.grad_checkpointing:
+        for fe in model.frontends.values():
+            fe.enable_grad_checkpointing()
 
     if dataset.is_frozen:
         raise ValueError(

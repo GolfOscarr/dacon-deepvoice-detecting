@@ -178,3 +178,5 @@ loop:
   # LoRA and GeM at a fifth of the heads' rate.
   frontend_lr_scale: 0.2
   log_every: 50
+  # a 60 s clip holds ~17 GiB of attention maps across both trunks otherwise
+  grad_checkpointing: true

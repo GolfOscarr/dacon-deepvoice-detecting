@@ -43,6 +43,7 @@ nvidia-smi --query-gpu=name,memory.free --format=csv,noheader
 
 cd "$REPO"
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 exec "$DACON_VENV/bin/python" scripts/train.py \
   --manifest-dir "$MANIFEST_DIR" \
   --processing configs/processing_first_run.yaml \
