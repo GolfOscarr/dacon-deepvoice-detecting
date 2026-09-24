@@ -31,18 +31,18 @@ The decisions, in the order the pipeline meets them. `D-` ids are used throughou
 
 | id | decision | value | status | evidence |
 |---|---|---|---|---|
-| D-1 | composition policy `f8` | **1.0** (strict — every mixed sample composed) | FIXED | [02 §4.2](02-analysis-report.md#42-why--derived-not-fitted): only `f8 = 1` balances composedness on the component heads, for any mix |
-| D-2 | cell mix | reference `{.060 .130 .060 .135 .155 .125 .125 .095 .115}` | OPEN (sweep) | [02 §4.3](02-analysis-report.md#43-the-cell-mix-has-the-same-shape-of-gap): 0.60 presence-pattern residual on the component heads; minimax alternative reaches 0.51 |
-| D-3 | component take | `U(3, 8)` s, **strictly inside** the file (`edge_margin 0.5` s), random offset, **every role incl. whole-file** — **revised by D-21: `U(2, 3)` s, one take per sample** | FIXED (range OPEN with D-5) | [02 §3](02-analysis-report.md#3--crop-policies): music-only draw AUC 0.993 → 0.497 |
+| D-1 | composition policy `f8` | **1.0** (strict — every mixed sample composed) | FIXED (sweep 2026-09-24: `1.0` 18/18 · `0.5` 15/18 · `0.0` 13/18 at n = 20,000 over the built manifest; presence heads read composedness at 0.635 / 0.672, the fake heads at 0.636 under `f8 = 0`; I2c fails at both lower values) | [02 §4.2](02-analysis-report.md#42-why--derived-not-fitted): only `f8 = 1` balances composedness on the component heads, for any mix |
+| D-2 | cell mix | reference `{.060 .130 .060 .135 .155 .125 .125 .095 .115}` | FIXED (owner, 2026-09-24: reference mix kept; revisit only from per-head VAL EER) | [02 §4.3](02-analysis-report.md#43-the-cell-mix-has-the-same-shape-of-gap): 0.60 presence-pattern residual on the component heads; minimax alternative reaches 0.51 |
+| D-3 | component take | `U(3, 8)` s, **strictly inside** the file (`edge_margin 0.5` s), random offset, **every role incl. whole-file** — **revised by D-21: `U(2, 3)` s, one take per sample** | FIXED (range fixed with D-5 by the owner, 2026-09-24) | [02 §3](02-analysis-report.md#3--crop-policies): music-only draw AUC 0.993 → 0.497 |
 | D-4 | timeline fill | **tile** the take to its span with sigmoid joins, every role | FIXED | [02 §2](02-analysis-report.md#2--baseline-what-rundefaultyaml-draws-today): 52.8 % vs 13.9 % silence was the largest cue |
-| D-5 | component duration floor | **2.0 s** (timeline floor stays 4.0 s) — **revised by D-21: 4.0 s**, bound to the take (`floor − 2·margin ≥ take_hi`) | OPEN with D-3 | [02 §11](02-analysis-report.md#11--manifest-actions-in-hours): the 4 s floor drops 22.5 % of pool B's hours; 2 s recovers 63.5 h — reachable only with a 1 s take |
-| D-6 | silence lead / tail | lead `U(0, 3.0)` s, tail `U(0, 1.0)` s, **every sample** | lead FIXED · tail OPEN | [02 §5](02-analysis-report.md#5--silence): 0.595 → 0.553; tail unmeasured |
+| D-5 | component duration floor | **2.0 s** (timeline floor stays 4.0 s) — **revised by D-21: 4.0 s**, bound to the take (`floor − 2·margin ≥ take_hi`) | FIXED (owner, 2026-09-24: 4.0 s / `U(2, 3)` kept) | [02 §11](02-analysis-report.md#11--manifest-actions-in-hours): the 4 s floor drops 22.5 % of pool B's hours; 2 s recovers 63.5 h — reachable only with a 1 s take |
+| D-6 | silence lead / tail | lead `U(0, 3.0)` s, tail `U(0, 1.0)` s, **every sample** | FIXED (owner, 2026-09-24: tail `U(0, 1.0)` kept, unmeasured) | [02 §5](02-analysis-report.md#5--silence): 0.595 → 0.553; tail unmeasured |
 | D-7 | silence trimming | **off** | FIXED | A5b asymmetry (A 7.78 pp vs B 4.12 pp) |
 | D-8 | gain jitter | `U(−12, 12)` dB, `p = 1` | FIXED | [02 §6](02-analysis-report.md#6--level): music 0.683 → 0.599, voice 0.586 → 0.579 |
 | D-9 | loudness normalisation | **off** | FIXED | [02 §6](02-analysis-report.md#6--level): normalising raises the voice residue to 0.786 |
 | D-10 | DC removal | **on**, shipped | FIXED | [02 §7](02-analysis-report.md#7--dc-and-the-high-pass): a generator id (0.994) that inverts across archives (0.392) |
 | D-11 | high-pass | **none** (`band_hz[0] = 0`) | FIXED | [02 §7](02-analysis-report.md#7--dc-and-the-high-pass): 40 Hz removes 25–75 % of four vocoders' pair difference |
-| D-12 | upper band edge | `band_hz = [0, 7200]` | OPEN (ablate vs `null`) | [02 §8](02-analysis-report.md#8--bandwidth-the-resampler-shelf-and-codec): resampler shelf + SONICS 7.3 kHz rolloff |
+| D-12 | upper band edge | `band_hz = [0, 7200]` | FIXED (owner, 2026-09-24: `[0, 7200]` kept; `null` stays a training-time ablation) | [02 §8](02-analysis-report.md#8--bandwidth-the-resampler-shelf-and-codec): resampler shelf + SONICS 7.3 kHz rolloff |
 | D-13 | test-chain menu | mp3 64–192 / wav / flac; mono / stereo; 8 kHz + μ/A-law at 0.2 | FIXED (menu) | [data/06 A-S3/A-S4](../data/06-augmentation-spec.md); one menu for every cell |
 | D-14 | G-EDA6 actions | C → cell 5 (336), D → cell 8 (1,006), E restricted (1,032), 23 degenerate dropped | FIXED | [02 §11](02-analysis-report.md#11--manifest-actions-in-hours) |
 | D-15 | `artifact_family` | WaveFake → **3** families by measured correlation; others by generator name | FIXED | [02 §10](02-analysis-report.md#10--families-and-domains) |
@@ -51,7 +51,7 @@ The decisions, in the order the pipeline meets them. `D-` ids are used throughou
 | D-18 | model input | waveform → SSL frontend; **no handcrafted feature reaches the model**; scalars are sidecars | FIXED | [02 §7–§9](02-analysis-report.md#7--dc-and-the-high-pass): every scalar is a fingerprint |
 | D-19 | segmentation | `whole_file` first; `tiling 5 s / 2.5 s` fallback | FIXED (order) | [architecture/04 §6.1](../architecture/04-heads-and-pooling.md#61--cross-window-aggregation-and-the-duration-trap) |
 | D-20 | Tier-2 input channels | none in v1; ablate one at a time after the first scored model | FIXED (order) | §3 FEAT-2 |
-| D-22 | fold count | **4** folds, `probe_share 0.10`, PROBE row budget 2× | FIXED (measured in step 10) | the music head has 5 composable fake families (FakeMusicCaps) + SONICS' 2 whole-file-only; PROBE seals one and every VAL side needs a composable one, so 5 folds is infeasible with a music PROBE. Built: PROBE 20 % of rows, VAL folds 102k / 46k / 40k / 36k rows, music 1–2 families per fold (variance caveat), VG1 A1–A7 pass. OPEN: 5 folds with `allow_no_probe`, or a sixth fake-music family |
+| D-22 | fold count | **4** folds, `probe_share 0.10`, PROBE row budget 2× | FIXED (measured in step 10) | the music head has 5 composable fake families (FakeMusicCaps) + SONICS' 2 whole-file-only; PROBE seals one and every VAL side needs a composable one, so 5 folds is infeasible with a music PROBE. Built: PROBE 20 % of rows, VAL folds 102k / 46k / 40k / 36k rows, music 1–2 families per fold (variance caveat), VG1 A1–A7 pass. the 5-fold alternative was declined by the owner on 2026-09-24 |
 | D-21 | one take per sample, never capped by a file | `take` drawn once and shared by every role and row kind; `take_hi ≤ component_floor_s − 2·edge_margin_s` asserted | FIXED (measured in steps 3 and 6) | two cues the harness could not see: a take capped by a short file means more tiles, and pool B is short (39 % of fake-voice DOSS mass under 3 s of interior vs 15 % real) — `voice_fake` I1b 0.652; and a take drawn per role makes the larger of two join counts read as "two components" — `voice_present` 0.68–0.81. With both halves: presence 0.59 (the D-2 residual), `voice_fake` 0.50, `music_fake` 0.53; the capped control 0.755. Replaces the duration-matched weights tried first |
 
 ---
@@ -606,15 +606,15 @@ Steps 1–6 are one day and unblock training on the S-tier manifest; 7–11 are 
 
 ## 8 — Open decisions (do not resolve silently)
 
+On 2026-09-24 the owner fixed D-2, D-3/D-5, D-6, D-12 and D-22 at the values as built (rows above)
+and asked for the D-1 sweep; the sweep (D-1 row) leaves `f8 = 1.0` as the only value that passes the audit. What remains open:
+
 | id | decision | how it gets decided |
 |---|---|---|
-| D-2 | cell mix: reference (0.60 residual) vs minimax (3 % single-component cells) | per-head VAL EER on the first model, then G6 |
-| D-6 | `silence_tail_s` | next harness run with tail in the grid |
-| D-12 | `band_hz [0, 7200]` vs `null` + codec menu only | ablation on VAL + harness residue, then G6 |
-| D-1 | `f8` sweep `{1.0, 0.5, 0.0}` — the SONICS cost is real | audit re-run per value; the owner decides |
-| OFF-2 | `restrict_noise` as flag vs drop | flag once DRAW-5 exists; drop until then, recorded at G4 |
-| MODEL-1 | `layers` 6 / 9 / 12; specialist frontends (licence) | ablation; owner |
-| FEAT-2 | which channel first | F2-1 (delta) is the cheapest; F2-3 (whitening) the most informative |
+| OFF-2 | `restrict_noise` as flag vs drop | deferred by the owner; the flag exists (DRAW-5 built), no row dropped |
+| S-a / S-b | shadow slices (re-rendered files; Korean, sung) | deferred by the owner |
+| MODEL-1 | `layers` 6 / 9 / 12; specialist frontends (licence) | deferred by the owner; ablation after the first scored model |
+| FEAT-2 | which channel first | deferred by the owner; F2-1 (delta) is the cheapest; F2-3 (whitening) the most informative |
 | — | the test chain itself | X4 blocked at n = 3; every symmetric choice is robustness, not matching |
 
 ---
