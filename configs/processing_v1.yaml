@@ -133,3 +133,11 @@ folds:
   require_component_coverage: true
   allow_no_probe: false
   assigned_at: null
+  # 06 D1: the PROBE row budget counts drawable rows only, and PROBE's real
+  # side gets a floor in hours and atoms per role. 06 D4: folds balance the
+  # drawable hours of every (role, fake) pair, and a thin VAL side is a caveat.
+  probe_budget_drawable_only: true
+  probe_min_real_hours: 5.0
+  probe_min_real_atoms: 5
+  balance_on: hours
+  caveat_min_role_hours: 5.0

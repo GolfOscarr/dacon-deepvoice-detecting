@@ -54,6 +54,27 @@ def build_and_check(manifest: pd.DataFrame, cfg: FoldConfig, shadow_b: list[str]
         "probe_row_share": round(float((f["slice"] == "probe").mean()), 4),
         "caveats": list(plan.caveats),
     }
+    # drawable hours per (slice/fold, role, fake) -- the numbers 06 D1/D4 bind on
+    comp = manifest[manifest["row_kind"] == "component"].set_index("file_id")
+    role_of = {"A": ("voice", "real"), "B": ("voice", "fake"), "C": ("music", "real"),
+               "D": ("music", "fake"), "E": ("noise", "real")}
+    fk = f.set_index("file_id")
+    hours: dict[str, dict[str, float]] = {}
+    atoms: dict[str, dict[str, int]] = {}
+    for fid, row in comp.iterrows():
+        pool = row["pool"]
+        if pool not in role_of:
+            continue
+        where = "probe" if fk.at[fid, "slice"] == "probe" else f"val{int(fk.at[fid, 'fold'])}"
+        key = " ".join(role_of[pool][::-1])
+        bucket = hours.setdefault(where, {})
+        bucket[key] = bucket.get(key, 0.0) + row["duration_s"] / 3600
+        if where == "probe":
+            atoms.setdefault(key, set()).add(row["source_name"])
+    summary["drawable_hours"] = {w: {k: round(v, 1) for k, v in sorted(d.items())}
+                                 for w, d in sorted(hours.items())}
+    summary["probe_real_atoms"] = {k: len(v) for k, v in sorted(atoms.items())
+                                   if k.startswith("real")}
     return plan, report, summary
 
 

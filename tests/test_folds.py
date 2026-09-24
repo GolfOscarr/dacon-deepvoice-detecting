@@ -372,17 +372,36 @@ _FOLD_KNOBS: dict[str, tuple] = {
     "allow_no_probe": (False, True, "raises", {"probe_share": 0.0}),
     "assigned_at": ("2026-01-01T00:00:00+00:00", "2027-02-03T04:05:06+00:00",
                     "assigned_at", {}),
+    # 06 D1 / D4: the drawable budget, the real-side floor, the hours balance
+    "probe_budget_drawable_only": (True, False, "probe_rows", {"_manifest": "heavy_whole_file"}),
+    "probe_min_real_hours": (5.0, 0.0, "probe_rows", {"probe_min_real_atoms": 0}),
+    "probe_min_real_atoms": (5, 0, "probe_rows", {"probe_min_real_hours": 0.0}),
+    "balance_on": ("hours", "rows", "assignment", {}),
+    "caveat_min_role_hours": (5.0, 0.0, "caveats", {}),
 }
+
+
+def _heavy_whole_file(manifest):
+    """The built corpus's shape: one fake family that is almost all whole-file
+    rows, never drawn under f8 = 1 (25,426 SONICS files, 05 A2)."""
+    df = manifest.copy()
+    w = df.index[(df["row_kind"] == "whole_file") & df["cell"].isin([2, 4, 8])]
+    df.loc[w, ["artifact_family", "source_name"]] = "huge_whole_file_family"
+    df.loc[w, "domain_key"] = "huge"
+    df.loc[w, "duration_s"] = 600.0
+    return df
 
 
 def _fold_observables(manifest, **overrides):
     """One built table, reduced to everything a `FoldConfig` knob can move."""
+    if overrides.pop("_manifest", None) == "heavy_whole_file":
+        manifest = _heavy_whole_file(manifest)
     kwargs = {"assigned_at": "2026-01-01T00:00:00+00:00", **overrides}
     try:
         plan = build_folds(manifest, FoldConfig(**kwargs))
     except FoldInfeasible:
         return {"raises": True, "folds": None, "probe_rows": None,
-                "scheme": None, "caveats": None, "assigned_at": None}
+                "scheme": None, "caveats": None, "assigned_at": None, "assignment": None}
     frame = plan.frame
     return {
         "raises": False,
@@ -391,6 +410,7 @@ def _fold_observables(manifest, **overrides):
         "scheme": sorted(frame["scheme_version"].unique()),
         "caveats": plan.caveats,
         "assigned_at": sorted(frame["assigned_at"].unique()),
+        "assignment": tuple(frame.sort_values("file_id")["fold"].fillna(-1).astype(int)),
     }
 
 
@@ -424,6 +444,11 @@ _SHIPPED_FOLD_DEFAULTS = {
     # head that matters most, not a shortcut.
     "allow_no_probe": False,
     "assigned_at": None,
+    "probe_budget_drawable_only": True,
+    "probe_min_real_hours": 5.0,
+    "probe_min_real_atoms": 5,
+    "balance_on": "hours",
+    "caveat_min_role_hours": 5.0,
 }
 
 
@@ -456,3 +481,56 @@ def test_sealing_probe_never_starves_the_smaller_head(manifest):
     assert rotating["artifact_family"].nunique() >= N_FOLDS
     sealed = f[(f["slice"] == "probe") & f["artifact_family"].isin(seven.values())]
     assert sealed["artifact_family"].nunique() <= 7 - N_FOLDS
+
+
+# --------------------------------------------------------------------------- #
+# 06 D1 / D4: PROBE's real side, the drawable budget, the hours balance
+
+
+def _probe_real(plan, manifest):
+    f = plan.frame.set_index("file_id")
+    comp = manifest[manifest["row_kind"] == "component"]
+    probe = comp[f.loc[comp["file_id"], "slice"].to_numpy() == "probe"]
+    return {pool: (round(sub["duration_s"].sum() / 3600, 3), sub["source_name"].nunique())
+            for pool, sub in probe.groupby("pool")}
+
+
+def test_probe_real_side_meets_its_floor_within_the_rotation(manifest):
+    """The real floor is capped at the budget's share of the role's hours and
+    never takes a provider the rotation needs, so it holds on a tiny corpus
+    and on the built one alike (05 A2)."""
+    plan = build_folds(manifest, FoldConfig(assigned_at="2026-01-01T00:00:00+00:00"))
+    real = _probe_real(plan, manifest)
+    comp = manifest[manifest["row_kind"] == "component"]
+    for pool in ("A", "C", "E"):
+        total_h = comp.loc[comp["pool"] == pool, "duration_s"].sum() / 3600
+        floor_h = min(5.0, 2.0 * 0.10 * total_h)
+        hours, atoms = real[pool]
+        assert hours >= 0.5 * floor_h, (pool, hours, floor_h)
+        assert atoms >= 2, (pool, atoms)
+    off = build_folds(manifest, FoldConfig(assigned_at="2026-01-01T00:00:00+00:00",
+                                           probe_min_real_hours=0.0, probe_min_real_atoms=0))
+    assert sum(h for h, _ in _probe_real(off, manifest).values()) < \
+        sum(h for h, _ in real.values()), "the floor must seal MORE real audio than coverage alone"
+
+
+def test_whole_file_rows_do_not_spend_the_probe_budget(manifest):
+    """25,426 SONICS whole files, never drawn under f8 = 1, spent the whole
+    budget on the built corpus (05 A2)."""
+    df = _heavy_whole_file(manifest)
+    on = build_folds(df, FoldConfig(assigned_at="2026-01-01T00:00:00+00:00"))
+    off = build_folds(df, FoldConfig(assigned_at="2026-01-01T00:00:00+00:00",
+                                     probe_budget_drawable_only=False))
+    drawable = lambda p: int(((p.frame["slice"] == "probe")                      # noqa: E731
+                              & (p.frame["row_kind"] == "component")).sum())
+    assert drawable(on) >= drawable(off)
+
+
+def test_a_thin_val_side_on_a_role_is_a_caveat_in_hours(manifest):
+    plan = build_folds(manifest, FoldConfig(assigned_at="2026-01-01T00:00:00+00:00",
+                                            caveat_min_role_hours=1000.0))
+    assert any("VAL hours per fold" in c and "validate on under 1000 h" in c
+               for c in plan.caveats)
+    quiet = build_folds(manifest, FoldConfig(assigned_at="2026-01-01T00:00:00+00:00",
+                                             caveat_min_role_hours=0.0))
+    assert not any("validate on under" in c for c in quiet.caveats)
