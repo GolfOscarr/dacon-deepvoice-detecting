@@ -15,6 +15,7 @@ and independently fake, leaving a hard switch undefined.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import torch
@@ -27,7 +28,7 @@ from models.heads import SEDHead
 from models.outputs import branch_logit, to_probability
 from models.utils import align_time
 
-__all__ = ["DeepVoiceNet", "load_checkpoint", "save_checkpoint"]
+__all__ = ["DeepVoiceNet", "load_checkpoint", "save_checkpoint", "shipped_weights"]
 
 #: Config fields the *model* deliberately does not read, with who owns them.
 #: tests/test_model.py asserts that every other field is read somewhere, so a
@@ -203,12 +204,48 @@ def save_checkpoint(model: DeepVoiceNet, path: str | Path) -> None:
                 "state_dict": model.state_dict()}, Path(path))
 
 
-def load_checkpoint(path: str | Path, map_location="cpu") -> DeepVoiceNet:
+def shipped_weights(model_dir: str | Path) -> dict[str, str] | None:
+    """``model_dir/weights/<frontend>/`` -> {frontend: dir}, or None if absent.
+
+    The layout `script.py` ships: one directory per pretrained frontend, holding
+    what that frontend needs to *construct* (the BEATs ``.pt``; the XLS-R
+    snapshot with ``config.json``). Keys are frontend names from the config.
+    """
+    root = Path(model_dir) / "weights"
+    if not root.is_dir():
+        return None
+    return {p.name: str(p) for p in sorted(root.iterdir()) if p.is_dir()} or None
+
+
+def load_checkpoint(path: str | Path, map_location="cpu",
+                    weights: Mapping[str, str | Path] | None = None) -> DeepVoiceNet:
+    """Rebuild from the stored config, then load the state dict strictly.
+
+    ``weights`` maps frontend name -> pretrained checkpoint directory, replacing
+    the stored ``frontends.<name>.weights``. ⚠️ A pretrained frontend (BEATs,
+    XLS-R) reads its checkpoint at *construction* for the architecture, so the
+    stored path -- the training machine's absolute /data/... path -- must
+    resolve wherever this runs. On the offline test server it will not;
+    `script.py` passes `shipped_weights(model_dir)`. Every weight is then
+    overwritten by the strict load below, so which copy of the pretrained file
+    is read changes no number -- a test asserts that bitwise.
+    """
+    import dataclasses
+
     blob = torch.load(Path(path), map_location=map_location, weights_only=False)
     if "config" not in blob or "state_dict" not in blob:
         raise ValueError(
             f"{path}: not a DeepVoiceNet checkpoint (expected 'config' and 'state_dict')")
-    model = DeepVoiceNet(_model_from_dict(blob["config"]))
+    cfg = _model_from_dict(blob["config"])
+    if weights:
+        unknown = sorted(set(weights) - set(cfg.frontends))
+        if unknown:
+            raise ValueError(f"weights names frontends {unknown} not in the checkpoint's "
+                             f"config {sorted(cfg.frontends)}")
+        cfg = dataclasses.replace(cfg, frontends={
+            k: (dataclasses.replace(v, weights=str(weights[k])) if k in weights else v)
+            for k, v in cfg.frontends.items()})
+    model = DeepVoiceNet(cfg)
     # strict=True raises on any missing or unexpected key. That is the point: the
     # config was rebuilt from the same blob, so a mismatch means the checkpoint is
     # not what it claims to be rather than that the architecture drifted.

@@ -1,0 +1,55 @@
+# The first training run — docs/training/07-first-run-plan.md §2.
+# A's BEATs trunk at full depth, plus an XLS-R-300M speech trunk that the voice and file
+# branches read beside it. Everything not named in 07 §2 is candidate A's.
+name: c_first_run
+seed: 0
+
+frontends:
+  audio:
+    name: beats            # MIT
+    weights: null          # REQUIRED at build time: pass
+                           #   scripts/train.py --weights audio=DIR,speech=DIR
+    layers: null           # all 12: truncation was unmeasured and the L4 budget allows it
+    freeze: true
+    output_dim: 768
+    fps: 6.25              # 100 fps mel / patch stride 16; BEATsFrontend refuses anything else
+    adapter: {kind: lora, rank: 16, alpha: 32.0,
+              targets: [q_proj, k_proj, v_proj, out_proj, fc1, fc2]}
+    n_freq: 8
+    freq_pool: {kind: gem, p_init: 3.0, learnable: true}
+  speech:
+    name: xlsr_300m        # Apache-2.0, facebook/wav2vec2-xls-r-300m
+    weights: null          # REQUIRED: a local snapshot directory (config.json + weights)
+    layers: 12             # of 24
+    freeze: true
+    output_dim: 1024
+    fps: 50.0              # conv strides multiply to 320 samples; XLSRFrontend refuses anything else
+    adapter: {kind: lora, rank: 16, alpha: 32.0,
+              # fc1/fc2 are mapped to Wav2Vec2's intermediate_dense/output_dense
+              targets: [q_proj, k_proj, v_proj, out_proj, fc1, fc2]}
+    freq_pool: {kind: none}          # wav2vec2 family has no frequency axis
+
+branches:
+  voice:
+    sources: [speech, audio]
+    align_to: audio
+    column: VOICE_FAKE_PROB
+    masked_by: voice_present
+  music:  {sources: audio, column: MUSIC_FAKE_PROB,     masked_by: music_present}
+  file:
+    sources: [speech, audio]
+    align_to: audio
+    column: FILE_FAKE_PROB
+    masked_by: null
+    head: {hidden: 768}
+  v_pres: {sources: audio, column: VOICE_PRESENT_PROB,  masked_by: null}
+  m_pres: {sources: audio, column: MUSIC_PRESENT_PROB,  masked_by: null}
+
+segmentation: {mode: whole_file}
+aggregation:  {kind: topk_mean, k: 3}
+file_head:    {mode: learned}
+audio:        {sample_rate: 16000, channels: downmix, band_hz: null}
+runtime:      {precision: fp16, compile: false, batch_size: 8, num_workers: 5}
+output:       {dtype: float64, squash: softsign, logit_scale: 1.0}
+distill:      {enabled: false}
+aux:          {separation_head: false}

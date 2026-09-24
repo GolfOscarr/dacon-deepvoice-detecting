@@ -46,9 +46,16 @@ def main() -> int:
     ap.add_argument("--model-dir", default=str(HERE / "model"))
     ap.add_argument("--probe", action="store_true", help="P0-a: every column 0.5")
     ap.add_argument("--batch-size", type=int, default=8)
-    ap.add_argument("--device", default="cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu")
+    ap.add_argument("--device", default=None,
+                    help="default: cuda when torch sees a GPU, else cpu")
     args = ap.parse_args()
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    if args.device is None:
+        # 🔴 Not CUDA_VISIBLE_DEVICES: a server that does not set it would have
+        # run all 1,200 files on CPU and blown the 60-min limit without a word.
+        import torch
+        args.device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"device {args.device}", flush=True)
 
     files = list_test_files(_test_dir(args.test_dir))
     if not files:
@@ -64,11 +71,15 @@ def main() -> int:
         print(f"P0-a contract probe: {len(files)} files, every column 0.5", flush=True)
     else:
         import torch
-        from models.model import load_checkpoint
+        from models.model import load_checkpoint, shipped_weights
         assert weights.stat().st_size > 1_000_000, "model weights missing/truncated"
         cfg = processing_config_from_dict(json.loads(chain.read_text(encoding="utf-8")))
         ship_cfg = cfg.ship
-        model = load_checkpoint(weights, map_location="cpu")
+        # Pretrained frontends read their checkpoint at construction, and the
+        # stored paths are the training machine's: model/weights/<frontend>/
+        # replaces them (the BEATs .pt; the XLS-R dir with config.json).
+        model = load_checkpoint(weights, map_location="cpu",
+                                weights=shipped_weights(model_dir))
         if model.cfg.audio.band_hz is not None:
             raise SystemExit("model.cfg.audio.band_hz is set: the band limit is the shipped "
                              "chain's, and would be applied twice")
