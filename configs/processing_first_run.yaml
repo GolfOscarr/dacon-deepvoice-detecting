@@ -1,3 +1,6 @@
+# THE FIRST REAL RUN (docs/training/07): processing_v1.yaml plus the language
+# balance (D-d), strategy-v3, and the loop knobs of §3. Everything else is v1's.
+#
 # The data-processing pipeline's v1 draw -- docs/processing/03 §5, loaded by
 # `processing.config.load_processing_config`. Independent of the training
 # run configs (configs/run_*.yaml): this is what `processing.sampler.Sampler`
@@ -19,9 +22,11 @@ draw:
   f8: 1.0
   # D-16. DOSS cap as a sampling weight, on component AND whole-file rows.
   domain_cap: 500
-  # docs/training/07 D-d: per-language shares of each voice pool, equal on
-  # the real and fake side. null = off (v1); the first run sets it.
-  lang_shares: null
+  # docs/training/07 D-d. Each voice pool (real A, fake B) is rescaled after the
+  # DOSS cap so every language holds the same share on both sides. `ja` exists on
+  # the fake side only (JSUT) and is removed; `other` is MLAAD's long tail, fake
+  # side only, kept small for its generator diversity.
+  lang_shares: {ko: 0.40, en: 0.35, zh: 0.20, ja: 0.0, other: 0.05}
   # DRAW-1. The competition's own range; drawn first.
   duration_range: [4.0, 60.0]
   # D-3 / D-21. ONE take per sample, shared by every role and row kind,
@@ -73,7 +78,7 @@ draw:
     channels:  {mono: 0.5, stereo: 0.5}
     telephone: {none: 0.80, ulaw: 0.10, alaw: 0.05, plain: 0.05}
     telephone_hz: 8000
-  scheme_version: strategy-v2
+  scheme_version: strategy-v3
   # Leave false: it exists for the audit's own mutation tests.
   allow_unsound_mix: false
 
@@ -159,19 +164,17 @@ loop:
   # 0 disables the EMA entirely.
   ema_decay: 0.999
   grad_clip: 5.0
-  device: cpu
+  device: cuda
   # 0 = checkpoint at pass boundaries only.
   checkpoint_every: 0
   # Critical: a run with max_steps set is a TRUNCATED run. StageResult.truncated
   # says so, and its numbers are not quotable.
   max_steps: null
-  # docs/training/07 §3. 0 = render inline; N = N worker processes, same batches.
-  render_workers: 0
-  # constant | cosine (linear warmup, then cosine to min_lr_ratio of the base rate)
-  lr_schedule: constant
-  warmup_steps: 0
-  min_lr_ratio: 0.0
-  # the frontends' trainable parameters run at this multiple of the base rate
-  frontend_lr_scale: 1.0
-  # 0 = no per-step log; N = mean loss parts to <out_dir>/train_log.jsonl every N steps
-  log_every: 0
+  # docs/training/07 §3: 7 render workers per GPU task (8 CPUs each).
+  render_workers: 7
+  lr_schedule: cosine
+  warmup_steps: 1000
+  min_lr_ratio: 0.05
+  # LoRA and GeM at a fifth of the heads' rate.
+  frontend_lr_scale: 0.2
+  log_every: 50

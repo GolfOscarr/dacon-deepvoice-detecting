@@ -181,6 +181,10 @@ class Sampler:
     # -- pools and DOSS ------------------------------------------------------ #
 
     def _make_pool(self, rows: pd.DataFrame, role: str, fake: bool) -> _Pool:
+        if role == "voice" and self.cfg.lang_shares is not None and not rows.empty:
+            # share 0 removes the language outright: the bucket fallback draws
+            # from the whole pool, so a zero weight alone would still leak it
+            rows = rows[self._lang_of(rows).map(dict(self.cfg.lang_shares)).gt(0)]
         if rows.empty:
             empty = np.empty(0, dtype=int)
             return _Pool(np.empty(0, dtype=object), np.empty(0), empty, np.empty(0),
@@ -188,6 +192,8 @@ class Sampler:
         # 06 D2: a real row's domain is its publisher atom, capped like a generator
         domain = rows["domain_key"].where(rows["domain_key"].notna(), rows["source_name"])
         weights = self._doss_weights(domain)
+        if role == "voice" and self.cfg.lang_shares is not None:
+            weights = self._lang_balanced(rows, weights)
         codes, _ = pd.factorize(bucket_keys(rows, role, fake), sort=True)
         flagged = (rows["noise_has_speech"].fillna(False).astype(bool).to_numpy()
                    if role == "noise" and "noise_has_speech" in rows.columns
@@ -200,6 +206,29 @@ class Sampler:
             members[int(code)] = (idx, duration[idx])
         return _Pool(rows["file_id"].astype(str).to_numpy(dtype=object), duration,
                      codes.astype(int), weights, flagged, members, (order, duration[order]))
+
+    def _lang_of(self, rows: pd.DataFrame) -> pd.Series:
+        """Each row's language key: its `lang`, or `other` when unlisted."""
+        if "lang" not in rows.columns:
+            raise ValueError("draw.lang_shares is set but the manifest has no `lang` column")
+        listed = [k for k, _ in self.cfg.lang_shares]
+        lang = rows["lang"].fillna("other").astype(str)
+        return lang.where(lang.isin(listed), "other")
+
+    def _lang_balanced(self, rows: pd.DataFrame, weights: np.ndarray) -> np.ndarray:
+        """docs/training/07 D-d: rescale so each language holds its configured
+        share of the pool, after the DOSS cap and within it."""
+        shares = dict(self.cfg.lang_shares)
+        lang = self._lang_of(rows).to_numpy()
+        out = np.zeros_like(weights)
+        for code in np.unique(lang):
+            m = lang == code
+            mass = weights[m].sum()
+            if mass > 0:
+                out[m] = weights[m] / mass * shares.get(code, 0.0)
+        if out.sum() <= 0:
+            raise ValueError("lang_shares gives every language of a voice pool share 0")
+        return out / out.sum()
 
     def _doss_weights(self, domain: pd.Series) -> np.ndarray:
         """``w(file) = min(count(domain), cap) / count(domain)``, normalised."""

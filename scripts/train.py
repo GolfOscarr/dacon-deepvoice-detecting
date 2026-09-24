@@ -209,6 +209,46 @@ def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
                       tripwires=tripwires), caveats, selection
 
 
+def train_all_data(*, manifest, folds_tbl, args, run_cfg, train_cfg) -> str:
+    """docs/training/07 §3: train on TRAIN + VAL of every fold (PROBE stays
+    sealed) and save the selected weights. No validation: nothing is held out,
+    so the fold runs of the same recipe are what say how far to train."""
+    view = apply_folds(manifest, folds_tbl, 0).copy()
+    view.loc[view["slice"] == "val", "slice"] = "train"
+    index = ManifestIndex.from_frame(view)
+    rcfg = run_cfg.render
+    if args.corpus_root is not None:
+        rcfg = dataclasses.replace(rcfg, root=pathlib.Path(args.corpus_root))
+    out = pathlib.Path(args.out) / f"all_data_seed{train_cfg.seed}"
+    print(f"\n=== all data, seed {train_cfg.seed}: "
+          f"{(view['slice'] == 'train').sum()} train rows ===", flush=True)
+    sampler = Sampler(view, run_cfg.draw, slice_="train", fold=None)
+    ds = SpecDataset.from_sampler(sampler, args.draws, index, rcfg,
+                                  seed=train_cfg.seed, ship=run_cfg.ship)
+    loop_cfg = dataclasses.replace(
+        run_cfg.loop, out_dir=out, device=args.device,
+        max_steps=(args.max_steps if args.max_steps is not None
+                   else run_cfg.loop.max_steps),
+        checkpoint_every=(args.checkpoint_every if args.checkpoint_every is not None
+                          else run_cfg.loop.checkpoint_every))
+    model = build_model(args.model, args.weights)
+    check_chain(model, ds)
+    t0 = time.time()
+    results = run_schedule(model, ds, train_cfg=train_cfg, loop_cfg=loop_cfg,
+                           stages=args.stages)
+    print(f"  trained {sum(r.steps for r in results)} step(s) in {time.time() - t0:.0f}s",
+          flush=True)
+    how = "soup-all" if (args.select == "soup" and args.soup_all_stages) else args.select
+    selection = select_weights(model, results, how)
+    out.mkdir(parents=True, exist_ok=True)
+    save_checkpoint(model, out / "scored.pt")
+    (out / "selection.txt").write_text(selection + "\n", encoding="utf-8")
+    (out / "processing.json").write_text(json.dumps(dump_processing_config(run_cfg), indent=2),
+                                         encoding="utf-8")
+    print(f"  weights saved: {selection} -> {out / 'scored.pt'}", flush=True)
+    return selection
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -226,6 +266,10 @@ def main() -> int:
                         "run_*.yaml is the training sampler's and is not read")
     p.add_argument("--weights", help="frontend checkpoint dir; omit for a stub config")
     p.add_argument("--folds", default="0", help="comma-separated, or 'all'")
+    p.add_argument("--all-data", action="store_true",
+                   help="train on TRAIN+VAL of every fold (PROBE sealed), no validation; "
+                        "writes <out>/all_data_seed<seed>/ (docs/training/07 §3)")
+    p.add_argument("--seed", type=int, help="override TrainConfig.seed (draw and batch order)")
     p.add_argument("--stages", default=",".join(STAGES),
                    help=f"comma-separated subset of {STAGES}, in order")
     p.add_argument("--select", choices=SELECTIONS, default="raw",
@@ -270,7 +314,8 @@ def main() -> int:
     if run_cfg.folds.scheme_version is None:
         run_cfg = dataclasses.replace(run_cfg, folds=dataclasses.replace(
             run_cfg.folds, scheme_version=str(manifest["scheme_version"].iloc[0])))
-    for field, value in (("epochs", args.epochs), ("batch_size", args.batch_size)):
+    for field, value in (("epochs", args.epochs), ("batch_size", args.batch_size),
+                         ("seed", args.seed)):
         if value is not None:
             train_cfg = dataclasses.replace(train_cfg, **{field: value})
 
@@ -294,6 +339,11 @@ def main() -> int:
         print(f"⚠️  max_steps={args.max_steps}: every stage is truncated and the run is "
               f"NOT QUOTABLE")
     if args.dry_run:
+        return 0
+
+    if args.all_data:
+        train_all_data(manifest=manifest, folds_tbl=folds_tbl, args=args,
+                       run_cfg=run_cfg, train_cfg=train_cfg)
         return 0
 
     results, caveats, selections = [], [], set()

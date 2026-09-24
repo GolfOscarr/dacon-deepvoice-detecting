@@ -187,6 +187,14 @@ class DrawConfig:
     #: count`` -- and applied to whole-file rows too, which ``training.sampler``
     #: draws uniformly.
     domain_cap: int = 500
+    #: docs/training/07 D-d. ``None`` = off. Otherwise ``(lang, share)`` pairs:
+    #: after the DOSS cap, each voice pool's weight is rescaled so language
+    #: ``lang`` holds ``share`` of it (renormalised over the languages the pool
+    #: has), on the real AND the fake side alike, so language alone does not
+    #: predict fakeness. A language not listed counts as ``other``; share 0
+    #: removes a language. Needs the manifest's ``lang`` column. YAML may give
+    #: a mapping; it is stored as sorted pairs so the config stays hashable.
+    lang_shares: tuple[tuple[str, float], ...] | None = None
 
     # -- DRAW-1: the timeline ----------------------------------------------- #
     duration_range: tuple[float, float] = (4.0, 60.0)
@@ -270,6 +278,14 @@ class DrawConfig:
                 f"under bucket tiling, docs/processing/06 D5)")
         if self.domain_cap < 1:
             raise ValueError(f"domain_cap must be >= 1, got {self.domain_cap}")
+        if self.lang_shares is not None:
+            pairs = (self.lang_shares.items() if isinstance(self.lang_shares, Mapping)
+                     else self.lang_shares)
+            pairs = tuple(sorted((str(k), float(v)) for k, v in pairs))
+            if not pairs or any(v < 0 or v != v for _, v in pairs) \
+                    or sum(v for _, v in pairs) <= 0:
+                raise ValueError(f"lang_shares must be >= 0 with a positive sum, got {pairs}")
+            object.__setattr__(self, "lang_shares", pairs)
         for name in ("silence_lead_s", "silence_tail_s"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
@@ -421,6 +437,8 @@ def dump_processing_config(cfg: ProcessingConfig) -> dict:
                 section[key] = str(value)
             elif key == "augments":
                 section[key] = [a.to_flat() for a in getattr(cfg, name).augments]
+            elif key == "lang_shares" and value is not None:
+                section[key] = {k: v for k, v in value}
             elif key == "preprocess":
                 section[key] = [s.to_flat() for s in getattr(cfg, name).preprocess]
             elif isinstance(value, tuple):

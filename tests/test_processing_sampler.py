@@ -46,6 +46,9 @@ def _corpus_like_buckets(m):
     m = m.copy()
     v = m.index[m.pool.isin(["A", "B"])]
     m.loc[v, "speaker_ref_id"] = [f"{p}_spk{i % 2}" for i, p in enumerate(m.loc[v, "pool"])]
+    # one language per speaker bucket, so `lang_shares` has something to move
+    m["lang"] = None
+    m.loc[v, "lang"] = [("ko", "en")[i % 2] for i in range(len(v))]
     return m
 
 
@@ -704,6 +707,7 @@ _KNOBS: dict[str, tuple] = {
     "noise_snr_db_range": ((10.0, 30.0), (5.0, 5.0), "layer_snrs", {}),
     "augments": (AUGMENTS_V1, (), "transforms", {}),
     "normalize_menu": (NORMALIZE_MENU_V1, None, "normalize", {}),
+    "lang_shares": (None, {"ko": 1.0}, "component_files", {}),
     "scheme_version": ("strategy-v1", "strategy-v2", "scheme", {}),
 }
 
@@ -760,6 +764,7 @@ _V1_DEFAULTS = {
     "cell_mix": CellMix(),
     "f8": 1.0,
     "domain_cap": 500,
+    "lang_shares": None,
     "duration_range": (4.0, 60.0),
     "take_range_s": (1.5, 2.5),
     "edge_margin_s": 0.5,
@@ -843,7 +848,7 @@ def test_a_non_default_config_round_trips(tmp_path):
     alt = {"draw": {
         "cell_mix": {"p": {1: 0.060, 2: 0.130, 3: 0.060, 4: 0.135, 5: 0.155,
                            6: 0.095, 7: 0.125, 8: 0.125, 9: 0.115}},
-        "f8": 0.5, "domain_cap": 42,
+        "f8": 0.5, "domain_cap": 42, "lang_shares": {"ko": 0.5, "en": 0.5},
         "duration_range": [5.0, 30.0], "take_range_s": [1.0, 1.5],
         "edge_margin_s": 0.25, "component_floor_s": 2.5,
         "gain_db_range": [-10.0, 10.0], "gain_db_mean": -1.0, "gain_db_sigma": 2.0,
@@ -871,6 +876,8 @@ def test_a_non_default_config_round_trips(tmp_path):
             assert [a.to_flat() for a in got] == v
         elif k == "normalize_menu":
             assert got == NormalizeMenu(**v)
+        elif k == "lang_shares":
+            assert got == tuple(sorted(v.items()))
         elif isinstance(v, list):
             assert got == tuple(v)
         else:

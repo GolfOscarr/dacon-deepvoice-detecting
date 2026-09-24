@@ -118,3 +118,13 @@ loop:
   # Critical: a run with max_steps set is a TRUNCATED run. StageResult.truncated
   # says so, and its numbers are not quotable.
   max_steps: null
+  # docs/training/07 §3. 0 = render inline; N = N worker processes, same batches.
+  render_workers: 0
+  # constant | cosine (linear warmup, then cosine to min_lr_ratio of the base rate)
+  lr_schedule: constant
+  warmup_steps: 0
+  min_lr_ratio: 0.0
+  # the frontends' trainable parameters run at this multiple of the base rate
+  frontend_lr_scale: 1.0
+  # 0 = no per-step log; N = mean loss parts to <out_dir>/train_log.jsonl every N steps
+  log_every: 0

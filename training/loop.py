@@ -31,9 +31,11 @@ the split keep resolving:
 from __future__ import annotations
 
 import hashlib
+import math
+import multiprocessing as mp
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -95,12 +97,41 @@ class LoopConfig:
     #: Replay speed and the tests. A run with `max_steps` set is a truncated
     #: run -- `StageResult.truncated` says so, and it is not quotable.
     max_steps: int | None = None
+    #: 0 renders inline. N > 0 renders in N worker processes, in order: a render
+    #: is a pure function of its spec (processing.render pins one torch thread
+    #: and keys its RNG on the spec), so the batches are the inline batches and
+    #: the bitwise-resume guarantee is unchanged (docs/training/07 §3).
+    render_workers: int = 0
+    #: "constant" (the historical behaviour) or "cosine": linear warmup over
+    #: `warmup_steps`, then cosine decay to `min_lr_ratio` of the base rate at
+    #: the last step of the stage. A pure function of the global step, so a
+    #: resume needs no scheduler state.
+    lr_schedule: str = "constant"
+    warmup_steps: int = 0
+    min_lr_ratio: float = 0.0
+    #: The frontends' trainable parameters (LoRA, GeM) run at this multiple of
+    #: the base rate; the heads at the base rate.
+    frontend_lr_scale: float = 1.0
+    #: 0 = no per-step log. N > 0 appends the mean loss parts of the last N
+    #: steps to `<out_dir>/train_log.jsonl` every N steps.
+    log_every: int = 0
 
     def __post_init__(self) -> None:
         if self.n_buckets < 1:
             raise ValueError(f"n_buckets must be >= 1, got {self.n_buckets}")
         if self.max_steps is not None and self.max_steps < 1:
             raise ValueError(f"max_steps must be >= 1 or None, got {self.max_steps}")
+        if self.render_workers < 0:
+            raise ValueError(f"render_workers must be >= 0, got {self.render_workers}")
+        if self.lr_schedule not in ("constant", "cosine"):
+            raise ValueError(f"lr_schedule must be constant|cosine, got {self.lr_schedule!r}")
+        if self.warmup_steps < 0:
+            raise ValueError(f"warmup_steps must be >= 0, got {self.warmup_steps}")
+        if not 0.0 <= self.min_lr_ratio <= 1.0:
+            raise ValueError(f"min_lr_ratio must be in [0, 1], got {self.min_lr_ratio}")
+        if not self.frontend_lr_scale > 0:
+            raise ValueError(
+                f"frontend_lr_scale must be > 0, got {self.frontend_lr_scale}")
 
 
 @dataclass
@@ -179,6 +210,66 @@ def spec_digest(specs: Sequence[SampleSpec]) -> str:
 def _render_batch(specs: Sequence[SampleSpec], indices: Sequence[int],
                   index: ManifestIndex, cfg: RenderConfig) -> dict[str, Any]:
     return collate([render(specs[i], index, cfg) for i in indices])
+
+
+_WORKER: dict[str, Any] = {}
+
+
+def _worker_init(index: ManifestIndex, cfg: RenderConfig) -> None:
+    _WORKER["index"], _WORKER["cfg"] = index, cfg
+
+
+def _worker_render(spec: SampleSpec):
+    return render(spec, _WORKER["index"], _WORKER["cfg"])
+
+
+def _iter_batches(specs: Sequence[SampleSpec], batches: Sequence[Sequence[int]],
+                  first: int, index: ManifestIndex, cfg: RenderConfig,
+                  pool) -> Iterator[tuple[int, dict[str, Any]]]:
+    """``(batch_index, collated batch)`` from ``first`` on, inline or pooled.
+
+    Pooled: every sample of the pass is submitted in batch order, ``imap``
+    returns them in that order, and they are regrouped into the same batches
+    the inline path builds. Submission runs ahead in windows so the render
+    queue cannot outgrow memory when the GPU is the slower side.
+    """
+    if pool is None:
+        for b in range(first, len(batches)):
+            yield b, _render_batch(specs, batches[b], index, cfg)
+        return
+    window = 64
+    for lo in range(first, len(batches), window):
+        chunk = range(lo, min(lo + window, len(batches)))
+        flat = [specs[i] for b in chunk for i in batches[b]]
+        rendered = pool.imap(_worker_render, flat, chunksize=1)
+        for b in chunk:
+            yield b, collate([next(rendered) for _ in batches[b]])
+
+
+def lr_factor(step: int, total: int, cfg: LoopConfig) -> float:
+    """The multiple of the base rate at optimizer step ``step`` (0-based)."""
+    if cfg.lr_schedule == "constant":
+        return 1.0
+    if cfg.warmup_steps and step < cfg.warmup_steps:
+        return (step + 1) / cfg.warmup_steps
+    span = max(1, total - cfg.warmup_steps)
+    t = min(1.0, (step - cfg.warmup_steps) / span)
+    return cfg.min_lr_ratio + (1 - cfg.min_lr_ratio) * 0.5 * (1 + math.cos(math.pi * t))
+
+
+def _param_groups(model: DeepVoiceNet, params: Sequence[torch.nn.Parameter],
+                  base_lr: float, cfg: LoopConfig) -> list[dict[str, Any]]:
+    """Heads at the base rate, frontend parameters at ``frontend_lr_scale``."""
+    fe = {id(p) for p in model.frontends.parameters()}
+    heads = [p for p in params if id(p) not in fe]
+    front = [p for p in params if id(p) in fe]
+    groups = []
+    if heads:
+        groups.append({"params": heads, "lr": base_lr, "base_lr": base_lr})
+    if front:
+        lr = base_lr * cfg.frontend_lr_scale
+        groups.append({"params": front, "lr": lr, "base_lr": lr})
+    return groups
 
 
 def check_chain(model: DeepVoiceNet, dataset: SpecDataset) -> None:
@@ -273,6 +364,11 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
 
     group_index = -1
     optimizer: torch.optim.Optimizer | None = None
+    # spawn, not fork: the parent may already hold a CUDA context, which a
+    # forked child inherits and must never touch.
+    pool = (mp.get_context("spawn").Pool(loop_cfg.render_workers, _worker_init,
+                                          (dataset.index, dataset.cfg))
+            if loop_cfg.render_workers else None)
 
     for pass_index in range(start.pass_index, len(passes)):
         g, _ = passes[pass_index]
@@ -280,7 +376,8 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
         if g != group_index:
             group_index = g
             optimizer = torch.optim.AdamW(
-                trainable_parameters(model, plan, group),
+                _param_groups(model, trainable_parameters(model, plan, group),
+                              train_cfg.lr, loop_cfg),
                 lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
             if optimizer_state is not None:
                 optimizer.load_state_dict(optimizer_state)
@@ -316,16 +413,24 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
 
         model.train()
         parts_acc: list[dict[str, float]] = []
-        for batch_index in range(first_batch, len(batches)):
+        total_steps = len(passes) * len(batches)
+        if loop_cfg.max_steps is not None:
+            total_steps = min(total_steps, loop_cfg.max_steps)
+        stream = _iter_batches(specs, batches, first_batch, dataset.index, dataset.cfg,
+                               pool)
+        for batch_index, batch in stream:
             state = SamplerState(pass_index, start.epoch_seed, start.n_specs,
                                  batch_seed, batch_index)
             if loop_cfg.max_steps is not None and result.steps >= loop_cfg.max_steps:
                 result.truncated = True
                 _checkpoint(result, model, optimizer, ema, stage, state, train_cfg,
                             loop_cfg, scaler=scaler, tag="truncated")
+                _close(pool)
                 return result
 
-            batch = _render_batch(specs, batches[batch_index], dataset.index, dataset.cfg)
+            factor = lr_factor(result.steps, total_steps, loop_cfg)
+            for gp in optimizer.param_groups:
+                gp["lr"] = gp.get("base_lr", train_cfg.lr) * factor
             # float32 in, and it stays float32: the model casts under autocast.
             # 06 P8: the shipped chain, once, here -- not `prepare_waveform`.
             wav = shipped(batch, dataset.ship, device)
@@ -352,6 +457,10 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
                 ema.update(model)
             result.steps += 1
             parts_acc.append(parts)
+            if loop_cfg.log_every and result.steps % loop_cfg.log_every == 0:
+                recent = _mean_parts(parts_acc[-loop_cfg.log_every:], stage, pass_index,
+                                     group)
+                _log_line(loop_cfg, result.steps, total_steps, factor, recent)
 
             if loop_cfg.checkpoint_every and result.steps % loop_cfg.checkpoint_every == 0:
                 _checkpoint(result, model, optimizer, ema, stage,
@@ -366,7 +475,27 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
                     SamplerState(pass_index + 1, start.epoch_seed, start.n_specs,
                                  train_cfg.seed + pass_index + 1, 0),
                     train_cfg, loop_cfg, scaler=scaler, tag=f"pass{pass_index}")
+    _close(pool)
     return result
+
+
+def _close(pool) -> None:
+    if pool is not None:
+        pool.terminate()
+        pool.join()
+
+
+def _log_line(cfg: LoopConfig, step: int, total: int, factor: float,
+              row: Mapping[str, Any]) -> None:
+    """One JSON line per `log_every` steps in `<out_dir>/train_log.jsonl`."""
+    import json
+    import time
+    out = Path(cfg.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    rec = {"t": time.time(), "step": step, "total": total, "lr_factor": factor}
+    rec.update({k: v for k, v in row.items() if isinstance(v, (int, float, str))})
+    with open(out / "train_log.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec) + "\n")
 
 
 def _mean_parts(parts: Sequence[Mapping[str, float]], stage: str, pass_index: int,
