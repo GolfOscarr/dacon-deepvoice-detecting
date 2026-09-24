@@ -13,8 +13,10 @@ The contract, stated exactly because it is not the one the spec wrote:
 * It is NOT bit-identical to ``load_audio`` of the same slice, for two reasons
   neither of which is a defect: int16 is a quantisation (< 1 LSB, -90 dBFS),
   and ``load_audio`` resamples the *slice* while the cache slices the
-  *resample*, which differ at the slice's edges by the resampler's transient.
-  The cache is the better signal (no edge transient) and the faster one (no
+  *resample*. A slice start that is not a whole native sample puts the two
+  on timelines a sub-sample phase apart, so they differ over the WHOLE slice
+  (2-61 % RMS as measured in docs/processing/05 §D), not only at its edges.
+  The cache is the correct timeline (no edge transient, no phase offset) and the faster one (no
   decode, no filter); what matters is that a run uses ONE regime throughout,
   so a renderer with ``cache_root`` set reads the cache and nothing else, and
   a missing file is an error rather than a fallback.

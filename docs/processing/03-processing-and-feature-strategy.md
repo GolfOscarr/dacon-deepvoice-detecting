@@ -217,8 +217,9 @@ for the five component pools (stereo-native sources larger). Cache SONICS only f
 reads the slice without touching the rest), native channels, the resampler is `RenderConfig`'s. The
 contract, stated exactly: a cached file is `quantise(resample(full decode))`, and a slice read back is
 **bit-identical to that slice of that array** — not to `load_audio` of the slice (int16 < 1 LSB, and
-`load_audio` resamples the *slice* while the cache slices the *resample*: they differ at each tile's
-edges by the resampler's transient, ~0.02 peak, < 2 % RMS). So a renderer with `cache_root` set reads
+`load_audio` resamples the *slice* while the cache slices the *resample*: a slice start that is not a
+whole native sample puts them a sub-sample phase apart over the whole slice, 2–61 % RMS as measured in
+[05 §D](05-review-findings.md#d--nits); the cache is the correct timeline). So a renderer with `cache_root` set reads
 the cache and nothing else — a missing file is an error, not a fallback — and one run uses one
 regime. Build: 228,801 files (cell 8 skipped), 621 audio-h, ~6 min on 32 threads, ~80 GB; resumable.
 **Status.** built.
@@ -506,6 +507,11 @@ filled by DRAW-6/7 (today always empty). `SamplerConfig` gains `take_range_s`, `
 ---
 
 ## 5 — Configuration draft — `configs/run_v1.yaml`
+
+> **Superseded — the pre-build draft, kept for the record.** The file in force is
+> `configs/processing_v1.yaml`. Since this draft: `single_composed_rate`, `noise_composed_rate` and
+> `balance_marginal_composedness` were deleted as dead knobs (06 D12); `take_range_s` is `[1.5, 2.5]`
+> and `component_floor_s` is `2.5` (06 D5, D-21). Read values from the config, not from this block.
 
 Every field written out, as `run_default.yaml` does. Values marked `# OPEN` are §8's.
 
