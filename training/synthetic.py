@@ -164,7 +164,7 @@ def synthetic_manifest(
             "pair_id": (extra or {}).get("pair"),
             "dup_group": (extra or {}).get("dup"),
             "domain_key": domain,
-            "slice": "train", "fold": None, "scheme_version": scheme_version,
+            "slice": "train", "fold": 0, "scheme_version": scheme_version,
             "validity_mask_ref": None,
             "label_confidence": "exact" if (family is not None) else "reported",
             "aug_strength": float(rng.uniform(0.5, 1.5)),

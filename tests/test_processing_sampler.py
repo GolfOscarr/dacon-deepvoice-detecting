@@ -18,8 +18,9 @@ from processing.config import (AUGMENTS_V1, NORMALIZE_MENU_V1, SECTIONS, Augment
                                ConfigError, DrawConfig, NormalizeMenu, ProcessingConfig,
                                dump_processing_config, load_processing_config,
                                processing_config_from_dict)
-from processing.sampler import Sampler
-from training.audit import audit_specs, run_audit
+from processing.audit import run_audit
+from processing.sampler import LAYER_SLOT, Sampler
+from training.audit import audit_specs
 from training.registries import AUGMENT
 from training.render import NORMALIZE_KEYS
 from training.sampler import REFERENCE_MIX, CellMix
@@ -30,7 +31,22 @@ REPO = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(scope="module")
 def manifest():
-    return synthetic_manifest(n_per_pool=200, n_whole_file=200, seed=0)
+    """The synthetic corpus gives real voice ~2 files per speaker and fake
+    voice 25 per family; the real corpus gives 75 (CFAD) to 12,000 (LJ) on
+    both sides, with 8 % of either pool's files in buckets under 40. Real
+    speakers are coarsened to 25 files each so the two sides' buckets match,
+    as they do on the built corpus."""
+    return _corpus_like_buckets(synthetic_manifest(n_per_pool=200, n_whole_file=200, seed=0))
+
+
+def _corpus_like_buckets(m):
+    """Voice buckets of ~100 files on both sides (the built corpus: 75 to
+    12,000 per speaker bucket). The synthetic corpus's 2-file real speakers
+    would exhaust under a 40-tile slot and read the label."""
+    m = m.copy()
+    v = m.index[m.pool.isin(["A", "B"])]
+    m.loc[v, "speaker_ref_id"] = [f"{p}_spk{i % 2}" for i, p in enumerate(m.loc[v, "pool"])]
+    return m
 
 
 @pytest.fixture(scope="module")
@@ -119,34 +135,42 @@ def test_a_file_exactly_one_take_long_is_still_cropped_inside(manifest):
 # D-4: tiled to the span, every role, no gap and no overlap
 
 
-def sampler_manifest_of(sampler):
-    """The rows a sampler was built over, re-assembled (both row kinds)."""
-    parts = list(sampler._by_role_fake.values()) + list(sampler._whole_by_cell.values())
-    return pd.concat(parts)
-
-
 def _slots(spec):
-    """``(role, file_id) -> sorted tiles`` for a spec of either render mode;
-    a noise layer (``snr_db`` set) is not a component of the composition."""
+    """``(role, slot) -> sorted tiles`` for a spec of either render mode;
+    a noise layer (``snr_db`` set) is not a component of the composition.
+    Under bucket tiling the tiles of one slot may name different files."""
     out = {}
     for c in spec.components:
         if c.snr_db is not None:
             continue
-        out.setdefault((c.role, c.file_id), []).append(c)
+        out.setdefault((c.role, c.slot), []).append(c)
     return {k: sorted(v, key=lambda c: c.target_start_s) for k, v in out.items()}
 
 
-def test_every_component_is_tiled_contiguously_to_its_span(sampler):
-    lo, hi = sampler.cfg.take_range_s
+def _slot_span(tiles):
+    return (tiles[-1].target_start_s + tiles[-1].duration_s) - tiles[0].target_start_s
+
+
+def test_every_component_is_tiled_over_its_span_with_overlapping_tiles(manifest):
+    """06 D8: tiles start ``tile`` apart and every tile but the slot's last
+    reads ``tile + xfade``, so consecutive tiles overlap by exactly the
+    crossfade and the renderer fades over audio, never to silence."""
+    cfg = DrawConfig(f8=0.0)
+    lo, hi = cfg.take_range_s
     seen_multi = 0
-    for spec in Sampler(sampler_manifest_of(sampler), DrawConfig(f8=0.0)).epoch_specs(1500):
+    for spec in Sampler(manifest, cfg).epoch_specs(1500):
+        xfade = spec.crossfade_ms / 1000.0
         for (role, _), tiles in _slots(spec).items():
             seen_multi += len(tiles) > 1
-            lengths = {round(c.duration_s, 9) for c in tiles}
-            assert len(lengths) == 1, "tiles of one take are equal-length"
-            assert tiles[0].duration_s <= hi + 1e-9
-            for a, b in zip(tiles, tiles[1:]):
-                assert b.target_start_s == pytest.approx(a.target_start_s + a.duration_s)
+            steps = {round(b.target_start_s - a.target_start_s, 9)
+                     for a, b in zip(tiles, tiles[1:])}
+            assert len(steps) <= 1, "tiles of one slot start a constant step apart"
+            step = next(iter(steps)) if steps else tiles[0].duration_s
+            assert step <= hi + 1e-9
+            for c in tiles[:-1]:
+                assert c.duration_s == pytest.approx(step + xfade)
+            assert tiles[-1].duration_s == pytest.approx(step) or \
+                tiles[-1].duration_s == pytest.approx(step + xfade)
             assert {c.gain_db for c in tiles} == {tiles[0].gain_db}, \
                 "one gain per component, shared by its tiles"
     assert seen_multi > 500
@@ -168,8 +192,10 @@ def test_the_tiles_cover_exactly_the_component_span(sampler):
             assert all(s == pytest.approx(lead) for s in starts)
             assert len(set(round(e, 6) for e in ends)) == 1
         else:
+            # a sequential slot's last tile extends by the crossfade into the next slot
+            xfade = spec.crossfade_ms / 1000.0
             for (a_end, b_start) in zip(ends[:-1], starts[1:]):
-                assert b_start == pytest.approx(a_end)
+                assert b_start == pytest.approx(a_end - xfade)
         assert ends[-1] <= spec.duration_s + 1e-6
 
 
@@ -180,9 +206,10 @@ def test_the_join_count_is_a_function_of_span_and_take_only(sampler):
     for spec in sampler.epoch_specs(600):
         if spec.render_mode != "composed":
             continue
+        xfade = spec.crossfade_ms / 1000.0
         for tiles in _slots(spec).values():
-            span = sum(c.duration_s for c in tiles)
-            assert len(tiles) >= math.ceil(span / hi - 1e-9)
+            span = _slot_span(tiles)          # may include one crossfade extension
+            assert len(tiles) >= math.ceil((span - xfade) / hi - 1e-9)
 
 
 # --------------------------------------------------------------------------- #
@@ -304,8 +331,9 @@ def test_a_whole_file_spec_keeps_the_drawn_timeline_and_starts_at_the_lead(manif
     for sp in whole:
         tiles = sorted((c for c in sp.components if c.snr_db is None),
                        key=lambda c: c.target_start_s)
+        xfade = sp.crossfade_ms / 1000.0
         for a, b in zip(tiles, tiles[1:]):
-            assert b.target_start_s == pytest.approx(a.target_start_s + a.duration_s)
+            assert b.target_start_s == pytest.approx(a.target_start_s + a.duration_s - xfade)
         end = tiles[-1].target_start_s + tiles[-1].duration_s
         assert end <= sp.duration_s + 1e-6
         assert sp.duration_s - end <= 1.0 + 1e-9, "tail ~ U(0, 1)"
@@ -319,7 +347,7 @@ def test_the_lead_is_drawn_the_same_way_for_both_branches(manifest):
     """A lead only composed samples carried would be a composedness cue: the
     placement is drawn before the branch, so the two distributions agree."""
     import statistics
-    s = Sampler(manifest, DrawConfig(f8=0.0, single_composed_rate=0.5))
+    s = Sampler(manifest, DrawConfig(f8=0.0))
     leads = {"composed": [], "whole_file": []}
     for sp in s.epoch_specs(3000):
         leads[sp.render_mode].append(min(c.target_start_s for c in sp.components))
@@ -340,22 +368,24 @@ def test_the_take_is_shared_by_every_role_of_a_sample(sampler):
     for spec in sampler.epoch_specs(1500):
         if spec.render_mode != "composed" or spec.structure != "overlap":
             continue
-        lengths = {round(c.duration_s, 9) for c in spec.components}
-        if len({c.role for c in spec.components}) > 1:
+        by_role = {}
+        for c in spec.components:
+            by_role.setdefault(c.role, set()).add(round(c.duration_s, 9))
+        if len(by_role) > 1:
             seen += 1
-            assert len(lengths) == 1, (spec.sample_id, lengths)
+            assert len(set(map(frozenset, by_role.values()))) == 1, (spec.sample_id, by_role)
     assert seen > 300
 
 
 def test_no_file_can_cap_the_take(sampler, manifest):
-    """The invariant: every drawn file's interior holds the longest take, so
-    the tile count is a function of (span, take) alone."""
+    """The invariant under bucket tiling: every tile's file holds THAT tile
+    (so no file ever shortens a tile), and short files still serve --
+    they appear only under tiles they can hold."""
     dur = _durations(manifest)
-    lo, hi = sampler.cfg.take_range_s
     m = sampler.cfg.edge_margin_s
     for spec in sampler.epoch_specs(1000):
         for c in spec.components:
-            assert dur[c.file_id] - 2 * m >= hi - 1e-9
+            assert dur[c.file_id] - 2 * m >= c.duration_s - 1e-9
 
 
 def test_a_floor_below_the_shortest_take_plus_margins_is_rejected():
@@ -408,14 +438,15 @@ def test_the_layer_is_a_noise_draw_at_its_snr_tiled_over_the_span(manifest):
         if not layer:
             continue
         seen += 1
-        assert {c.role for c in layer} == {"noise"} and len({c.file_id for c in layer}) == 1
+        assert {c.role for c in layer} == {"noise"} and {c.slot for c in layer} == {LAYER_SLOT}
         assert len({c.snr_db for c in layer}) == 1 and 10.0 <= layer[0].snr_db <= 30.0
         own = [c for c in spec.components if c.snr_db is None]
         lead = min(c.target_start_s for c in own)
         end = max(c.target_start_s + c.duration_s for c in own)
         assert min(c.target_start_s for c in layer) == pytest.approx(lead)
         assert max(c.target_start_s + c.duration_s for c in layer) == pytest.approx(end)
-        assert len({round(c.duration_s, 9) for c in layer + own if spec.structure == "overlap"}) <= 1
+        if spec.structure == "overlap":
+            assert {round(c.duration_s, 9) for c in layer} <= {round(c.duration_s, 9) for c in own}
     assert seen > 200
 
 
@@ -506,7 +537,9 @@ def test_a_drawable_range_is_drawn_to_its_scalar_at_spec_time(sampler):
                 assert set(params) == {"db"} and -12.0 <= params["db"] <= 12.0
             if name == "rawboost_ssi":
                 seen[name] += 1
-                assert params == {"snr_db_range": (10.0, 40.0), "tilt_db_range": (-12.0, 12.0)}
+                # 05 B12: the scalars are drawn at spec time so I1b sees them
+                assert set(params) == {"snr_db", "tilt_db"}
+                assert 10.0 <= params["snr_db"] <= 40.0 and -12.0 <= params["tilt_db"] <= 12.0
     assert seen["gain_jitter"] == 500 and seen["rawboost_ssi"] > 150
 
 
@@ -640,7 +673,11 @@ def test_the_drawn_stream_passes_the_training_audit(sampler, manifest):
     """The specs are ``training.spec.SampleSpec``s, so ``training.audit`` judges
     them unchanged -- and the tile rule must not have manufactured a
     metadata shortcut of its own (I1b)."""
-    report = run_audit(sampler, n=12_000, manifest=manifest)
+    # like the built corpus: whole-file rows for cells 5 and 8 only. With
+    # whole-file rows for single-component cells, "composed" is a presence
+    # cue by construction (02 §4.3) and no draw rule can remove it.
+    df = manifest[(manifest.row_kind == "component") | manifest.cell.isin([5, 8])]
+    report = run_audit(Sampler(df), df, n=12_000)
     assert report.ok, str(report)
 
 
@@ -651,10 +688,6 @@ def test_the_drawn_stream_passes_the_training_audit(sampler, manifest):
 _KNOBS: dict[str, tuple] = {
     "cell_mix": (CellMix(), CellMix({**REFERENCE_MIX, 6: 0.095, 8: 0.125}), "cells", {}),
     "f8": (0.0, 1.0, "cell8_composed", {}),
-    "single_composed_rate": (0.0, 1.0, "voice_only_composed", {}),
-    "noise_composed_rate": (0.0, 1.0, "cell9_composed",
-                            {"balance_marginal_composedness": False}),
-    "balance_marginal_composedness": (True, False, "cell9_composed", {}),
     "domain_cap": (500, 1, "component_files", {}),
     "duration_range": ((4.0, 60.0), (4.0, 8.0), "durations", {}),
     "take_range_s": ((1.5, 2.5), (1.0, 1.0), "tile_lengths", {}),
@@ -726,9 +759,6 @@ def test_every_draw_config_knob_changes_the_drawn_stream(field, manifest):
 _V1_DEFAULTS = {
     "cell_mix": CellMix(),
     "f8": 1.0,
-    "single_composed_rate": 0.0,
-    "noise_composed_rate": 0.0,
-    "balance_marginal_composedness": True,
     "domain_cap": 500,
     "duration_range": (4.0, 60.0),
     "take_range_s": (1.5, 2.5),
@@ -813,8 +843,7 @@ def test_a_non_default_config_round_trips(tmp_path):
     alt = {"draw": {
         "cell_mix": {"p": {1: 0.060, 2: 0.130, 3: 0.060, 4: 0.135, 5: 0.155,
                            6: 0.095, 7: 0.125, 8: 0.125, 9: 0.115}},
-        "f8": 0.5, "single_composed_rate": 0.5, "noise_composed_rate": 0.25,
-        "balance_marginal_composedness": False, "domain_cap": 42,
+        "f8": 0.5, "domain_cap": 42,
         "duration_range": [5.0, 30.0], "take_range_s": [1.0, 1.5],
         "edge_margin_s": 0.25, "component_floor_s": 2.5,
         "gain_db_range": [-10.0, 10.0], "gain_db_mean": -1.0, "gain_db_sigma": 2.0,
@@ -854,3 +883,134 @@ def test_unknown_keys_and_sections_are_errors():
         processing_config_from_dict({"draw": {"take_range": [3.0, 8.0]}})
     with pytest.raises(ConfigError, match="unknown section"):
         processing_config_from_dict({"sampler": {}})
+
+
+# --------------------------------------------------------------------------- #
+# 06 D5: bucket tiling -- eligibility per tile, buckets, and what it fixes
+
+
+def test_every_tile_is_from_a_file_that_can_hold_it_and_short_files_serve_short_tiles(manifest):
+    """A file is eligible for a tile iff duration >= tile + 2 * margin. Files
+    between the 2.5 s floor and 4 s are drawn, and only under tiles they hold."""
+    df = manifest.copy()
+    b = df.index[df.pool == "B"]
+    df.loc[b[: len(b) // 3], "duration_s"] = 3.0
+    s = Sampler(df)
+    dur = _durations(df)
+    m = s.cfg.edge_margin_s
+    short = set(df.loc[b[: len(b) // 3], "file_id"])
+    used = 0
+    for spec in s.epoch_specs(2000):
+        for c in spec.components:
+            assert c.source_offset_s >= m - 1e-9
+            assert c.source_offset_s + c.duration_s <= dur[c.file_id] - m + 1e-9
+            if c.file_id in short:
+                used += 1
+                assert c.duration_s <= 2.0 + 1e-9
+    assert used > 100 and s.n_dropped_short == 0
+
+
+def test_voice_tiles_of_one_slot_share_a_speaker_bucket(sampler, manifest):
+    spk = manifest.set_index("file_id").speaker_ref_id
+    multi = 0
+    for spec in sampler.epoch_specs(1500):
+        for (role, _), tiles in _slots(spec).items():
+            if role != "voice":
+                continue
+            files = {c.file_id for c in tiles}
+            multi += len(files) > 1
+            assert len({spk[f] for f in files}) == 1, "one speaker per voice slot"
+    assert multi > 300, "bucket tiling draws several files of the speaker"
+
+
+def test_bucket_tiling_removes_the_repetition_cue(manifest):
+    """05 A6: a 10 s fake-music file tiled over 60 s repeated itself and
+    'repeated music' read music_fake at 0.86. With tiles drawn across the
+    generator family, the unique-content fraction no longer separates."""
+    from sklearn.metrics import roc_auc_score
+    from processing.audit import draw_features
+    df = manifest[(manifest.row_kind == "component") | manifest.cell.isin([5, 8])].copy()
+    df.loc[df.pool == "D", "duration_s"] = 10.0
+    df.loc[df.pool == "C", "duration_s"] = 30.0
+    specs = [sp for sp in Sampler(df).epoch_specs(4000) if sp.music_present]
+    f = draw_features(specs, df)
+    a = roc_auc_score([sp.music_fake for sp in specs], f["music_unique_fraction"])
+    assert max(a, 1 - a) < 0.58, a
+
+
+def test_cell_nine_primary_noise_never_carries_speech(manifest):
+    """05 A3: the flag applied to layers only left 8 % of cell-9 samples
+    teaching voice_present = 0 on speech."""
+    df = _flagged(manifest)
+    flagged = set(df.loc[df.noise_has_speech, "file_id"])
+    s = Sampler(df)
+    n = 0
+    for spec in s.epoch_specs(3000):
+        if spec.cell == 9:
+            n += 1
+            assert not any(c.file_id in flagged for c in spec.components)
+    assert n > 100
+
+
+def test_real_rows_are_domain_capped_by_their_publisher_atom(manifest):
+    """06 D2: one huge real source may not dominate real draws."""
+    df = manifest.copy()
+    a = df.index[df.pool == "A"]
+    df.loc[a[: (9 * len(a)) // 10], "source_name"] = "one-huge-real-corpus"
+    df.loc[a[: (9 * len(a)) // 10], "speaker_ref_id"] = "one-huge-real-corpus"
+    real = set(df.loc[a, "file_id"])
+    huge = set(df.loc[a[: (9 * len(a)) // 10], "file_id"])
+
+    def huge_share(sampler):
+        files = Counter(c.file_id for sp in sampler.epoch_specs(2000)
+                        for c in sp.components if c.file_id in real)
+        return sum(n for f, n in files.items() if f in huge) / sum(files.values())
+
+    assert huge_share(Sampler(df, DrawConfig(domain_cap=5))) < 0.6
+    assert huge_share(Sampler(df, DrawConfig(domain_cap=100_000))) > 0.7
+
+
+def test_the_stream_does_not_depend_on_manifest_row_order(manifest):
+    """05 B16: a rebuilt manifest in another order changed every draw."""
+    a = list(Sampler(manifest).epoch_specs(200))
+    b = list(Sampler(manifest.sample(frac=1.0, random_state=3)).epoch_specs(200))
+    assert a == b
+
+
+def test_a_frame_without_folds_is_refused(manifest):
+    """05 A7: the built manifest marks every row train with no fold; drawn
+    raw, PROBE and every VAL fold are training data."""
+    df = manifest.copy()
+    df["fold"] = pd.array([None] * len(df), dtype="Int64")
+    with pytest.raises(ValueError, match="apply_folds"):
+        Sampler(df)
+    with pytest.raises(ValueError, match="apply_folds"):
+        Sampler(df.assign(slice="val"), slice_="val")
+    Sampler(df.assign(slice="probe"), slice_="probe")     # PROBE has no fold by design
+
+
+def test_eval_mode_draws_no_augment_and_keeps_the_test_chain(manifest):
+    cfg = DrawConfig().for_eval()
+    specs = list(Sampler(manifest, cfg).epoch_specs(300))
+    assert all(sp.transforms == () for sp in specs)
+    assert all(sp.normalize for sp in specs)
+    assert cfg.augments == () and cfg.normalize_menu == DrawConfig().normalize_menu
+
+
+def test_the_rir_choice_is_drawn_at_spec_time(manifest):
+    cfg = DrawConfig(augments=(AugmentSpec("rir", 1.0, {"wet_range": (0.3, 1.0)}),))
+    for sp in Sampler(manifest, cfg).epoch_specs(50):
+        (name, params), = sp.transforms
+        assert name == "rir" and 0.0 <= params["pick"] < 1.0 and "wet" in params
+
+
+def test_a_layer_never_uses_a_file_of_the_cell_nine_primary(manifest):
+    s = Sampler(manifest, DrawConfig(p_noise_layer=1.0))
+    n = 0
+    for spec in s.epoch_specs(3000):
+        if spec.cell == 9:
+            n += 1
+            own = {c.file_id for c in spec.components if c.snr_db is None}
+            layer = {c.file_id for c in spec.components if c.snr_db is not None}
+            assert layer and not (own & layer)
+    assert n > 100

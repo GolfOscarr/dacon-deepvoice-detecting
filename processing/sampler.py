@@ -1,41 +1,49 @@
-"""Drawing a ``SampleSpec`` under the strategy -- DRAW-1 to DRAW-4 of
-docs/processing/03 §3. Pure: reads the manifest, touches no audio.
+"""Drawing a ``SampleSpec`` under the strategy -- DRAW-1 to DRAW-7 of
+docs/processing/03 §3, revised by docs/processing/06. Pure: reads the
+manifest, touches no audio.
 
-What differs from ``training.sampler.Sampler``, and why (02 §2-§3):
+What differs from ``training.sampler.Sampler``, and why (02 §2-§3, 05, 06):
 
 * **The take/offset/tile rule (D-3, D-4).** The training sampler's
   ``take = min(span, file)`` exposes a file's onset whenever the file is
   shorter than the timeline, and pool D is 10 s files against a 4-60 s
   timeline: 87 % onset exposure, 53 % silence, and a music-head draw AUC of
-  0.995 from the draw alone. Here every component role takes ``U(3, 8)`` s from
+  0.995 from the draw alone. Here every component takes ``take`` seconds from
   an offset drawn so the take lies *strictly inside* the file, and the take is
-  tiled to its span with independent offsets per tile. Music-only draw AUC
-  0.993 -> 0.497; onset exposure < 1 %.
-* **The floor is bound to the take (D-5 revised)**: ``floor - 2 * margin``
-  must hold the longest take. 4.0 s with a 2-3 s take keeps 80 % of pool B's
-  hours; the spec's 2 s floor is reachable only with a 1 s take.
-* **Whole-file rows go through the same rule (D-3, D-16).** The training
-  sampler uses a whole-file row as-is from offset 0, capped at the row's
-  length -- which made the row's length a duration cue and its onset a
-  silence cue. Here a whole-file draw is DOSS-weighted, the timeline is the
-  timeline, and the row is cropped inside and tiled over the span like any
-  component. Under ``f8 = 1`` the branch is drawn only in the ``f8`` sweep.
-* **Lead/tail silence on every sample (D-6)** at the measured values -- drawn
-  before the branch, so the whole-file branch carries the same lead.
-* **The noise layer (DRAW-5).** With ``p_noise_layer`` a pool-E row goes
-  under the composite of ANY cell at ``U(10, 30)`` dB SNR, tiled like a
-  component; rows flagged ``noise_has_speech`` never go under a
-  ``voice_present = 0`` cell. The layer decision and its SNR are drawn before
-  the cell; the SNR is resolved at render (``ComponentDraw.snr_db``).
-* **The augment and test-chain draws exist (DRAW-6, DRAW-7).** The training
-  sampler never fills ``spec.transforms`` or ``spec.normalize``; here both are
-  drawn per sample from the config's menus, before the cell.
-* **One take per sample, never capped by a file (D-21, measured in steps 3
-  and 6).** A take capped by a short file means more tiles, and pool B is
-  short (voice_fake 0.65); a take drawn per role makes the larger of two
-  join counts read as "two components" (voice_present 0.68). So the take is
-  drawn once, shared by every role, and ``take_hi <= floor - 2 * margin`` --
-  the join count is a function of (span, take) alone.
+  tiled to its span with independent offsets per tile.
+* **One take per sample, never capped by a file (D-21).** A take capped by a
+  short file means more tiles, and pool B is short (voice_fake 0.65); a take
+  drawn per role makes the larger of two join counts read as "two components"
+  (voice_present 0.68). The take is drawn once and shared by every role, and
+  the join count is a function of ``(span, take)`` alone.
+* **Bucket tiling (06 D5).** The tiles of one component may come from
+  DIFFERENT files of the same bucket -- the speaker for voice, the whole pool
+  for music and for noise (one bucket per side, symmetric by construction). A file
+  is eligible for a tile iff it can hold it (``duration >= tile + xfade + 2 *
+  margin``), so a 2.5-4 s file serves the tiles it can hold and no file ever
+  caps the take. That is what admits the 2.5 s floor (pool B 235 -> 271 h) and
+  what removes the repetition cue (05 A6): a 10 s fake-music file tiled over
+  60 s repeated itself, and "repeated music" read ``music_fake`` at 0.86.
+* **Overlapping tiles (06 D8).** Every tile but the last of its slot reads
+  ``tile + xfade`` and the next tile starts ``tile`` later, so the renderer
+  crossfades over real audio instead of dipping to silence at every joint.
+  The last tile of a sequential slot extends too, into the next slot.
+* **Whole-file rows go through the same rule (D-3, D-16)**, tiled from the
+  one row; under ``f8 = 1`` the branch is never drawn.
+* **Lead/tail silence on every sample (D-6)**, drawn before the branch.
+* **The noise layer (DRAW-5)** under any cell at ``U(10, 30)`` dB, tiled like
+  a component from pool E; rows flagged ``noise_has_speech`` never go under a
+  ``voice_present = 0`` cell -- as a layer OR as cell 9's primary (05 A3).
+* **The augment and test-chain draws (DRAW-6, DRAW-7)** per sample, before
+  the cell; every drawable range is drawn to its scalar at spec time, the RIR
+  choice included (05 B12), so the audit sees them.
+* **Real rows are domain-capped too (06 D2)**: the publisher atom is the
+  domain, under the same cap as a generator, so zeroth-korean cannot be 39 %
+  of real-voice draws (05 B1).
+* **The stream does not depend on the manifest's row order (05 B16)**: rows
+  are sorted by ``file_id`` first.
+* **A frame without folds is refused (05 A7)**: the built manifest carries no
+  fold, so it must go through ``training.folds.apply_folds`` first.
 
 Everything else -- the cell mix, ``composed_fractions``, the gain ratio, the
 sequential structure -- is the training sampler's, imported not copied.
@@ -44,23 +52,73 @@ sequential structure -- is the training sampler's, imported not copied.
 from __future__ import annotations
 
 import math
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from typing import Any
 
 import numpy as np
 import pandas as pd
-
-from typing import Any
 
 from processing.config import DrawConfig
 from training.manifest import POOL_IS_FAKE, ROLE_POOLS
 from training.registries import AUGMENT
 from training.spec import CELL_TABLE, ComponentDraw, SampleSpec, spec_rng
 
-__all__ = ["Sampler"]
+__all__ = ["Sampler", "bucket_keys"]
+
+#: The slot a noise layer occupies: after every component slot.
+LAYER_SLOT = 8
+
+
+def bucket_keys(rows: pd.DataFrame, role: str, fake: bool) -> pd.Series:
+    """The bucket a tile's file is drawn from (06 D5). Voice: the speaker,
+    the publisher atom where no speaker is known -- a slot stays one voice.
+    Music and noise: ONE bucket per side. Real music by artist would be 2,356
+    atoms of ~3 tracks and repeat itself (05 A6); fake music by generator
+    family is 600-5,500 files on the built corpus but 25 on a synthetic one,
+    and whichever side's bucket exhausts first under a 40-tile slot reads
+    the label through the repetition. One bucket per side is symmetric by
+    construction; a music slot then mixes artists (real) or generators
+    (fake) at its joints, on both sides alike."""
+    if role == "voice":
+        return rows["speaker_ref_id"].where(rows["speaker_ref_id"].notna(),
+                                            rows["source_name"]).astype(str)
+    return pd.Series("*", index=rows.index)
+
+
+@dataclass
+class _Pool:
+    """The rows of one (role, fake), as arrays, with per-bucket duration
+    order so a tile's eligible files are one ``searchsorted`` away."""
+
+    file_id: np.ndarray             # object
+    duration: np.ndarray            # float
+    bucket: np.ndarray              # int codes
+    weights: np.ndarray             # DOSS, sums to 1
+    flagged: np.ndarray             # bool: noise_has_speech
+    #: bucket code -> (row indices sorted by duration, those durations)
+    members: dict[int, tuple[np.ndarray, np.ndarray]]
+    #: every row sorted by duration, for the fallback
+    all_sorted: tuple[np.ndarray, np.ndarray]
+
+    def __len__(self) -> int:
+        return len(self.file_id)
+
+    def eligible(self, need_s: float, bucket: int | None, *, exclude_flagged: bool,
+                 exclude: frozenset[str] | None) -> np.ndarray:
+        """Row indices whose file can hold ``need_s`` seconds, inside the
+        bucket (``None`` = any), minus the flagged rows and the excluded ids."""
+        idx, dur = self.members[bucket] if bucket is not None else self.all_sorted
+        k = int(np.searchsorted(dur, need_s - 1e-9, side="left"))
+        out = idx[k:]
+        if exclude_flagged and out.size:
+            out = out[~self.flagged[out]]
+        if exclude and out.size:
+            out = out[~np.isin(self.file_id[out], list(exclude))]
+        return out
 
 
 class Sampler:
-    """Draws specs from one slice of one fold. Same surface as
+    """Draws specs from one slice of one fold view. Same surface as
     ``training.sampler.Sampler`` (``sample_spec``, ``epoch_specs``, ``slice_``,
     ``fold``), so ``training.audit.run_audit`` accepts it unchanged."""
 
@@ -72,11 +130,20 @@ class Sampler:
             df = df[df["fold"] == fold]
         if df.empty:
             raise ValueError(f"no manifest rows for slice={slice_!r} fold={fold!r}")
+        # Critical: fail closed. The built manifest marks every row `train`
+        # with no fold; drawn as it is, PROBE and every VAL fold are training
+        # data (05 A7). A frame reaches the sampler through
+        # `training.folds.apply_folds(manifest, folds, k)`, which sets both.
+        if slice_ in ("train", "val") and df["fold"].isna().any():
+            raise ValueError(
+                f"{int(df['fold'].isna().sum())} row(s) of slice={slice_!r} carry no fold: "
+                f"materialise a fold view with training.folds.apply_folds(manifest, "
+                f"folds, k) first (docs/processing/05 A7)")
+        df = df.sort_values("file_id", kind="stable").reset_index(drop=True)      # 05 B16
         self.slice_, self.fold = slice_, fold
 
-        # D-5: the component floor. Below it a row has no usable interior once
-        # the edge margin is taken off both ends (`DrawConfig` asserts
-        # `floor > 2 * margin`).
+        # D-5: the component floor -- a row must hold at least the shortest
+        # take (`DrawConfig` asserts `floor >= take_lo + 2 * margin`).
         comp = df[df.row_kind == "component"]
         usable = comp[comp.duration_s >= self.cfg.component_floor_s]
         self.n_dropped_short = int(len(comp) - len(usable))
@@ -86,28 +153,14 @@ class Sampler:
                 f"than component_floor_s={self.cfg.component_floor_s}s")
         comp = usable
 
-        self._by_role_fake: dict[tuple[str, bool], pd.DataFrame] = {}
-        self._weights: dict[tuple[str, bool], np.ndarray] = {}
+        self._pools: dict[tuple[str, bool], _Pool] = {}
         for role, pools in ROLE_POOLS.items():
             sub = comp[comp.pool.isin(pools)]
             for fake in (False, True):
                 rows = sub[sub.pool.map(POOL_IS_FAKE) == fake]
-                self._by_role_fake[(role, fake)] = rows
-                self._weights[(role, fake)] = self._doss_weights(
-                    rows.domain_key if not rows.empty else pd.Series(dtype=object))
-
-        # DRAW-5: the pool-E rows a layer may draw from. `noise_has_speech`
-        # (D-14 `restrict_noise`) is an optional manifest column; absent, no
-        # row is restricted.
-        noise = comp[comp.pool == "E"]
-        flagged = (noise["noise_has_speech"].fillna(False).astype(bool)
-                   if "noise_has_speech" in noise.columns
-                   else pd.Series(False, index=noise.index))
-        self._layer_rows = {
-            True: noise, False: noise[~flagged]}          # keyed by voice_present
-        self._layer_weights = {k: self._doss_weights(v.domain_key) if len(v) else np.empty(0)
-                               for k, v in self._layer_rows.items()}
-        self.n_noise_restricted = int(flagged.sum())
+                self._pools[(role, fake)] = self._make_pool(rows, role, fake)
+        self.n_noise_restricted = int(self._pools[("noise", False)].flagged.sum())
+        self.n_bucket_fallbacks = 0
 
         # Whole-file rows go through the same take/offset/tile rule (D-3:
         # "every role incl. whole-file"), so the same floor applies.
@@ -119,12 +172,34 @@ class Sampler:
         for c, g in kept.groupby("cell"):
             self._whole_by_cell[int(c)] = g
             # D-16: the DOSS key of a whole-file row is its generator domain
-            # (`domain_key`, falling back to `artifact_family`); real rows
-            # share the one uncapped bucket, as real component rows do.
+            # (`domain_key`, falling back to `artifact_family`); a real row's
+            # is its publisher atom (06 D2).
             key = g.domain_key.where(g.domain_key.notna(), g.artifact_family)
+            key = key.where(key.notna(), g.source_name)
             self._whole_weights[int(c)] = self._doss_weights(key)
 
-    # -- DOSS ---------------------------------------------------------------- #
+    # -- pools and DOSS ------------------------------------------------------ #
+
+    def _make_pool(self, rows: pd.DataFrame, role: str, fake: bool) -> _Pool:
+        if rows.empty:
+            empty = np.empty(0, dtype=int)
+            return _Pool(np.empty(0, dtype=object), np.empty(0), empty, np.empty(0),
+                         np.empty(0, dtype=bool), {}, (empty, np.empty(0)))
+        # 06 D2: a real row's domain is its publisher atom, capped like a generator
+        domain = rows["domain_key"].where(rows["domain_key"].notna(), rows["source_name"])
+        weights = self._doss_weights(domain)
+        codes, _ = pd.factorize(bucket_keys(rows, role, fake), sort=True)
+        flagged = (rows["noise_has_speech"].fillna(False).astype(bool).to_numpy()
+                   if role == "noise" and "noise_has_speech" in rows.columns
+                   else np.zeros(len(rows), dtype=bool))
+        duration = rows["duration_s"].to_numpy(dtype=float)
+        order = np.argsort(duration, kind="stable")
+        members: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        for code in np.unique(codes):
+            idx = order[codes[order] == code]
+            members[int(code)] = (idx, duration[idx])
+        return _Pool(rows["file_id"].astype(str).to_numpy(dtype=object), duration,
+                     codes.astype(int), weights, flagged, members, (order, duration[order]))
 
     def _doss_weights(self, domain: pd.Series) -> np.ndarray:
         """``w(file) = min(count(domain), cap) / count(domain)``, normalised."""
@@ -139,7 +214,8 @@ class Sampler:
 
     def _draw_transforms(self, rng: np.random.Generator) -> tuple[tuple[str, dict[str, Any]], ...]:
         """DRAW-6: with probability ``p`` per entry, ``(name, params)`` with every
-        drawable ``*_range`` drawn to its scalar. Drawn BEFORE the cell."""
+        drawable ``*_range`` drawn to its scalar, and ``pick`` (the RIR choice)
+        drawn where the augment accepts it. Drawn BEFORE the cell."""
         out: list[tuple[str, dict[str, Any]]] = []
         for entry in self.cfg.augments:
             take = rng.random() < entry.p
@@ -150,10 +226,11 @@ class Sampler:
                 if scalar is not None and scalar in accepted:
                     # Critical: the draw happens whether or not the entry is
                     # taken, so the later stream does not shift with `p`.
-                    drawn = float(rng.uniform(*value))
-                    params[scalar] = drawn
+                    params[scalar] = float(rng.uniform(*value))
                 else:
                     params[key] = value
+            if "pick" in accepted and "pick" not in params:
+                params["pick"] = float(rng.random())
             if take:
                 out.append((entry.name, params))
         return tuple(out)
@@ -183,84 +260,119 @@ class Sampler:
                 out["companding"] = telephone
         return out
 
-    # -- DRAW-5 ---------------------------------------------------------------- #
-
-    def _draw_layer(self, rng: np.random.Generator, voice_present: bool,
-                    exclude: str | None, lead: float, span: float, take: float,
-                    snr_db: float) -> list[ComponentDraw]:
-        """One pool-E row, tiled over the span at ``snr_db``. Rows flagged
-        ``noise_has_speech`` are excluded under a ``voice_present = 0`` cell
-        (they would mislabel a music-only composite); ``exclude`` keeps a
-        cell-9 sample from layering a file under itself."""
-        rows, w = self._layer_rows[voice_present], self._layer_weights[voice_present]
-        if exclude is not None and len(rows):
-            keep = (rows["file_id"] != exclude).to_numpy()
-            rows, w = rows[keep], w[keep]
-            w = w / w.sum() if w.sum() > 0 else w
-        if not len(rows):
-            return []
-        row = rows.iloc[int(rng.choice(len(rows), p=w))]
-        tiles = self._tiles(rng, str(row.file_id), "noise", float(row.duration_s),
-                            lead, span, 0.0, take)
-        return [replace(t, snr_db=snr_db) for t in tiles]
-
     # -- drawing ------------------------------------------------------------- #
 
-    def _draw_component(self, rng: np.random.Generator, role: str, fake: bool) -> pd.Series:
-        rows = self._by_role_fake[(role, fake)]
-        if rows.empty:
+    def _anchor(self, rng: np.random.Generator, role: str, fake: bool,
+                *, exclude_flagged: bool) -> int:
+        """The DOSS-weighted row that names the bucket a component draws from."""
+        pool = self._pools[(role, fake)]
+        if not len(pool):
             raise ValueError(
                 f"slice={self.slice_!r} fold={self.fold!r} has no "
                 f"{'fake' if fake else 'real'} {role} components")
-        return rows.iloc[int(rng.choice(len(rows), p=self._weights[(role, fake)]))]
+        w = pool.weights
+        if exclude_flagged and pool.flagged.any():
+            w = np.where(pool.flagged, 0.0, w)
+            if w.sum() <= 0:
+                raise ValueError("every noise row is flagged noise_has_speech; cell 9 "
+                                 "has nothing to draw")
+            w = w / w.sum()
+        return int(rng.choice(len(pool), p=w))
 
     def _gain_db(self, rng: np.random.Generator) -> float:
         lo, hi = self.cfg.gain_db_range
         return float(np.clip(rng.normal(self.cfg.gain_db_mean, self.cfg.gain_db_sigma), lo, hi))
 
-    def _tiles(self, rng: np.random.Generator, file_id: str, role: str,
-               file_duration: float, slot_start: float, span: float,
-               gain_db: float, take: float) -> list[ComponentDraw]:
-        """DRAW-3: the sample's take, tiled over ``[slot_start, slot_start + span)``.
+    def _tiles(self, rng: np.random.Generator, pool: _Pool, bucket: int | None, role: str,
+               slot: int, slot_start: float, span: float, gain_db: float, take: float,
+               xfade: float, *, extend_last: bool, exclude_flagged: bool = False,
+               exclude: frozenset[str] | None = None, single: int | None = None
+               ) -> list[ComponentDraw]:
+        """DRAW-3 under bucket tiling: the sample's take, tiled over
+        ``[slot_start, slot_start + span)``, each tile from a file of the
+        bucket that can hold it.
 
         ::
 
-            take     = min(take, file - 2 * margin, span)     # never binds on the file
-            n        = ceil(span / take);  tile = span / n     # in (take/2, take]
-            offset_i ~ U(margin, file - margin - tile)         # per tile
+            n        = ceil(span / take);  tile = span / n          # in (take/2, take]
+            dur_i    = tile + xfade   (every tile but the slot's last, unless extend_last)
+            file_i   ~ Uniform{ bucket files with duration >= dur_i + 2 * margin }
+            offset_i ~ U(margin, file_i - margin - dur_i)
+            start_i  = slot_start + i * tile
 
-        Critical: the file's edges are never inside a tile. ``offset >= margin``
-        and ``offset + tile <= file - margin`` hold for every tile by
-        construction, so the onset of the file -- pool D's silence, the
-        vocoder's first frame, CompSpoof's 4.00 s clip boundary -- is exposed
-        in 0 % of draws rather than the training sampler's 87 %.
+        Critical: the file's edges are never inside a tile, the take is never
+        capped by a file (D-21), and consecutive tiles overlap by ``xfade`` so
+        the renderer crossfades over audio (06 D8). ``single`` pins every tile
+        to one row (the whole-file branch).
 
-        Critical: ``take`` is drawn ONCE per sample and shared by every role
-        (D-21). Drawn per role, the larger of two independent join counts
-        exceeds one alone, so the join count read as "two components are
-        present" (voice_present 0.68 on the S-tier stream). And the cap on the
-        file never binds -- ``DrawConfig`` asserts ``take_hi <= floor - 2 *
-        margin`` -- so the join count is a function of ``(span, take)`` only,
-        for every role and row kind.
-
-        Caveat: tiles are equal-length ``span / n`` rather than ``take`` with a
-        short remainder, so no tile is shorter than half a take.
-        """
+        Critical: within a slot, files are drawn without replacement from
+        the bucket; an exhausted bucket is reused round-robin (least-used
+        file first, a fresh offset); the pool is reached only when the bucket
+        has no file that can hold the tile. Measured on the way here: with
+        replacement, ``n_files`` read the bucket's size and bucket sizes read
+        the label (voice_fake 0.997 on the synthetic corpus); leaving an
+        exhausted bucket for the pool made "speakers per slot" read it
+        (0.81); a fixed 2-4 file budget made the repetition read the files'
+        lengths (pool B is short). Round-robin reuse keeps a slot on one
+        speaker and repeats a file only with a new offset, so what a small
+        bucket leaves behind is ``unique_fraction`` slightly under 1 -- on
+        the built corpus 8 % of the files of EITHER voice pool sit in buckets
+        under 40 files, so the two sides match, and the audit reads it."""
         cfg = self.cfg
         margin = cfg.edge_margin_s
-        usable = file_duration - 2.0 * margin           # >= take_hi by the floor
-        take = min(take, usable, span)
+        take = min(take, span)                       # a short slot, never a file
         n = max(1, math.ceil(span / take - 1e-9))
         tile = span / n
-        high = file_duration - margin - tile              # >= margin
-        return [
-            ComponentDraw(
-                file_id=file_id, role=role,
+        out: list[ComponentDraw] = []
+        used: list[int] = []
+        uses: dict[int, int] = {}
+        for i in range(n):
+            last = i == n - 1
+            dur = tile + (0.0 if (last and not extend_last) else xfade)
+            need = dur + 2.0 * margin
+            if single is not None:
+                fits = pool.duration[single] >= need - 1e-9
+                cand = np.array([single]) if fits else np.empty(0, int)
+            else:
+                in_bucket = pool.eligible(need, bucket, exclude_flagged=exclude_flagged,
+                                          exclude=exclude)
+                cand = in_bucket[~np.isin(in_bucket, used)] if used else in_bucket
+                if not cand.size and in_bucket.size:
+                    counts = np.array([uses.get(int(j), 0) for j in in_bucket])
+                    cand = in_bucket[counts == counts.min()]      # round-robin reuse
+                elif not cand.size:
+                    self.n_bucket_fallbacks += 1
+                    cand = pool.eligible(need, None, exclude_flagged=exclude_flagged,
+                                         exclude=exclude)
+            if not cand.size:
+                raise ValueError(
+                    f"no {role} file can hold a {dur:.2f}s tile plus 2 x {margin}s margin "
+                    f"(slice={self.slice_!r} fold={self.fold!r})")
+            j = int(cand[int(rng.integers(len(cand)))])
+            used.append(j)
+            uses[j] = uses.get(j, 0) + 1
+            high = float(pool.duration[j]) - margin - dur
+            out.append(ComponentDraw(
+                file_id=str(pool.file_id[j]), role=role,
                 source_offset_s=float(rng.uniform(margin, high)),
-                duration_s=tile, target_start_s=slot_start + i * tile,
-                gain_db=gain_db)
-            for i in range(n)
-        ]
+                duration_s=dur, target_start_s=slot_start + i * tile,
+                gain_db=gain_db, slot=slot))
+        return out
+
+    def _draw_layer(self, rng: np.random.Generator, voice_present: bool,
+                    exclude: frozenset[str] | None, lead: float, span: float, take: float,
+                    xfade: float, snr_db: float) -> list[ComponentDraw]:
+        """DRAW-5: pool-E tiles over the span at ``snr_db``. Rows flagged
+        ``noise_has_speech`` are excluded under a ``voice_present = 0`` cell;
+        ``exclude`` keeps a cell-9 sample from layering its own files under
+        itself."""
+        pool = self._pools[("noise", False)]
+        if not len(pool):
+            return []
+        tiles = self._tiles(rng, pool, None, "noise", LAYER_SLOT, lead, span, 0.0, take,
+                            xfade, extend_last=False, exclude_flagged=not voice_present,
+                            exclude=exclude)
+        return [replace(t, snr_db=snr_db) for t in tiles]
 
     def sample_spec(self, sample_id: int, epoch: int = 0, seed: int = 0) -> SampleSpec:
         rng = spec_rng(sample_id, epoch, seed)
@@ -277,7 +389,7 @@ class Sampler:
         transforms = self._draw_transforms(rng)
         normalize = self._draw_normalize(rng)
         # DRAW-5: whether a noise layer is added, and at what SNR -- BEFORE the
-        # cell (R2: per sample, never per cell); the row is drawn after it.
+        # cell (R2: per sample, never per cell); the rows are drawn after it.
         layer = rng.random() < cfg.p_noise_layer
         layer_snr = float(rng.uniform(*cfg.noise_snr_db_range))
 
@@ -298,13 +410,14 @@ class Sampler:
         if not wanted:
             wanted.append(("noise", False))
 
-        # DRAW-4: structure, the taper, lead/tail. Drawn for EVERY sample,
+        # DRAW-4: structure, the crossfade, lead/tail. Drawn for EVERY sample,
         # before any file is chosen, so none can depend on which file was
         # drawn -- and the whole-file branch gets the same lead the composed
         # branch does (a lead only composed samples carried would be a
         # composedness cue).
         sequential = composed and len(wanted) > 1 and rng.random() < cfg.sequential_prob
         crossfade_ms = float(rng.uniform(*cfg.crossfade_ms_range))
+        xfade = crossfade_ms / 1000.0
         lead = float(rng.uniform(0.0, cfg.silence_lead_s)) if cfg.silence_lead_s else 0.0
         tail = float(rng.uniform(0.0, cfg.silence_tail_s)) if cfg.silence_tail_s else 0.0
         if lead + tail > 0.5 * duration:          # never silence half the sample
@@ -322,11 +435,14 @@ class Sampler:
             rows = self._whole_by_cell[cell]
             row = rows.iloc[int(rng.choice(len(rows), p=self._whole_weights[cell]))]
             role = wanted[0][0]
-            tiles = self._tiles(rng, str(row.file_id), role, float(row.duration_s),
-                                lead, span, 0.0, take)
+            one = _Pool(np.array([str(row.file_id)], dtype=object),
+                        np.array([float(row.duration_s)]), np.zeros(1, dtype=int),
+                        np.ones(1), np.zeros(1, dtype=bool), {}, (np.zeros(1, int), None))
+            tiles = self._tiles(rng, one, None, role, 0, lead, span, 0.0, take, xfade,
+                                extend_last=False, single=0)
             if layer:
-                tiles += self._draw_layer(rng, bool(vp), str(row.file_id), lead, span, take,
-                                          layer_snr)
+                tiles += self._draw_layer(rng, bool(vp), frozenset({str(row.file_id)}), lead,
+                                          span, take, xfade, layer_snr)
             return SampleSpec(
                 sample_id=sample_id, epoch=epoch, seed=seed,
                 scheme_version=cfg.scheme_version,
@@ -338,18 +454,24 @@ class Sampler:
         is_ratio = len(wanted) > 1
         draws: list[ComponentDraw] = []
         for i, (role, fake) in enumerate(wanted):
-            row = self._draw_component(rng, role, fake)
+            # cell 9's primary noise never carries speech (05 A3)
+            exclude_flagged = role == "noise" and not vp
+            pool = self._pools[(role, fake)]
+            anchor = self._anchor(rng, role, fake, exclude_flagged=exclude_flagged)
             if sequential:
-                slot = span / len(wanted)
-                start = lead + i * slot
+                slot_len = span / len(wanted)
+                start = lead + i * slot_len
             else:
-                slot, start = span, lead
+                slot_len, start = span, lead
             gain = self._gain_db(rng) if (is_ratio and role == "voice") else 0.0
-            draws.extend(self._tiles(rng, str(row.file_id), role, float(row.duration_s),
-                                     start, slot, gain, take))
+            draws.extend(self._tiles(
+                rng, pool, int(pool.bucket[anchor]), role, i, start, slot_len, gain, take,
+                xfade, extend_last=sequential and i < len(wanted) - 1,
+                exclude_flagged=exclude_flagged))
         if layer:
-            own = draws[0].file_id if wanted[0][0] == "noise" else None
-            draws.extend(self._draw_layer(rng, bool(vp), own, lead, span, take, layer_snr))
+            own = (frozenset(c.file_id for c in draws) if wanted[0][0] == "noise" else None)
+            draws.extend(self._draw_layer(rng, bool(vp), own, lead, span, take, xfade,
+                                          layer_snr))
 
         return SampleSpec(
             sample_id=sample_id, epoch=epoch, seed=seed,

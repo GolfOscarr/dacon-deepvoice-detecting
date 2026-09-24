@@ -70,24 +70,25 @@ HEADS: dict[str, tuple[str, str | None]] = {
 
 
 def collapse_tiles(spec: SampleSpec) -> SampleSpec:
-    """One ``ComponentDraw`` per (role, file), spanning its tiles.
+    """One ``ComponentDraw`` per (slot, role), spanning its tiles.
 
-    The offset kept is the first tile's; the span is ``[first start, last
-    end)``; the gain is shared by construction. Labels, transforms and the
-    normalize draw are untouched.
+    Under bucket tiling the tiles of one slot may name different files
+    (06 §1); the draw kept names the first tile's file and offset, the span
+    is ``[first start, last end)``, the gain is shared by construction.
+    Labels, transforms and the normalize draw are untouched.
     """
-    groups: dict[tuple[str, str, float | None], list[ComponentDraw]] = {}
+    groups: dict[tuple[int, str, float | None], list[ComponentDraw]] = {}
     for c in spec.components:
-        groups.setdefault((c.role, c.file_id, c.snr_db), []).append(c)
+        groups.setdefault((c.slot, c.role, c.snr_db), []).append(c)
     merged = []
-    for (role, fid, snr), tiles in groups.items():
+    for (slot, role, snr), tiles in groups.items():
         tiles.sort(key=lambda c: c.target_start_s)
         start = tiles[0].target_start_s
         end = max(c.target_start_s + c.duration_s for c in tiles)
         merged.append(ComponentDraw(
-            file_id=fid, role=role, source_offset_s=tiles[0].source_offset_s,
+            file_id=tiles[0].file_id, role=role, source_offset_s=tiles[0].source_offset_s,
             duration_s=end - start, target_start_s=start, gain_db=tiles[0].gain_db,
-            is_mixup_partner=tiles[0].is_mixup_partner, snr_db=snr))
+            is_mixup_partner=tiles[0].is_mixup_partner, snr_db=snr, slot=slot))
     return replace(spec, components=tuple(merged))
 
 
@@ -96,7 +97,19 @@ def collapse_tiles(spec: SampleSpec) -> SampleSpec:
 
 
 DRAW_FEATURES = ("take_s", "coverage", "onset_exposed", "end_exposed", "joins",
-                 "lead_silence_s", "tail_silence_s")
+                 "lead_silence_s", "tail_silence_s",
+                 # 05 A6: what bucket tiling is for -- repetition and file
+                 # changes inside a slot are audible
+                 "unique_fraction", "n_files", "n_buckets",
+                 # 05 B8: reported by I1e, NOT gated -- where a tile sits in
+                 # its file is not audible in itself; it reads the file's
+                 # length (pool B is short, pool D is 10 s) and whether the
+                 # audio near a clip edge differs is unmeasured
+                 "edge_1s_exposed", "relpos")
+EDGE_FEATURES = ("edge_1s_exposed", "relpos")
+
+#: I1d's second reading: a tile starting or ending within this of a file edge.
+EDGE_1S = 1.0
 
 #: Optional manifest columns: a file's own leading / trailing silence
 #: (``eda.extract.timing``). When present, the EFFECTIVE lead a sample carries
@@ -108,6 +121,10 @@ def draw_features(specs: Sequence[SampleSpec], manifest: pd.DataFrame) -> pd.Dat
     """The harness's ``effective_features``, from specs and the manifest alone."""
     by_id = manifest.set_index("file_id")
     dur = by_id["duration_s"].astype(float).to_dict()
+    # the voice bucket atom (processing.sampler.bucket_keys): a slot drawn
+    # across speakers is what a small bucket leaves behind
+    atom = (by_id["speaker_ref_id"].where(by_id["speaker_ref_id"].notna(), by_id["source_name"])
+            .astype(str).to_dict() if "speaker_ref_id" in by_id else {})
     lead_file = by_id[_LEAD_COL].astype(float).to_dict() if _LEAD_COL in by_id else {}
     tail_file = by_id[_TAIL_COL].astype(float).to_dict() if _TAIL_COL in by_id else {}
 
@@ -143,15 +160,30 @@ def draw_features(specs: Sequence[SampleSpec], manifest: pd.DataFrame) -> pd.Dat
                 for name in DRAW_FEATURES:
                     f[f"{role}_{name}"] = 0.0
                 continue
-            span = sum(c.duration_s for c in tiles)
-            fdur = dur[tiles[0].file_id]
+            first, last = tiles[0], tiles[-1]
+            span = (last.target_start_s + last.duration_s) - first.target_start_s
             onset = any(c.source_offset_s < HOP_S for c in tiles)
-            end = any(c.source_offset_s + c.duration_s >= fdur - HOP_S for c in tiles)
+            end = any(c.source_offset_s + c.duration_s >= dur[c.file_id] - HOP_S
+                      for c in tiles)
             f[f"{role}_take_s"] = span
             f[f"{role}_coverage"] = span / s.duration_s
             f[f"{role}_onset_exposed"] = float(onset)
             f[f"{role}_end_exposed"] = float(end)
             f[f"{role}_joins"] = float(len(tiles) - 1)
+            # 05 A6: how much of the span is DISTINCT source audio -- the union
+            # of the source windows per file over the span (a 10 s file tiled
+            # over 60 s repeats itself; real music at 30 s repeats less)
+            f[f"{role}_unique_fraction"] = _unique_fraction(tiles) / span
+            f[f"{role}_n_files"] = float(len({c.file_id for c in tiles}))
+            f[f"{role}_n_buckets"] = float(len({atom.get(c.file_id, "*") for c in tiles})) \
+                if role == "voice" else 1.0
+            # 05 B8: exposure at 1 s, and where in the file the tiles sit
+            f[f"{role}_edge_1s_exposed"] = float(any(
+                c.source_offset_s < EDGE_1S
+                or c.source_offset_s + c.duration_s > dur[c.file_id] - EDGE_1S
+                for c in tiles))
+            f[f"{role}_relpos"] = float(np.mean(
+                [c.source_offset_s / max(dur[c.file_id], 1e-9) for c in tiles]))
             f[f"{role}_lead_silence_s"] = (
                 lead_file.get(tiles[0].file_id, 0.0) * float(onset) + drawn_lead)
             f[f"{role}_tail_silence_s"] = (
@@ -165,8 +197,33 @@ def draw_features(specs: Sequence[SampleSpec], manifest: pd.DataFrame) -> pd.Dat
         f["first_onset_exposed"] = max(f[f"{r}_onset_exposed"] for r in ROLES)
         f["any_lead_silence_s"] = max(f[f"{r}_lead_silence_s"] for r in ROLES)
         f["max_joins"] = max(f[f"{r}_joins"] for r in ROLES)
+        present = [r for r in ROLES if roles_of[r]]
+        f["min_unique_fraction"] = min(f[f"{r}_unique_fraction"] for r in present)
+        f["any_edge_1s_exposed"] = max(f[f"{r}_edge_1s_exposed"] for r in present)
+        f["mean_relpos"] = float(np.mean([f[f"{r}_relpos"] for r in present]))
         rows.append(f)
     return pd.DataFrame(rows)
+
+
+def _unique_fraction(tiles: Sequence[ComponentDraw]) -> float:
+    """Seconds of distinct source audio across the tiles: per file, the
+    length of the union of ``[offset, offset + duration)`` windows."""
+    by_file: dict[str, list[tuple[float, float]]] = {}
+    for c in tiles:
+        by_file.setdefault(c.file_id, []).append((c.source_offset_s,
+                                                  c.source_offset_s + c.duration_s))
+    total = 0.0
+    for spans in by_file.values():
+        cur_s, cur_e = None, None
+        for s, e in sorted(spans):
+            if cur_e is None or s > cur_e:
+                if cur_e is not None:
+                    total += cur_e - cur_s
+                cur_s, cur_e = s, e
+            else:
+                cur_e = max(cur_e, e)
+        total += cur_e - cur_s
+    return total
 
 
 def _head_frame(features: pd.DataFrame, head: str) -> pd.DataFrame:
@@ -185,8 +242,14 @@ def _head_frame(features: pd.DataFrame, head: str) -> pd.DataFrame:
               "noise_layer", "noise_layer_snr_db", "noise_layer_joins"]
     if head in ("voice_fake", "music_fake"):
         role = head.split("_")[0]
-        cols = common + [c for c in features.columns if c.startswith(f"{role}_")]
+        cols = common + [c for c in features.columns if c.startswith(f"{role}_")
+                         and not c.endswith(EDGE_FEATURES)]
     else:
+        # Critical: no max/min-over-roles aggregate of a per-role rate: a
+        # mixed sample has two roles, so "any role within 1 s of an edge" is
+        # the role COUNT, i.e. the presence label (0.556 on a 2 % rate). The
+        # role features stay with the fake heads, where the population has
+        # the role by construction.
         cols = common + ["first_onset_exposed", "any_lead_silence_s"]
     return features[cols]
 
@@ -257,6 +320,31 @@ def _draw_shortcuts(specs: Sequence[SampleSpec], manifest: pd.DataFrame
     return out
 
 
+def _edge_proximity(specs: Sequence[SampleSpec], manifest: pd.DataFrame
+                    ) -> tuple[bool, str]:
+    """I1e (05 B8), reported never gated: the univariate AUC of each edge-
+    proximity feature per component head. The features read the pools'
+    length distributions through the margin; whether the audio a tile takes
+    near a clip edge is audibly different is the open measurement."""
+    from eda.analyze.shortcut import univariate_auc
+    specs = [s for s in specs if s.cell != 9]
+    if len(specs) < 200:
+        return (True, AuditReport.SKIP + "not enough samples")
+    f = draw_features(specs, manifest)
+    parts = []
+    for head, role in (("voice_fake", "voice"), ("music_fake", "music")):
+        keep = [i for i, s in enumerate(specs) if getattr(s, f"{role}_present")]
+        y = np.array([int(getattr(specs[i], head) or 0) for i in keep])
+        if len(keep) < 200 or len(np.unique(y)) < 2:
+            continue
+        for name in EDGE_FEATURES:
+            x = f[f"{role}_{name}"].to_numpy(dtype=float)[keep]
+            if np.unique(x).size > 1:
+                parts.append(f"{head}/{name}={univariate_auc(x, y):.3f}")
+    return (True, "edge proximity, univariate AUC per component head (reported, not gated; "
+                  "05 B8): " + ", ".join(parts))
+
+
 def _exposure(specs: Sequence[SampleSpec], manifest: pd.DataFrame) -> tuple[bool, str]:
     """I1d: the onset-exposure rate per pool -- the direct reading of H1. Every
     pool below 1 % (docs/processing/03 DRAW-3 Verify)."""
@@ -264,20 +352,25 @@ def _exposure(specs: Sequence[SampleSpec], manifest: pd.DataFrame) -> tuple[bool
     dur = manifest.set_index("file_id")["duration_s"].astype(float).to_dict()
     seen: Counter = Counter()
     early: Counter = Counter()
+    near: Counter = Counter()
     for s in specs:
         for c in s.components:
             p = pool.get(c.file_id)
             if p is None or pd.isna(p):         # a whole-file row: by its cell
                 p = f"cell{s.cell}"
             seen[p] += 1
-            early[p] += c.source_offset_s < HOP_S or \
-                c.source_offset_s + c.duration_s >= dur[c.file_id] - HOP_S
+            end = c.source_offset_s + c.duration_s
+            early[p] += c.source_offset_s < HOP_S or end >= dur[c.file_id] - HOP_S
+            near[p] += c.source_offset_s < EDGE_1S or end > dur[c.file_id] - EDGE_1S
     rates = {p: early[p] / seen[p] for p in sorted(seen)}
+    within = {p: near[p] / seen[p] for p in sorted(seen)}
     worst = max(rates.values()) if rates else 0.0
     return (worst < 0.01,
             "edge exposure per pool (onset within 50 ms or end within 50 ms): "
             + ", ".join(f"{p}={r:.4f}" for p, r in rates.items())
-            + "; gate < 0.01 (the training draw exposes pool D at 0.87)")
+            + "; gate < 0.01 (the training draw exposes pool D at 0.87)"
+            + "; within 1 s of an edge (reported, 05 B8): "
+            + ", ".join(f"{p}={r:.3f}" for p, r in within.items()))
 
 
 def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame,
@@ -290,6 +383,7 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame,
     results = dict(base.results)
     results.update(_draw_shortcuts(specs, manifest))
     results["I1d_edge_exposure"] = _exposure(specs, manifest)
+    results["I1e_edge_proximity"] = _edge_proximity(specs, manifest)
     return AuditReport(results)
 
 

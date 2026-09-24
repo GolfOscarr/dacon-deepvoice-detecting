@@ -19,6 +19,7 @@ are coerced to ``int`` (a quoted YAML key arrives as ``"1"``).
 from __future__ import annotations
 
 import dataclasses
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -176,9 +177,11 @@ class DrawConfig:
     #: composedness on the *component* heads, for any mix (02 §4.2); the
     #: whole-file rows then exist for the sweep ``{1.0, 0.5, 0.0}`` alone.
     f8: float = 1.0
-    single_composed_rate: float = 0.0
-    noise_composed_rate: float = 0.0
-    balance_marginal_composedness: bool = True
+    # `single_composed_rate`, `noise_composed_rate` and
+    # `balance_marginal_composedness` were deleted on 2026-09-24 (06 D12):
+    # the manifest has whole-file rows for cells 5 and 8 only, so every other
+    # cell is composed whatever they said, and a sweep ledger recorded values
+    # that did nothing (05 B15).
     #: D-16. DOSS per-domain cap as a sampling weight, ``min(count, cap) /
     #: count`` -- and applied to whole-file rows too, which ``training.sampler``
     #: draws uniformly.
@@ -201,11 +204,11 @@ class DrawConfig:
     #: offset + take <= file - margin. Took onset exposure from 20 % -> 0.8 %
     #: (voice) and 78 % -> 1.9 % (noise; CompSpoof clips are exactly 4.00 s).
     edge_margin_s: float = 0.5
-    #: D-5 (revised). Rows shorter than this are dropped at construction
-    #: (OFF-4's ``usable_duration``). Bound to the take by D-21: the interior
-    #: ``floor - 2 * margin`` must hold the longest take. 4.0 keeps 80 % of
-    #: pool B's hours (59 % of its rows); the spec's 2.0 is reachable only with
-    #: a 1 s take.
+    #: D-5 (revised by 06 D5). Rows shorter than this are dropped at
+    #: construction (OFF-4's ``usable_duration``). Under bucket tiling the
+    #: floor admits a row that can hold the SHORTEST take (``take_lo + 2 *
+    #: margin``); a longer tile is served by the rows that can hold it. 2.5 s
+    #: keeps 271 of pool B's 303 h (4.0 s kept 235).
     component_floor_s: float = 2.5
 
     # -- DRAW-4: placement -------------------------------------------------- #
@@ -283,22 +286,32 @@ class DrawConfig:
         if not 0 <= c_lo <= c_hi:
             raise ValueError(f"crossfade_ms_range must be 0 <= lo <= hi, "
                              f"got {self.crossfade_ms_range}")
-        composed_fractions(                       # validates the knobs
-            self.cell_mix, self.f8,
-            a=self.single_composed_rate, b=self.single_composed_rate,
-            f9=self.noise_composed_rate,
-            balance_marginal=self.balance_marginal_composedness)
+        composed_fractions(self.cell_mix, self.f8)      # validates f8
         if not self.allow_unsound_mix:
             check_mix(self.cell_mix)
+        g_lo, g_hi = self.gain_db_range
+        if not g_lo <= g_hi:
+            raise ValueError(f"gain_db_range must be lo <= hi, got {self.gain_db_range}")
+        if self.gain_db_sigma < 0:
+            raise ValueError(f"gain_db_sigma must be >= 0, got {self.gain_db_sigma}")
+        for name in ("gain_db_range", "gain_db_mean", "gain_db_sigma", "noise_snr_db_range",
+                     "take_range_s", "duration_range", "crossfade_ms_range"):
+            values = getattr(self, name)
+            values = values if isinstance(values, tuple) else (values,)
+            if not all(math.isfinite(float(v)) for v in values):
+                raise ValueError(f"{name} must be finite, got {getattr(self, name)}")
 
     @property
     def f(self) -> dict[int, float]:
-        """The per-cell composed fraction (``training.sampler.composed_fractions``)."""
-        return composed_fractions(
-            self.cell_mix, self.f8,
-            a=self.single_composed_rate, b=self.single_composed_rate,
-            f9=self.noise_composed_rate,
-            balance_marginal=self.balance_marginal_composedness)
+        """The per-cell composed fraction (``training.sampler.composed_fractions``).
+        Only cells 5 and 8 have whole-file rows, so 1-4 and 9 are composed
+        whatever this says for them."""
+        return composed_fractions(self.cell_mix, self.f8)
+
+    def for_eval(self) -> DrawConfig:
+        """The evaluation draw (06 P4): no augments -- they are training's --
+        and the normalize menu kept, because it models the test chain."""
+        return dataclasses.replace(self, augments=())
 
 
 # --------------------------------------------------------------------------- #

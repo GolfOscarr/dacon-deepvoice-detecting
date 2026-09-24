@@ -17,9 +17,6 @@ draw:
   # D-1. Strict: every mixed sample composed. Only f8 = 1 balances composedness
   # on the component heads (02 §4.2). Whole-file rows exist for the sweep only.
   f8: 1.0
-  single_composed_rate: 0.0
-  noise_composed_rate: 0.0
-  balance_marginal_composedness: true
   # D-16. DOSS cap as a sampling weight, on component AND whole-file rows.
   domain_cap: 500
   # DRAW-1. The competition's own range; drawn first.

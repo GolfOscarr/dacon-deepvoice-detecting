@@ -591,6 +591,7 @@ def gaussian_noise(wav: Tensor, rng: np.random.Generator, *,
 
 @AUGMENT.register("rawboost_ssi")
 def rawboost_ssi(wav: Tensor, rng: np.random.Generator, *,
+                 snr_db: float | None = None, tilt_db: float | None = None,
                  snr_db_range: tuple[float, float] = (10.0, 40.0),
                  tilt_db_range: tuple[float, float] = (-12.0, 12.0)) -> Tensor:
     """A-A5, stationary signal-independent variant: coloured additive noise.
@@ -601,8 +602,12 @@ def rawboost_ssi(wav: Tensor, rng: np.random.Generator, *,
     modelling transmission and microphone colouration. The convolutive and
     non-stationary arms are not implemented.
     """
-    snr_db = float(rng.uniform(*snr_db_range))
-    tilt_db = float(rng.uniform(*tilt_db_range))
+    # the scalars are drawn at spec time by the processing sampler (05 B12),
+    # so the audit sees them; the ranges are the fallback for a bare call
+    if snr_db is None:
+        snr_db = float(rng.uniform(*snr_db_range))
+    if tilt_db is None:
+        tilt_db = float(rng.uniform(*tilt_db_range))
     n = wav.shape[-1]
     noise = torch.from_numpy(
         rng.standard_normal(tuple(wav.shape)).astype(np.float32)).to(wav.device)
@@ -617,6 +622,7 @@ def rawboost_ssi(wav: Tensor, rng: np.random.Generator, *,
 
 @AUGMENT.register("stereo_imbalance")
 def stereo_imbalance(wav: Tensor, rng: np.random.Generator, *,
+                     db: float | None = None,
                      db_range: tuple[float, float] = (-4.0, 4.0)) -> Tensor:
     """A-B3 -- L/R level imbalance. A no-op on mono, by construction.
 
@@ -627,6 +633,11 @@ def stereo_imbalance(wav: Tensor, rng: np.random.Generator, *,
     if wav.shape[0] < 2:
         return wav
     out = wav.clone()
+    if db is not None:
+        # one spec-time scalar: +db/2 on the left, -db/2 on the right
+        out[0] = wav[0] * float(10.0 ** (db / 40.0))
+        out[1] = wav[1] * float(10.0 ** (-db / 40.0))
+        return out
     for c in range(wav.shape[0]):
         out[c] = wav[c] * float(10.0 ** (float(rng.uniform(*db_range)) / 20.0))
     return out
@@ -697,7 +708,7 @@ def _load_rir(path: str, channel: int, max_s: float) -> np.ndarray:
 def rir(wav: Tensor, rng: np.random.Generator, *,
         bank_dir: str | None = None, pattern: str = "*.wav",
         wet: float | None = None, wet_range: tuple[float, float] = (0.3, 1.0),
-        max_rir_s: float = 1.0) -> Tensor:
+        pick: float | None = None, max_rir_s: float = 1.0) -> Tensor:
     """A-A10 -- room reverberation by convolution with a measured impulse
     response (docs/processing/03 DRAW-6), dry/wet mixed, level preserved.
 
@@ -714,8 +725,15 @@ def rir(wav: Tensor, rng: np.random.Generator, *,
     if bank_dir is None:
         h = _synthetic_rir(rng)
     else:
+        # `pick` in [0, 1) names the response and its channel at spec time
+        # (05 B12); every channel of a multichannel response is reachable.
         bank = _rir_bank(str(bank_dir), pattern)
-        h = _load_rir(bank[int(rng.integers(len(bank)))], int(rng.integers(8)), max_rir_s)
+        if pick is None:
+            pick = float(rng.random())
+        u = min(max(float(pick), 0.0), 1.0 - 1e-12)
+        which = int(u * len(bank))
+        chan = int((u * len(bank) - which) * 64)        # sub-index -> channel
+        h = _load_rir(bank[which], chan, max_rir_s)
     n = wav.shape[-1]
     size = 1 << int(np.ceil(np.log2(n + len(h))))
     x = wav.detach().cpu().double()

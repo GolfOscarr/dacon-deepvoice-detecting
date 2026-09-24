@@ -36,6 +36,13 @@ def manifest():
     df.loc[b[: len(b) // 2], "duration_s"] = 4.5
     a = df.index[df.pool == "A"]
     df.loc[a[: len(a) // 4], "duration_s"] = 4.5
+    # bucket tiling: voice buckets of ~100 files on BOTH sides, as on the
+    # built corpus (75 to 12,000 per speaker bucket; 8 % of either pool's
+    # files in buckets under 40). The synthetic corpus's 2-file real speakers
+    # and 25-file fake families would exhaust under a 40-tile slot on one
+    # side only, which is a fixture artefact, not a draw property.
+    v = df.index[df.pool.isin(["A", "B"])]
+    df.loc[v, "speaker_ref_id"] = [f"{p}_spk{i % 2}" for i, p in enumerate(df.loc[v, "pool"])]
     return df
 
 
@@ -64,10 +71,10 @@ def test_collapse_tiles_merges_a_component_into_one_draw(manifest):
     seen = 0
     for spec in s.epoch_specs(300):
         c = collapse_tiles(spec)
-        roles = {(d.role, d.file_id) for d in spec.components}
+        roles = {(d.role, d.slot) for d in spec.components}
         assert len(c.components) == len(roles)
         for d in c.components:
-            tiles = [t for t in spec.components if (t.role, t.file_id) == (d.role, d.file_id)]
+            tiles = [t for t in spec.components if (t.role, t.slot) == (d.role, d.slot)]
             assert d.target_start_s == pytest.approx(min(t.target_start_s for t in tiles))
             assert d.target_start_s + d.duration_s == pytest.approx(
                 max(t.target_start_s + t.duration_s for t in tiles))
@@ -215,4 +222,4 @@ def test_layers_are_collapsed_apart_from_components_and_read_by_the_features(man
         layers = [d for d in c.components if d.snr_db is not None]
         assert len(layers) == 1 and layers[0].role == "noise"
         assert len([d for d in c.components if d.snr_db is None]) == len(
-            {(d.role, d.file_id) for d in spec.components if d.snr_db is None})
+            {(d.role, d.slot) for d in spec.components if d.snr_db is None})
