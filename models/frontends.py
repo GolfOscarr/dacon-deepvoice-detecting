@@ -30,7 +30,7 @@ from torch import Tensor, nn
 from models.config import AudioConfig, FrontendConfig
 from models.heads import FreqPool
 
-__all__ = ["Frontend", "StubFrontend", "BEATsFrontend", "LoRALinear",
+__all__ = ["Frontend", "StubFrontend", "BEATsFrontend", "XLSRFrontend", "LoRALinear",
            "build_frontend", "frames_for", "hop_length"]
 
 
@@ -237,16 +237,50 @@ class LoRALinear(nn.Module):
 
 
 def _apply_lora(module: nn.Module, targets: tuple[str, ...], rank: int,
-                alpha: float, dropout: float) -> int:
-    """Wrap every `nn.Linear` in `module` whose attribute name is in `targets`."""
-    wrapped = 0
-    for child in module.modules():
-        for attr in targets:
+                alpha: float, dropout: float, *, rename: dict[str, str] | None = None,
+                where: str = "the encoder") -> int:
+    """Wrap every `nn.Linear` in `module` whose attribute name is in `targets`.
+
+    `rename` maps a config target onto the backbone's own attribute name (XLS-R
+    calls BEATs' `fc1`/`fc2` `intermediate_dense`/`output_dense`), so one target
+    list names the same projections in both trunks.
+
+    🔴 **Every** target must match at least once. An earlier version raised only
+    when the *total* was zero, so `[q_proj, fc1]` on a backbone without `fc1`
+    adapted half of what the config said and trained without complaint.
+
+    ⚠️ A target that is a module but not an `nn.Linear` is resolved explicitly:
+    a GLU projection (`models.vendor.beats.modules.GLU_Linear`, used by BEATs
+    checkpoints with `activation_fn: glu`) keeps its weight in an inner
+    `.linear`, which is wrapped instead. Anything else raises rather than being
+    skipped. The shipped BEATs checkpoint is `gelu`, so its `fc1` is a plain
+    `nn.Linear` and this branch is not taken there.
+    """
+    rename = rename or {}
+    counts = dict.fromkeys(targets, 0)
+    for child in list(module.modules()):             # snapshot: we mutate below
+        for t in targets:
+            attr = rename.get(t, t)
             layer = getattr(child, attr, None)
-            if isinstance(layer, nn.Linear):
-                setattr(child, attr, LoRALinear(layer, rank, alpha, dropout))
-                wrapped += 1
-    return wrapped
+            if not isinstance(layer, nn.Module) or isinstance(layer, LoRALinear):
+                continue
+            owner = child
+            if not isinstance(layer, nn.Linear):
+                inner = getattr(layer, "linear", None)
+                if not isinstance(inner, nn.Linear):
+                    raise ValueError(
+                        f"adapter target {t!r} is a {type(layer).__name__} in {where}: "
+                        f"not an nn.Linear and no inner .linear to adapt")
+                owner, attr, layer = layer, "linear", inner
+            setattr(owner, attr, LoRALinear(layer, rank, alpha, dropout))
+            counts[t] += 1
+    unmatched = [t for t, n in counts.items() if n == 0]
+    if unmatched:
+        raise ValueError(
+            f"adapter.targets {unmatched} matched no nn.Linear in {where} -- a "
+            f"silently-inert adapter is the failure "
+            f"`test_no_config_field_is_silently_ignored` exists to prevent")
+    return sum(counts.values())
 
 
 class BEATsFrontend(Frontend):
@@ -341,12 +375,7 @@ class BEATsFrontend(Frontend):
         if cfg.adapter.kind == "lora":
             self.n_lora = _apply_lora(self.encoder.layers, cfg.adapter.targets,
                                       cfg.adapter.rank, cfg.adapter.alpha,
-                                      cfg.adapter.dropout)
-            if self.n_lora == 0:
-                raise ValueError(
-                    f"adapter.targets={cfg.adapter.targets} matched no nn.Linear in "
-                    f"the BEATs encoder -- a silently-inert adapter is the failure "
-                    f"`test_no_config_field_is_silently_ignored` exists to prevent")
+                                      cfg.adapter.dropout, where="the BEATs encoder")
         elif cfg.adapter.kind != "none":
             raise ValueError(f"unsupported adapter kind {cfg.adapter.kind!r} for BEATs")
 
@@ -439,9 +468,15 @@ class BEATsFrontend(Frontend):
         # Upstream scales to int16 range before fbank; the checkpoint's
         # normalisation constants are defined against that scale.
         src = wav_1d.unsqueeze(0).to(torch.float32) * (2 ** 15)
-        fbank = ta_kaldi.fbank(src, num_mel_bins=self.N_MELS,
-                               sample_frequency=self.audio.sample_rate,
-                               frame_length=25, frame_shift=10)
+        # 🔴 Never under autocast. At int16 scale the power spectrum reaches
+        # ~1e14, and fbank's mel matmul autocasts to fp16 (max 65504): measured
+        # under fp16 autocast, every BEATs output was NaN -- at 9 layers too, so
+        # candidate A had it. bf16's range hid it. MUTATION: drop this context
+        # and test_fbank_is_immune_to_fp16_autocast fails.
+        with torch.autocast(device_type=src.device.type, enabled=False):
+            fbank = ta_kaldi.fbank(src, num_mel_bins=self.N_MELS,
+                                   sample_frequency=self.audio.sample_rate,
+                                   frame_length=25, frame_shift=10)
         return (fbank - self.FBANK_MEAN) / (2 * self.FBANK_STD)
 
     def _encode(self, wav: Tensor, lengths: Tensor | None = None) -> Tensor:
@@ -503,10 +538,205 @@ class _BEATsEncoderConfig:
             self.dropout_input = 0.0
 
 
+class XLSRFrontend(Frontend):
+    """XLS-R 300M (`facebook/wav2vec2-xls-r-300m`, Apache-2.0), truncated and
+    LoRA-adapted, on `transformers.Wav2Vec2Model`.
+
+    Loaded from a local directory only (`local_files_only=True`): the test
+    server has no network, and a build that silently reached for the Hub would
+    pass here and fail there.
+
+    The encoder loop is ours, not `Wav2Vec2Model.forward`, because the upstream
+    forward gets in the way of two of the three decisions below:
+
+    🔴 **No hidden generator.** Upstream draws `torch.rand([])` per layer on
+    *every* forward -- in eval and at `layerdrop: 0` too -- for LayerDrop, and
+    applies SpecAugment (`mask_time_prob: 0.075`, drawn with numpy) in train
+    mode. The first shifts the global torch stream by one draw per layer per
+    batch; the second is a generator outside our seeding. Same reasoning as
+    `BEATsFrontend`'s `encoder_layerdrop = 0`, and a test pins it.
+
+    🔴 **The input normalisation is over the valid prefix.** Wav2Vec2 expects
+    zero-mean unit-variance per utterance (`Wav2Vec2FeatureExtractor`,
+    `do_normalize: true`). Taking the statistics over the padded row would make
+    a file's features depend on how long its batch neighbours are -- rule 2.4.
+    The pad is zeroed *after* normalisation, so it contributes nothing.
+
+    ⚠️ **The final encoder LayerNorm is kept on the truncated stack.**
+    `do_stable_layer_norm` is pre-LN: the residual stream is un-normalised
+    between blocks and the checkpoint's `encoder.layer_norm` was trained on
+    block 24's output. Applying it after block 12 is what HF itself does for a
+    12-layer config, and it keeps the stream's scale bounded under fp16 --
+    which is the reason it is kept, not a claim that it is the best readout.
+
+    The CNN feature extractor is always frozen (even with `freeze: false`): it is
+    the standard wav2vec2 fine-tuning recipe.
+    """
+
+    #: Config target names -> Wav2Vec2 attribute names, so one LoRA target list
+    #: names the same projections in BEATs and XLS-R.
+    TARGET_ALIASES = {"fc1": "intermediate_dense", "fc2": "output_dense"}
+    _MIN_SAMPLES = 400              # the conv stack's receptive field: one frame
+
+    def __init__(self, cfg: FrontendConfig, audio: AudioConfig):
+        super().__init__(cfg, audio)
+        from transformers import Wav2Vec2Config, Wav2Vec2Model
+
+        if cfg.weights is None:
+            raise ValueError(
+                "XLSRFrontend needs `weights`: a local directory holding "
+                "facebook/wav2vec2-xls-r-300m (config.json + weights). A randomly-"
+                "initialised XLS-R is a StubFrontend with a longer runtime.")
+        if cfg.freq_pool.kind != "none" or cfg.n_freq is not None:
+            raise ValueError(
+                "XLS-R emits (B, T, D) with no frequency axis: set freq_pool "
+                "{kind: none} and n_freq: null")
+        if audio.sample_rate != 16000:
+            raise ValueError(
+                f"XLS-R is a 16 kHz model; audio.sample_rate is {audio.sample_rate}")
+        hf_cfg = Wav2Vec2Config.from_pretrained(cfg.weights, local_files_only=True)
+        hop = 1
+        for s in hf_cfg.conv_stride:
+            hop *= s
+        expected_fps = audio.sample_rate / hop
+        if abs(cfg.fps - expected_fps) > 1e-9:
+            raise ValueError(
+                f"XLS-R emits {expected_fps:g} fps (conv strides multiply to {hop} "
+                f"samples at {audio.sample_rate} Hz) but the config says fps={cfg.fps}. "
+                f"fps is what aligns two frontends onto a common time base, so a "
+                f"wrong value misaligns evidence silently rather than failing.")
+        if hf_cfg.hidden_size != cfg.output_dim:
+            raise ValueError(
+                f"checkpoint hidden_size={hf_cfg.hidden_size} but config "
+                f"output_dim={cfg.output_dim}")
+        if hf_cfg.feat_extract_norm != "layer":
+            # A group-norm feature extractor normalises across TIME, so the padded
+            # extent would reach the valid frames. XLS-R is `layer`; refuse the rest.
+            raise ValueError(
+                f"feat_extract_norm={hf_cfg.feat_extract_norm!r}: only 'layer' is "
+                f"padding-invariant (group norm pools over time)")
+
+        # See the class docstring. Dropouts are pretraining regularisers; on a
+        # frozen encoder they only add RNG draws to a module we are not training.
+        hf_cfg.layerdrop = 0.0
+        hf_cfg.apply_spec_augment = False
+        hf_cfg.mask_time_prob = 0.0
+        hf_cfg.mask_feature_prob = 0.0
+        if cfg.freeze:
+            for k in ("hidden_dropout", "attention_dropout", "activation_dropout",
+                      "feat_proj_dropout", "final_dropout"):
+                setattr(hf_cfg, k, 0.0)
+
+        model, info = Wav2Vec2Model.from_pretrained(
+            cfg.weights, config=hf_cfg, local_files_only=True,
+            attn_implementation="sdpa", output_loading_info=True)
+        if info["missing_keys"] or info.get("mismatched_keys"):
+            raise ValueError(
+                f"XLS-R checkpoint did not match the model: missing="
+                f"{info['missing_keys']}, mismatched={info.get('mismatched_keys')}")
+        self.model = model
+
+        self.n_layers = self._truncate(cfg.layers, len(model.encoder.layers))
+
+        self.n_lora = 0
+        if cfg.adapter.kind == "lora":
+            self.n_lora = _apply_lora(self.model.encoder.layers, cfg.adapter.targets,
+                                      cfg.adapter.rank, cfg.adapter.alpha,
+                                      cfg.adapter.dropout, rename=self.TARGET_ALIASES,
+                                      where="the XLS-R encoder")
+        elif cfg.adapter.kind != "none":
+            raise ValueError(f"unsupported adapter kind {cfg.adapter.kind!r} for XLS-R")
+
+        self._apply_freeze()
+        for p in self.model.feature_extractor.parameters():
+            p.requires_grad_(False)
+
+    def _truncate(self, layers: int | None, available: int) -> int:
+        """Keep the first `layers` blocks and DELETE the rest (as BEATs does)."""
+        if layers is None:
+            return available
+        if not 1 <= layers <= available:
+            raise ValueError(
+                f"layers={layers} out of range for a {available}-layer checkpoint")
+        self.model.encoder.layers = nn.ModuleList(list(self.model.encoder.layers)[:layers])
+        self.model.config.num_hidden_layers = layers
+        return layers
+
+    # -- framing --------------------------------------------------------------
+
+    def _frames_for(self, n_samples: Tensor | int) -> Tensor | int:
+        """The conv stack's own arithmetic, via the model's helper.
+
+        🔴 Not the nominal ceil(samples / 320): the stack is `floor((L - k)/s) + 1`
+        per layer, one frame short of nominal at almost every length (4 s:
+        nominal 200, actual 199). Audio shorter than one receptive field is
+        padded up to it in `_encode`, so the floor here is 1, not 0.
+        """
+        if isinstance(n_samples, Tensor):
+            n = n_samples.clamp(min=self._MIN_SAMPLES)
+            return self.model._get_feat_extract_output_lengths(n).clamp(min=1)
+        n = torch.tensor(max(int(n_samples), self._MIN_SAMPLES))
+        return max(1, int(self.model._get_feat_extract_output_lengths(n)))
+
+    # -- encoding -------------------------------------------------------------
+
+    @staticmethod
+    def _normalise(wav: Tensor, lengths: Tensor) -> Tensor:
+        """Zero-mean unit-variance per row over ``[0, lengths)``, zeros after.
+
+        Matches `Wav2Vec2FeatureExtractor.zero_mean_unit_var_norm` (population
+        variance, eps 1e-7). Always float32: under fp16 a 60 s row's sum of
+        squares overflows.
+        """
+        x = wav.float()
+        valid = (torch.arange(x.shape[-1], device=x.device)[None, :]
+                 < lengths[:, None]).float()
+        n = lengths.clamp(min=1).float()[:, None]
+        mean = (x * valid).sum(-1, keepdim=True) / n
+        var = (((x - mean) * valid) ** 2).sum(-1, keepdim=True) / n
+        return (x - mean) / torch.sqrt(var + 1e-7) * valid
+
+    def _encode(self, wav: Tensor, lengths: Tensor | None = None) -> Tensor:
+        """(B, S) -> (B, T, 1024) at 50 fps.
+
+        One padded pass, unlike BEATs: wav2vec2's token sequence *is* time, so a
+        row's valid frames are a prefix and a key-padding mask is exact. What
+        makes it exact, each pinned by tests/test_frontends_xlsr.py:
+
+        * the CNN only sees valid samples in valid frames (`_frames_for` is its
+          own arithmetic) and its `layer` norm is per frame, not over time;
+        * padded frames are zeroed before the positional conv, which is what a
+          lone row sees there anyway -- the conv's own zero padding;
+        * attention masks padded keys in every block.
+        """
+        b, s = wav.shape
+        if lengths is None:
+            lengths = torch.full((b,), s, dtype=torch.long, device=wav.device)
+        lengths = lengths.to(wav.device)
+        x = self._normalise(wav, lengths)
+        if s < self._MIN_SAMPLES:
+            x = F.pad(x, (0, self._MIN_SAMPLES - s))
+        m = self.model
+        feats = m.feature_extractor(x).transpose(1, 2)          # (B, T, 512)
+        hidden, _ = m.feature_projection(feats)                 # (B, T, 1024)
+
+        t = hidden.shape[1]
+        valid = self._frames_for(lengths)
+        frame_mask = torch.arange(t, device=hidden.device)[None, :] < valid[:, None]
+        hidden = hidden * frame_mask[..., None].to(hidden.dtype)
+        enc = m.encoder
+        attn_mask = enc._update_full_mask(frame_mask.long(), hidden)
+        hidden = hidden + enc.pos_conv_embed(hidden)
+        hidden = enc.dropout(hidden)
+        for layer in enc.layers:
+            hidden = layer(hidden, attention_mask=attn_mask)[0]
+        return enc.layer_norm(hidden)
+
+
 def build_frontend(cfg: FrontendConfig, audio: AudioConfig) -> Frontend:
     """Construct a frontend from config.
 
-    `stub` and `beats` are implemented. The remaining names in
+    `stub`, `beats` and `xlsr_300m` are implemented. The remaining names in
     docs/architecture/02 stay unwired on purpose: the licences for SSLAM, EAT
     and W2V-BERT 2.0 are unverified (09 C1-C3), and a licence that forbids
     third-party provision makes a checkpoint unusable *at all* here rather than
@@ -514,14 +744,18 @@ def build_frontend(cfg: FrontendConfig, audio: AudioConfig) -> Frontend:
 
     BEATs is exempt from that gate because its licence is not in question --
     MIT, read at origin -- which is exactly why 02 calls it "the licence-safe
-    floor" and why candidate A was specified against it.
+    floor" and why candidate A was specified against it. XLS-R 300M is exempt
+    for the same reason: Apache-2.0, read on the facebook/wav2vec2-xls-r-300m card.
     """
     if cfg.name == "stub":
         return StubFrontend(cfg, audio)
     if cfg.name == "beats":
         return BEATsFrontend(cfg, audio)
+    if cfg.name == "xlsr_300m":
+        return XLSRFrontend(cfg, audio)
     raise NotImplementedError(
-        f"frontend {cfg.name!r} is not wired yet. 'stub' and 'beats' are implemented; "
+        f"frontend {cfg.name!r} is not wired yet. 'stub', 'beats' and 'xlsr_300m' are "
+        f"implemented; "
         f"the other checkpoints are gated on the licence verification in "
         f"docs/architecture/09-open-questions.md (C1-C3). Set `name: stub` with "
         f"`weights: null` to build and test the architecture without weights.")

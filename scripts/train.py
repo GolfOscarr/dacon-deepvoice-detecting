@@ -71,11 +71,49 @@ from training.validate import (FoldResult, aggregate_folds, evaluate,  # noqa: E
 SELECTIONS = ("raw", "ema", "soup")
 
 
+def parse_weights(weights: str | None, frontends) -> dict[str, str]:
+    """`--weights` -> {frontend name: checkpoint dir}.
+
+    Two forms. A bare path applies to every frontend -- the single-trunk form
+    every earlier run used. `name=DIR[,name=DIR...]` names each frontend, which a
+    two-trunk config needs because BEATs and XLS-R read different checkpoints.
+
+    🔴 A bare path on a multi-frontend config is refused rather than broadcast:
+    handing the BEATs directory to XLS-R fails deep inside `transformers` with a
+    missing-config.json error that does not name the flag. A name the config does
+    not have is refused too; a frontend the mapping omits keeps its config value.
+    """
+    if weights is None:
+        return {}
+    names = list(frontends)
+    if "=" not in weights:
+        if len(names) > 1:
+            raise SystemExit(
+                f"--weights {weights!r} is one path but the model has {len(names)} "
+                f"frontends {names}; pass --weights "
+                + ",".join(f"{n}=DIR" for n in names))
+        return {n: weights for n in names}
+    out = {}
+    for part in weights.split(","):
+        name, sep, path = part.partition("=")
+        name, path = name.strip(), path.strip()
+        if not sep or not name or not path:
+            raise SystemExit(f"--weights: cannot parse {part!r}; expected name=DIR")
+        if name not in frontends:
+            raise SystemExit(f"--weights names frontend {name!r}; the model has {names}")
+        if name in out:
+            raise SystemExit(f"--weights names frontend {name!r} twice")
+        out[name] = path
+    return out
+
+
 def build_model(model_cfg_path: str, weights: str | None) -> DeepVoiceNet:
     cfg = load_model_config(model_cfg_path)
-    if weights is not None:
+    by_name = parse_weights(weights, cfg.frontends)
+    if by_name:
         cfg = dataclasses.replace(cfg, frontends={
-            k: dataclasses.replace(v, weights=weights) for k, v in cfg.frontends.items()})
+            k: (dataclasses.replace(v, weights=by_name[k]) if k in by_name else v)
+            for k, v in cfg.frontends.items()})
     torch.manual_seed(cfg.seed)
     return DeepVoiceNet(cfg)
 
@@ -224,7 +262,10 @@ def main() -> int:
     p.add_argument("--processing", default="configs/processing_v1.yaml",
                    help="draw / render / ship / folds / loop (06 P8); the older "
                         "run_*.yaml is the training sampler's and is not read")
-    p.add_argument("--weights", help="frontend checkpoint dir; omit for a stub config")
+    p.add_argument("--weights",
+                   help="frontend checkpoint dir, or name=DIR,name=DIR for a config with "
+                        "several frontends (e.g. audio=.../beats,speech=.../xlsr-300m); "
+                        "omit for a stub config")
     p.add_argument("--folds", default="0", help="comma-separated, or 'all'")
     p.add_argument("--stages", default=",".join(STAGES),
                    help=f"comma-separated subset of {STAGES}, in order")
