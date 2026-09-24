@@ -568,10 +568,21 @@ def render(spec: SampleSpec, manifest: pd.DataFrame | ManifestIndex,
            cfg: RenderConfig | None = None) -> RenderedSample:
     """Decode, compose, augment, normalise. ``render(spec) == render(spec)``.
 
+    Critical: a spec drawn by ``processing.sampler`` -- one carrying a noise
+    layer (``snr_db``) or a slot above 0 -- is REFUSED. Fed one, this renderer
+    silently rendered different audio (the layer at 0 dB, no crossfade at the
+    tile joints, docs/processing/05 C1); ``processing.render.render`` is the
+    renderer for those specs.
+
     Critical: the augment chain is called as ``fn(wav, rng)`` and there is no
     third argument to put a label in -- ``P(T | L) = P(T)`` is enforced by the
     signature, not by this function's good behaviour (docs/pipelines/03 §2).
     """
+    if any(c.snr_db is not None or c.slot > 0 for c in spec.components):
+        raise ValueError(
+            f"spec {spec.sample_id} carries a noise layer or a bucket-tiled slot: it was "
+            f"drawn by processing.sampler and must be rendered by processing.render.render "
+            f"(docs/processing/05 C1)")
     cfg = cfg or RenderConfig()
     index = ManifestIndex.coerce(manifest)
     sr = int(cfg.audio.sample_rate)

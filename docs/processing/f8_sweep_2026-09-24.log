@@ -1,0 +1,64 @@
+slices: {'train': 278881}
+
+=== f8=1.0  18/18 pass  (39s)  f={1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 1.0, 6: 1.0, 7: 1.0, 8: 1.0, 9: 0.57}
+  [ok] I1_transform_name_independence: worst |P(T|FAKE) - P(T|REAL)| = 0.0124 on 'rir' over 6 transform NAME(s), tol 0.02. caveat: names only -- parameter-level leaks are I1b's job
+  [ok] I1b_metadata_shortcut_auc: worst metadata-only CV AUC = 0.5059 in 'pooled' over 32 feature(s); gate < 0.6000 (floor 0.6, 4 SE = 0.0188 at n=(12243, 5463)) [pooled=0.5059, music-only=0.4937, voice-only=0.4885, mixed=0.4848]
+  [ok] I2_stratified_composedness: worst within-stratum |P(composed|FAKE) - P(composed|REAL)| = 0.0000 in 'voice-only', tol 0.0200 (floor 0.02, 4 SE of the gap at these counts)
+  [ok] I2c_marginal_composedness: P(composed|FAKE) = 1.0000 vs P(composed|REAL) = 1.0000 over ALL cells, gap 0.0000, tol 0.0200 (floor 0.02, 4 SE = 0.0000)
+  [ok] I2b_mixedness_balance: P(mixed|FAKE) = 0.5695 vs P(mixed|REAL) = 0.5612 (cells 1-8), gap 0.0083, tol 0.0322 (floor 0.02, 4 SE = 0.0322)
+  [ok] I3_real_components_on_both_sides: 1073/2052 = 0.523 of real components drawn 2+ times appear with both FILE_FAKE=0 and =1 (10921 distinct real components drawn)
+  [ok] I4_component_pools_imply_the_labels: 0 component(s) whose pool contradicts the cell's labels
+  [ok] I5_split_safety: 0 file(s) drawn from outside slice='train'; fold clause vacuous (the frame is one fold: [])
+  [ok] I7a_cells_6_7_always_composed: 0 spec(s) in cells 6/7 not composed. Caveat: defense-in-depth only: SampleSpec refuses to construct one, so this cannot fail today
+  [ok] I7_eval_size_floors: SKIPPED: VG1 A8/A9 bind on an evaluation stream; pass eval_floors=True when auditing val_specs
+  [ok] I8_C1_positive_rates: measured file=0.612, voice=0.511, music=0.510, v_pres=0.692, m_pres=0.695; bounds [0.2, 0.8]
+  [ok] I21_generator_diversity: voice: 221 families (effective 90.4); music: 5 families (effective 5.0); floor 3 per fake role
+  [ok] I9_C2_present_count_floor: 0/625 batch(es) below 8 present samples for a masked head (draw order, batch_size=32)
+  [ok] I1c_draw_shortcut_auc_file_fake: worst draw-feature CV AUC = 0.5070 in 'voice-only' over 10 feature(s); gate < 0.6000 (floor 0.6, 4 SE = 0.0402 at n=(2582, 1215)) [voice-only=0.5070, pooled=0.5017, mixed=0.4952, music-only=0.4948]
+  [ok] I1c_draw_shortcut_auc_voice_fake: worst draw-feature CV AUC = 0.5276 in 'pooled' over 14 feature(s); gate < 0.6100 (floor 0.61, 4 SE = 0.0196 at n=(7066, 6770)) [pooled=0.5276, voice-only=0.5071, mixed=0.5016]; the pooled component-head floor is the D-2 residual allowance (03 §7)
+  [ok] I1c_draw_shortcut_auc_music_fake: worst draw-feature CV AUC = 0.5341 in 'pooled' over 14 feature(s); gate < 0.6100 (floor 0.61, 4 SE = 0.0196 at n=(7090, 6819)) [pooled=0.5341, mixed=0.5046, music-only=0.4953]; the pooled component-head floor is the D-2 residual allowance (03 §7)
+  [ok] I1c_draw_shortcut_auc_voice_present: worst draw-feature CV AUC = 0.5984 in 'pooled' over 10 feature(s); gate < 0.6000 (floor 0.6, 4 SE = 0.0210 at n=(13836, 3870)) [pooled=0.5984]
+  [ok] I1c_draw_shortcut_auc_music_present: worst draw-feature CV AUC = 0.5846 in 'pooled' over 10 feature(s); gate < 0.6000 (floor 0.6, 4 SE = 0.0211 at n=(13909, 3797)) [pooled=0.5846]
+  [ok] I1d_edge_exposure: edge exposure per pool (onset within 50 ms or end within 50 ms): A=0.0000, B=0.0000, C=0.0000, D=0.0000, E=0.0000; gate < 0.01 (the training draw exposes pool D at 0.87)
+
+=== f8=0.5  15/18 pass  (39s)  f={1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.862, 6: 1.0, 7: 1.0, 8: 0.5, 9: 0.492}
+  [ok] I1_transform_name_independence: worst |P(T|FAKE) - P(T|REAL)| = 0.0124 on 'rir' over 6 transform NAME(s), tol 0.02. caveat: names only -- parameter-level leaks are I1b's job
+  [ok] I1b_metadata_shortcut_auc: worst metadata-only CV AUC = 0.5059 in 'pooled' over 32 feature(s); gate < 0.6000 (floor 0.6, 4 SE = 0.0188 at n=(12243, 5463)) [pooled=0.5059, music-only=0.4937, voice-only=0.4885, mixed=0.4833]
+  [ok] I2_stratified_composedness: worst within-stratum |P(composed|FAKE) - P(composed|REAL)| = 0.0000 in 'voice-only', tol 0.0200 (floor 0.02, 4 SE of the gap at these counts)
+  [FAIL] I2c_marginal_composedness: P(composed|FAKE) = 0.9240 vs P(composed|REAL) = 0.9451 over ALL cells, gap 0.0211, tol 0.0200 (floor 0.02, 4 SE = 0.0146)
+  [ok] I2b_mixedness_balance: P(mixed|FAKE) = 0.5695 vs P(mixed|REAL) = 0.5612 (cells 1-8), gap 0.0083, tol 0.0322 (floor 0.02, 4 SE = 0.0322)
+  [ok] I3_real_components_on_both_sides: 976/1837 = 0.531 of real components drawn 2+ times appear with both FILE_FAKE=0 and =1 (10384 distinct real components drawn)
+  [ok] I4_component_pools_imply_the_labels: 0 component(s) whose pool contradicts the cell's labels
+  [ok] I5_split_safety: 0 file(s) drawn from outside slice='train'; fold clause vacuous (the frame is one fold: [])
+  [ok] I7a_cells_6_7_always_composed: 0 spec(s) in cells 6/7 not composed. Caveat: defense-in-depth only: SampleSpec refuses to construct one, so this cannot fail today
+  [ok] I7_eval_size_floors: SKIPPED: VG1 A8/A9 bind on an evaluation stream; pass eval_floors=True when auditing val_specs
+  [ok] I8_C1_positive_rates: measured file=0.612, voice=0.511, music=0.510, v_pres=0.692, m_pres=0.695; bounds [0.2, 0.8]
+  [ok] I21_generator_diversity: voice: 227 families (effective 86.7); music: 5 families (effective 5.0); floor 3 per fake role
+  [ok] I9_C2_present_count_floor: 0/625 batch(es) below 8 present samples for a masked head (draw order, batch_size=32)
+  [ok] I1c_draw_shortcut_auc_file_fake: worst draw-feature CV AUC = 0.5070 in 'voice-only' over 11 feature(s); gate < 0.6000 (floor 0.6, 4 SE = 0.0402 at n=(2582, 1215)) [voice-only=0.5070, mixed=0.5066, pooled=0.5030, music-only=0.4948]
+  [ok] I1c_draw_shortcut_auc_voice_fake: worst draw-feature CV AUC = 0.5678 in 'mixed' over 15 feature(s); gate < 0.6000 (floor 0.6, 4 SE = 0.0232 at n=(4484, 5555)) [mixed=0.5678, pooled=0.5595, voice-only=0.5071]; the pooled component-head floor is the D-2 residual allowance (03 §7)
+  [ok] I1c_draw_shortcut_auc_music_fake: worst draw-feature CV AUC = 0.5687 in 'mixed' over 15 feature(s); gate < 0.6000 (floor 0.6, 4 SE = 0.0232 at n=(4402, 5637)) [mixed=0.5687, pooled=0.5650, music-only=0.4953]; the pooled component-head floor is the D-2 residual allowance (03 §7)
+  [FAIL] I1c_draw_shortcut_auc_voice_present: failing draw-feature CV AUC = 0.6354 in 'pooled' over 11 feature(s); gate < 0.6000 (floor 0.6, 4 SE = 0.0210 at n=(13836, 3870)) [pooled=0.6354]
+  [FAIL] I1c_draw_shortcut_auc_music_present: failing draw-feature CV AUC = 0.6240 in 'pooled' over 11 feature(s); gate < 0.6000 (floor 0.6, 4 SE = 0.0211 at n=(13909, 3797)) [pooled=0.6240]
+  [ok] I1d_edge_exposure: edge exposure per pool (onset within 50 ms or end within 50 ms): A=0.0000, B=0.0000, C=0.0000, D=0.0000, E=0.0000, cell5=0.0000, cell8=0.0000; gate < 0.01 (the training draw exposes pool D at 0.87)
+
+=== f8=0.0  13/18 pass  (38s)  f={1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.725, 6: 1.0, 7: 1.0, 8: 0.0, 9: 0.413}
+  [ok] I1_transform_name_independence: worst |P(T|FAKE) - P(T|REAL)| = 0.0124 on 'rir' over 6 transform NAME(s), tol 0.02. caveat: names only -- parameter-level leaks are I1b's job
+  [ok] I1b_metadata_shortcut_auc: worst metadata-only CV AUC = 0.5062 in 'pooled' over 32 feature(s); gate < 0.6000 (floor 0.6, 4 SE = 0.0188 at n=(12243, 5463)) [pooled=0.5062, music-only=0.4937, voice-only=0.4885, mixed=0.4814]
+  [ok] I2_stratified_composedness: worst within-stratum |P(composed|FAKE) - P(composed|REAL)| = 0.0000 in 'voice-only', tol 0.0200 (floor 0.02, 4 SE of the gap at these counts)
+  [FAIL] I2c_marginal_composedness: P(composed|FAKE) = 0.8437 vs P(composed|REAL) = 0.8898 over ALL cells, gap 0.0460, tol 0.0200 (floor 0.02, 4 SE = 0.0200)
+  [ok] I2b_mixedness_balance: P(mixed|FAKE) = 0.5695 vs P(mixed|REAL) = 0.5612 (cells 1-8), gap 0.0083, tol 0.0322 (floor 0.02, 4 SE = 0.0322)
+  [ok] I3_real_components_on_both_sides: 892/1651 = 0.540 of real components drawn 2+ times appear with both FILE_FAKE=0 and =1 (9798 distinct real components drawn)
+  [ok] I4_component_pools_imply_the_labels: 0 component(s) whose pool contradicts the cell's labels
+  [ok] I5_split_safety: 0 file(s) drawn from outside slice='train'; fold clause vacuous (the frame is one fold: [])
+  [ok] I7a_cells_6_7_always_composed: 0 spec(s) in cells 6/7 not composed. Caveat: defense-in-depth only: SampleSpec refuses to construct one, so this cannot fail today
+  [ok] I7_eval_size_floors: SKIPPED: VG1 A8/A9 bind on an evaluation stream; pass eval_floors=True when auditing val_specs
+  [ok] I8_C1_positive_rates: measured file=0.612, voice=0.511, music=0.510, v_pres=0.692, m_pres=0.695; bounds [0.2, 0.8]
+  [ok] I21_generator_diversity: voice: 226 families (effective 66.8); music: 5 families (effective 5.0); floor 3 per fake role
+  [ok] I9_C2_present_count_floor: 0/625 batch(es) below 8 present samples for a masked head (draw order, batch_size=32)
+  [ok] I1c_draw_shortcut_auc_file_fake: worst draw-feature CV AUC = 0.5070 in 'voice-only' over 11 feature(s); gate < 0.6000 (floor 0.6, 4 SE = 0.0402 at n=(2582, 1215)) [voice-only=0.5070, mixed=0.5053, pooled=0.5010, music-only=0.4948]
+  [FAIL] I1c_draw_shortcut_auc_voice_fake: failing draw-feature CV AUC = 0.6361 in 'mixed' over 15 feature(s); gate < 0.6000 (floor 0.6, 4 SE = 0.0232 at n=(4484, 5555)) [mixed=0.6361, pooled=0.5974, voice-only=0.5071]; the pooled component-head floor is the D-2 residual allowance (03 §7)
+  [FAIL] I1c_draw_shortcut_auc_music_fake: failing draw-feature CV AUC = 0.6369 in 'mixed' over 15 feature(s); gate < 0.6000 (floor 0.6, 4 SE = 0.0232 at n=(4402, 5637)) [mixed=0.6369, pooled=0.6001, music-only=0.4953]; the pooled component-head floor is the D-2 residual allowance (03 §7)
+  [FAIL] I1c_draw_shortcut_auc_voice_present: failing draw-feature CV AUC = 0.6723 in 'pooled' over 11 feature(s); gate < 0.6000 (floor 0.6, 4 SE = 0.0210 at n=(13836, 3870)) [pooled=0.6723]
+  [FAIL] I1c_draw_shortcut_auc_music_present: failing draw-feature CV AUC = 0.6638 in 'pooled' over 11 feature(s); gate < 0.6000 (floor 0.6, 4 SE = 0.0211 at n=(13909, 3797)) [pooled=0.6638]
+  [ok] I1d_edge_exposure: edge exposure per pool (onset within 50 ms or end within 50 ms): A=0.0000, B=0.0000, C=0.0000, D=0.0000, E=0.0000, cell5=0.0000, cell8=0.0000; gate < 0.01 (the training draw exposes pool D at 0.87)

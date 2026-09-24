@@ -398,6 +398,210 @@ to end on pretrained weights and the chain from manifest to submission CSV has b
 
 ---
 
+## 🟡 2026-09-11 — EDA plan, and Phase 0 built
+
+**Plan**: [`docs/EDA/`](docs/EDA/README.md), 9 files — one per pool, plus the shared harness, the
+cross-pool analyses, and the phase order with seven pre-committed gates. It is the *execution* half
+of [`data/07`](docs/data/07-eda-plan.md)'s method catalog and [`data/10`](docs/data/10-preprocessing-and-filtering.md)'s
+processing catalog, neither of which is organized by pool or can be run.
+
+**Code**: [`eda/`](eda/AGENTS.md) — Phase 0, everything answerable without decoding a sample.
+41 tests, **19 of 19 mutants killed**. Driven by [`configs/eda.yaml`](configs/eda.yaml).
+
+- [x] 🔴 **Pool D is no longer empty, and this file said otherwise until now.** `fakemusiccaps`
+  (zenodo-15063698, 12.0 GiB, 27,605 clips from 5 TTM models, CC BY-NC 4.0 verified at origin) landed
+  2026-09-10 with a complete provenance record. The bucket holds **13 sources / 291.0 GiB**, all with
+  `_meta/DONE`, against the 9 / ~239 GiB [`data/12`](docs/data/12-acquisition-status.md) still
+  reports. `fma`, `mtg-jamendo` and `wavefake` also landed unrecorded.
+- [ ] 🔴 **`fakemusiccaps` is not in [`scripts/sources.yaml`](scripts/sources.yaml)**, so the
+  fetcher's licence gate — the G2 gate expressed as data — never saw the one source carrying **0.27**
+  of the metric. Reconcile the registry before the next fetch run.
+- [x] 🔴 **The framing correction**: [`data/07`](docs/data/07-eda-plan.md) Tier X already rejects
+  handcrafted acoustic features as model input (CtrSVDD: raw waveform **13.75%** EER vs MFCC
+  **26.67%**). So "feature engineering" here is the seven manifest columns the pipeline actually
+  consumes — and measured on the smoke corpus, `pair_id` is null on 2,177 of 2,177 rows,
+  `validity_mask_ref` likewise, `aug_strength` is 0.0 everywhere, and `label_confidence` is assigned
+  per *source* rather than from any per-file evidence.
+- [x] **Two measurement planes** (native / post-16 kHz chain) are the plan's organizing idea: every
+  band-limiting question this project has is a *difference* between them, and a single-plane EDA
+  answers none. 🔷 The native plane needs no bypass — `resample_poly_to` returns its input unchanged
+  when the rates match (`training/render.py:139`), so `load_audio(path, sample_rate=orig_sr)` is the
+  undisturbed file through the same decode path, same ffmpeg fallback, same `DecodeError`.
+- [x] **Three tables, not one.** M tier is 100% of ~1.7 M files and scalars; S tier is sampled and
+  carries three `[128]`-vectors per plane. One table forces a choice between 1.7 M mostly-null vector
+  columns and silently sampling the thing the shortcut audit needs the *population* of.
+- [x] **Contracts, enforced rather than documented**: an extractor declares its columns and the
+  declaration is checked on every call; a signal extractor's arity makes it unable to see which plane
+  it is on; a decode failure is a row with `probe_ok=False`, never a dropped file; gates are a
+  tri-state with **`fail > na > pass`**, so a check whose input is absent reads `na`. All four aim at
+  defects this repo has already paid for — 19 ignored config fields, `dup_group` computed and
+  hardcoded to `None`, VG1 A10 comparing nothing and reading as fine.
+- [x] **MUSAN and RIRS are declared one source per partition** (`musan-speech`→A, `musan-music`→C,
+  `musan-noise`→E). `sources.yaml` marks "never feed MUSAN's music in as noise" Critical; splitting it
+  in config makes that structural instead of a rule somebody has to remember.
+- [x] **Verified end to end on a fixture** with a planted format confound and a planted cross-source
+  duplicate: `G-EDA2 fail` (AUC **1.000** on `voice_fake`, carried by `bit_rate`/`file_bytes`/
+  `orig_sr`), `G-EDA5 fail`, exit 1. The gate can fire.
+- [ ] ⚠️ **Nothing has run on the real corpus.** Every artifact in S3 is a publisher archive and
+  **nothing is extracted**; `scripts/fetch_from_s3.py --extract` is the prerequisite, and egress is
+  billed per read. 🔷 The ffprobe pass is ~16 minutes on 32 workers and ~8 hours on one.
+- [ ] 🔴 **The prediction to test first**: MUSAN ships its music partition as `music/fma/`,
+  `music/jamendo/` and `music/hd/`, and we separately acquired FMA and MTG-Jamendo. That is the
+  RIRS/MUSAN redistribution pattern again, on the **0.27**-weight music head instead of on noise.
+  One hash sweep to check; a corpus rebuild not to.
+- [ ] ⬜ Phase 1 (the S tier: `planes.py`, level/timing/spectral/content extractors) and the manifest
+  projection are not built. `gates.py` reports `na` for G-EDA4/6/7 with the reason, which is the
+  correct verdict for a check whose input is absent.
+
+**🔴 Review pass, same day — three real defects, and none of them was found by a test**
+
+- [x] 🔴 **The exclusion matcher was substring-based, in two copies.**
+  `rel.startswith(x) or f"/{x}" in f"/{rel}"` reads correctly and silently excludes `real_half/` and
+  `a/really/` for `exclude: ["real"]`. It is the **licence** gate on pool D. `SourceSpec` now owns
+  the matching and `eda/ids.py` implements it on path components, so `eda.driver` and `eda.gates`
+  cannot disagree about what an exclusion means.
+- [x] 🔴 **`na` meant "found nothing" as well as "did not run"** — the exact confusion the tri-state
+  exists to prevent, reintroduced one layer up. The duplicate sweep wrote its detail table only when
+  it found something, so a **clean** corpus left no artifact and a later `eda gates` reported `na`
+  for a pass. Three paths could confuse the two and all three are now explicit: the summary is
+  written unconditionally, a probe that skipped `identity` raises `NoHashes`, and a declared-but-
+  unconsolidated pool lands in `load_files(...).attrs["missing_pools"]`.
+- [x] 🔴 **`configs/eda.yaml` failed `test_every_shipped_config_loads`** — a pre-existing guard that
+  sweeps `configs/` and asserts every file is accepted by **exactly one** loader. It was doing its
+  job; `load_eda_config` is now registered. Resolving the resulting three-way tie surfaced a second
+  defect: an EDA config with **no sources** loaded cleanly and then did nothing, so it is refused.
+- [x] **Hardcoding removed**: `VALID_POOLS` now derives from `training.manifest.POOLS`; `HEADS`
+  derives from the manifest's own label-column order rather than literal tuple indices (the shape of
+  the File/Voice swap that once passed 749 of 749 tests); `n_splits` / `top_k` / `max_depth` moved
+  into a new `AnalysisConfig`, whose seed is **deliberately separate** from `SampleConfig.seed` —
+  that one picks which files are measured and is part of the corpus definition.
+- [x] **Duplication removed**: `eda/ids.py` holds `file_id` construction, its decomposition and
+  path-component matching, each of which had been written twice.
+- [x] ⚠️ **One mutant was a false kill.** `test_the_cli_records_a_clean_sweep` died against its
+  mutation *and* passed nothing clean, because it asserted the verb's exit code while the fixture's
+  flat directory trips G-EDA3 at any floor. A mutant that dies against an already-red test is not
+  evidence. Check the test is green before counting the kill.
+
+---
+
+## 🔴 2026-09-11 — SONICS and CtrSVDD registered, and one of them was in the wrong pool
+
+Bucket is now **15 sources / ~340 GiB**. Both landed described as fake-music sources; **neither is
+one**, and getting that wrong would have been expensive in different ways.
+
+- [x] 🔴 **SONICS was acquired as `pool: D`, and that is wrong for 100% of it.** Its own
+  `fake_songs.csv` reports `no_vocal = False` for **all 49,074 rows** — every song has vocals.
+  `POOL_LABELS["D"]` asserts `voice_present = 0`, so as a pool-D component it would have told the
+  model there is no voice in 49k AI songs that all sing, routed sung vocals into the **0.27**-weight
+  music-fake head, and left `voice_fake` null on the strongest fake-vocal evidence in the corpus.
+  It is **`row_kind: whole_file`, `cell: 8`** — and `validate_manifest` requires `pool = null` on a
+  whole-file row, so the fix is a change of row kind, not a relabelling.
+- [x] ⚠️ **CtrSVDD is fake *sung voice*, so it is pool B, not D.**
+  [`data/02`](docs/data/02-label-taxonomy.md): *"Voice includes spoken and sung"*. Registered as B,
+  which is what its acquisition record already said. **Pool D is therefore still FakeMusicCaps
+  alone, five families, below the ≥8 floor** — SONICS does not fill it.
+- [x] 🔴 **The corpus gains its first whole-file rows, and a mirrored trap with them.** The smoke
+  corpus was 2,177 rows, *all* components. [`data/02`](docs/data/02-label-taxonomy.md)'s `f_c` rule
+  is an equality: 49k whole-file cell-8 rows with no whole-file cell-5 counterpart makes **"is a
+  whole song" predict FAKE**. The counterpart is FMA/Jamendo tracks *with vocals*, which is what
+  [`EDA/03`](docs/EDA/03-pool-c-real-instrumental.md) C2's VAD sweep finds — so **C2 is now
+  load-bearing rather than hygiene**. MUSDB18-HQ would close it properly and is cleared, unacquired.
+- [x] **Schema**: `SourceSpec` gains `row_kind` / `cell`, `pool` becomes optional, and the two
+  branches mirror `validate_manifest` exactly — including its refusal of cells **6 and 7** as
+  whole-file rows, since they hold one real and one fake component. `head_labels` now reads
+  `POOL_LABELS` for components and `CELL_TABLE` for whole files. The on-disk directory is a
+  **partition** (`A`–`E`, `mixed`, `cell8`) because a whole-file source has no pool to partition by.
+- [x] **Verified**: 46 EDA tests, **25 of 25 mutants killed**, and an end-to-end run over a
+  five-source fixture spanning both row kinds. `voice_fake` now scores **17** rows where pool-D
+  assignment gave it 12 — SONICS feeds both fake heads instead of one.
+- [ ] ⚠️ **Numbers that will shape ingest**: 1,971 h against a ~45 h budget (**44×**, so DOSS-cap on
+  `source × algorithm`); 2 artifact families, not 5 (`chirp-v2/v3/v3.5` are all Suno); duration
+  32.9–240 s, median **131 s** — the first source reaching the competition's upper range and mostly
+  **above** its 60 s ceiling; and ~**37 kbps** VBR mp3 against FMA's 128–320, which is a sharper
+  confound than the acquisition caveat's "mp3 vs WAV" and which `bit_rate` hands to X1 directly.
+- [ ] ⚠️ **CtrSVDD is already 16 kHz**, so it carries no resampler transition band while MLAAD and
+  WaveFake do. Within pool B, **"sung" and "16 kHz native" are perfectly confounded** — new task
+  [`EDA/02`](docs/EDA/02-pool-b-fake-voice.md) B7.
+- [ ] 🔴 **`sonics` and `fakemusiccaps` are still absent from
+  [`scripts/sources.yaml`](scripts/sources.yaml)** — two sources outside the G2 licence gate, one of
+  them the whole of pool D. CtrSVDD *is* registered there with the ND reproduce-from-originals duty
+  as `caveat_compliance`, but its own `acquisition.json` has an empty `verified_note` and `caveat`,
+  and its `test_set.zip` comes from Zenodo record `10742049` while the licence was read on
+  `10467648`.
+
+---
+
+## 🟡 2026-09-11 — the real-run plan, and four defects found checking it
+
+[`docs/EDA/08`](docs/EDA/08-real-run.md). Every claim verified against the bucket and the code
+rather than assumed; the checking is what found these. **None of the four would have raised.**
+
+- [x] 🔴 **`extract_archives` was not recursive.** SONICS nests its ten zips under
+  `payload/fake_songs/`, so `iterdir()` yielded the directory, `is_file()` was False, and
+  **30.4 GiB would have extracted to nothing while the run reported success.** Now `rglob`.
+- [x] 🔴 **A file that looks like an archive and is not unpacked was skipped silently** — CompSpoof's
+  `development.tar.gz.part_aa..ae` is the live case. Now warned by name; docs and CSVs deliberately
+  not, because a noisy warning trains the reader to ignore it.
+- [x] 🔴 **`configs/eda.yaml` named the allowlist column `track_id`; both shipped CSVs call it
+  `id`.** A mis-named column rejects every row, so **G-EDA1 would have FAILed all of pool C** for a
+  reason that is not a licence. A mis-named column now reports `na`.
+- [x] 🔴 **MTG-Jamendo's allowlist ids are *paths*** (`14/214.mp3`) while FMA's are integers (`2`).
+  Stem-matching rejected **every** Jamendo track. Third key `relpath` added.
+- [ ] ⚠️ **`fetch_from_s3.py --pool` filters on the bucket's acquisition record**, which still says
+  SONICS is `pool: D`. `--pool D` pulls SONICS as well as FakeMusicCaps. **Select by name** until the
+  acquisition records are reconciled.
+- [x] **Archive layouts verified by reading headers out of S3**, since a wrong internal prefix makes
+  `enumerate_source` raise: `musan/music/fma/music-fma-0001.wav` and
+  `RIRS_NOISES/pointsource_noises/noise-free-sound-0423.wav`. 🔴 Both confirm E1's redistribution
+  prediction **in the filenames themselves**.
+- [x] **Wave 1 is 7 sources / ~56 GiB — 16% of the store — chosen for label coverage, not size.**
+  X1 is a per-head population statement and a one-class head reports `na`, so no gate can fire until
+  both sides of all four heads are on disk.
+- [x] Verified: **105 tests** across the three touched files, **28 of 28 mutants killed**.
+- [ ] ⚠️ Extract to `/data/project/private` (weka, **93 T** free), not `/` (456 G). `--dest` and
+  `--extract` both retain their output, so budget 2x per source.
+
+---
+
+## 🔴 2026-09-12 — wave 1 probed and audited: the corpus is separable from metadata alone
+
+Full state and the next session's instructions: [`docs/HANDOFF_EDA_REAL_RUN.md`](docs/HANDOFF_EDA_REAL_RUN.md).
+
+**Measured**: 7 sources fetched (50 G raw / 55 G extracted, all sha256-verified), `eda probe`
+10 probed / 7 absent / 1 blocked over **90,707 files**, 5 partitions consolidated, `eda analyze`
+**aggregate: fail**.
+
+- [x] 🔴 **`music_fake` is predicted at AUC 1.000 from `duration_s` alone.** FakeMusicCaps is
+  10.0-10.2 s for all 27,605 files (MusicCaps is a 10-second corpus); `fma_small` is 30.0 s at both
+  the 5th and 95th percentile. On the head carrying **0.27**. This was hypothesis D2, marked 🔷 in
+  the plan; it is now measured. Removing every codec column changes nothing.
+- [x] 🔴 **The audit is complete, not merely alarming.** Ablation: remove duration, format and
+  channel count and all four heads sit at **exactly 0.500**. There is no fourth confound. The
+  residual after duration is **channel count** -- `fma` is the corpus's only stereo source.
+- [x] 🔴 **Source-grouped AUC collapses** (voice_present 0.500, music_present **0.222**), which is
+  the diagnosis: the shortcut is **corpus identity**, not a property of the pools. A grouped AUC of
+  0.222 is a classifier that anti-transfers.
+- [ ] 🔴 **X1 cannot verify its own fix, and must not be asked to.** It reads the corpus as it sits
+  on disk; the three fixes are **render-time transforms**. `G-EDA2` will keep reporting 1.000 no
+  matter what is fixed. Confirming closure belongs to `audit_specs` over the spec stream (X5).
+- [x] 🔴 **`rirs-pointsource` is 843 of 843 byte-identical MUSAN copies** -- 100%, not the "88 of
+  90" [`data/12`](docs/data/12-acquisition-status.md) records from a 90-file sample. With it dropped
+  and `rirs-isotropic` (8-channel, 1.4 s median = impulse responses) re-routed, **pool E has one
+  independent source**, which `build_folds` cannot rotate on. CompSpoof `env_sources` is promoted
+  from wave 2 to blocking.
+- [x] ✅ **C1 answered**: **5,093 of 8,000** FMA tracks are allowlisted (63.7%) ~ 42 h against the
+  ~45 h pool-C budget. No headroom.
+- [x] ℹ️ **5 MLAAD files under `fake/lb/VITS2-Claude/` are byte-identical to each other** from five
+  different utterances -- a TTS generation failure the hash sweep found for free.
+- [x] **Six tool defects fixed while running**, three from checking the plan and three from the run
+  itself; all in [`docs/EDA/08`](docs/EDA/08-real-run.md). The run-found three:
+  `eda probe` died on the first unfetched source, `eda consolidate` returned 1 on an unprobed
+  partition, and **a gate passed on an empty set**.
+- [x] `eda/` is **56 tests / 37 of 37 mutants killed**; the harness is now
+  [`scripts/mutate_eda.py`](scripts/mutate_eda.py) rather than a scratch file.
+
+---
+
 ## Next — do in this order
 
 **Now (blocking, days 1–2)**

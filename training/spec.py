@@ -89,16 +89,24 @@ def cells_in_stratum(stratum: str) -> tuple[int, ...]:
     return tuple(c for c, s in STRATA.items() if s == stratum)
 
 
-def spec_rng(sample_id: int, epoch: int, seed: int) -> np.random.Generator:
-    """The one RNG a sample is allowed to use.
+def spec_rng(sample_id: int, epoch: int, seed: int,
+             domain: str = "") -> np.random.Generator:
+    """The one RNG a sample is allowed to use, per ``domain``.
 
     Critical: keyed on ``(sample_id, epoch, seed)`` and hashed with blake2b,
     **not** Python's ``hash()``: string hashing is salted per process, so a
     ``hash()``-keyed stream would be reproducible within a run and different
     across runs -- the exact opposite of what A-S2 asks for.
+
+    Critical: ``domain`` separates the DRAW stream from the RENDER stream
+    (docs/processing/05 B6). The renderer used to re-create the draw's
+    generator and hand it to the augment chain, so an augment's first draw
+    was the sampler's first draw: RawBoost's SNR was an exact linear
+    function of the sample's duration, and the cell could be recovered from
+    the stream in 20,000 of 20,000 specs. The empty domain is the draw.
     """
-    digest = hashlib.blake2b(
-        f"{seed}:{epoch}:{sample_id}".encode(), digest_size=8).digest()
+    key = f"{seed}:{epoch}:{sample_id}" + (f":{domain}" if domain else "")
+    digest = hashlib.blake2b(key.encode(), digest_size=8).digest()
     return np.random.default_rng(int.from_bytes(digest, "big"))
 
 
@@ -113,15 +121,30 @@ class ComponentDraw:
     target_start_s: float          # where it lands on the sample timeline
     gain_db: float
     is_mixup_partner: bool = False
+    #: A noise LAYER (docs/processing/03 DRAW-5): a pool-E draw added under
+    #: the composite at this SNR, resolved at render against the RMS of the
+    #: non-layer pieces over its span. ``None`` for every ordinary component.
+    #: A layer carries no frame target -- it is not a component the cell
+    #: describes -- and ``gain_db`` is ignored in its favour.
+    snr_db: float | None = None
+    #: Which logical component this tile belongs to (docs/processing/06 §1).
+    #: Under bucket tiling the tiles of ONE component may come from different
+    #: files of the same bucket, so ``(slot, role)`` -- not ``(file_id, role)``
+    #: -- is what a consumer groups tiles by. A layer has its own slot.
+    slot: int = 0
 
     def __post_init__(self) -> None:
         if self.role not in ("voice", "music", "noise"):
             raise ValueError(f"role must be voice|music|noise, got {self.role!r}")
+        if self.snr_db is not None and self.role != "noise":
+            raise ValueError(f"only a noise draw can be a layer (snr_db), got role {self.role!r}")
         for name in ("source_offset_s", "duration_s", "target_start_s"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
         if self.duration_s <= 0:
             raise ValueError(f"duration_s must be > 0, got {self.duration_s}")
+        if self.slot < 0:
+            raise ValueError(f"slot must be >= 0, got {self.slot}")
 
 
 @dataclass(frozen=True)
@@ -163,10 +186,21 @@ class SampleSpec:
             raise ValueError(f"duration_s must be > 0, got {self.duration_s}")
         if not self.components:
             raise ValueError("a spec needs at least one component draw")
-        if self.render_mode == "whole_file" and len(self.components) != 1:
-            raise ValueError(
-                f"a whole_file spec is exactly one row used as-is, got "
-                f"{len(self.components)} components")
+        # Critical: a whole_file spec is ONE row used as-is -- but it may be
+        # placed as several tiles of that row (docs/processing/03 DRAW-3 applies
+        # the take/offset/tile rule to every row kind). What is invariant is
+        # that every component names the same file and the same role; a second
+        # file would be a composition wearing the whole-file label.
+        if self.render_mode == "whole_file":
+            own = [c for c in self.components if c.snr_db is None]   # layers are not the row
+            files = {c.file_id for c in own}
+            roles = {c.role for c in own}
+            slots = {c.slot for c in own}
+            if len(files) != 1 or len(roles) != 1 or len(slots) != 1:
+                raise ValueError(
+                    f"a whole_file spec is exactly one row used as-is: every "
+                    f"component must name the same file, role and slot, got files "
+                    f"{sorted(files)}, roles {sorted(roles)} and slots {sorted(slots)}")
         # Cells 6 and 7 hold one real and one fake component, so they cannot be
         # scraped -- that is the whole reason two fake heads exist.
         if self.cell in (6, 7) and self.render_mode != "composed":
@@ -222,6 +256,12 @@ class SampleSpec:
     def from_dict(cls, d: dict[str, Any]) -> SampleSpec:
         d = dict(d)
         d["components"] = tuple(ComponentDraw(**c) for c in d["components"])
-        d["transforms"] = tuple((n, dict(p)) for n, p in d.get("transforms", ()))
+        # Critical: a JSON round trip turns a tuple-valued parameter (a
+        # `*_range`) into a list, and `from_dict(to_dict(s)) == s` then fails
+        # on 65 % of drawn specs (docs/processing/05 C5). Lists come back as
+        # tuples; nothing in a transform's params is a list by contract.
+        d["transforms"] = tuple(
+            (n, {k: (tuple(v) if isinstance(v, list) else v) for k, v in dict(p).items()})
+            for n, p in d.get("transforms", ()))
         d["normalize"] = dict(d.get("normalize", {}))
         return cls(**d)

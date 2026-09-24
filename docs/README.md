@@ -8,6 +8,8 @@ Working documentation for **DACON 236749 — 딥보이스 범죄 대응을 위�
 | **[survey/](survey/)** | Academic prior art: SOTA per head, model & dataset catalogs, augmentation, challenge playbooks | [README](survey/README.md) |
 | **[kaggle/](kaggle/)** | Practical competition intelligence: winners' EDA, augmentation, synthesis, validation and inference tricks | [README](kaggle/README.md) |
 | **[data/](data/)** | Our data strategy: rules check, label taxonomy, sources, synthesis, augmentation spec, build plan | [README](data/README.md) |
+| **[EDA/](EDA/)** | The per-pool analysis plan: what to measure in each pool, why, and which processing knob each answer sets | [README](EDA/README.md) |
+| **[processing/](processing/)** | From EDA results to a processing strategy: the stream harness, the decision threads, the per-slice strategies, the acceptance gates | [README](processing/README.md) |
 | **[validation/](validation/)** | How we measure: split scheme, metric harness, decision protocol, gates, LB decomposition | [README](validation/README.md) |
 | **[architecture/](architecture/)** | How we build the model: the design envelope, pretrained candidates, ensembling, runtime budget | [README](architecture/README.md) |
 | **[pipelines/](pipelines/)** | How data reaches the model: the sample contract, sampler, transform registries, collation, invariants | [README](pipelines/README.md) |
@@ -20,10 +22,11 @@ Working documentation for **DACON 236749 — 딥보이스 범죄 대응을 위�
 3. `survey/README.md` — the 10 findings that drive design
 4. `kaggle/05-transferable-playbook.md` — the practical checklist
 5. `data/README.md` — what we're actually building
-6. `validation/README.md` — how we decide whether any of it worked
-7. `architecture/README.md` — what we build, and why that and not something else
-8. `pipelines/README.md` — the code contract between the corpus and the model
-9. `training/README.md` — what the loss does with the batch, and why it is so short
+6. `EDA/README.md` — what is actually in the corpus, and how we find out
+7. `validation/README.md` — how we decide whether any of it worked
+8. `architecture/README.md` — what we build, and why that and not something else
+9. `pipelines/README.md` — the code contract between the corpus and the model
+10. `training/README.md` — what the loss does with the batch, and why it is so short
 
 ## Confidence marks used throughout
 

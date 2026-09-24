@@ -149,8 +149,19 @@ def test_a_component_may_not_run_past_the_timeline():
 
 
 def test_whole_file_specs_hold_exactly_one_row():
+    """One row -- which may be placed as several tiles of that row (the
+    processing pipeline's take/offset/tile rule applies to every row kind),
+    but never a second file or a second role."""
     with pytest.raises(ValueError, match="exactly one row"):
-        _spec(render_mode="whole_file", components=(_draw(), _draw()))
+        _spec(render_mode="whole_file",
+              components=(_draw(duration_s=5.0), _draw(file_id="A00002", duration_s=5.0,
+                                                       target_start_s=5.0)))
+    with pytest.raises(ValueError, match="exactly one row"):
+        _spec(render_mode="whole_file",
+              components=(_draw(duration_s=5.0), _draw(role="music", duration_s=5.0,
+                                                       target_start_s=5.0)))
+    _spec(render_mode="whole_file",
+          components=(_draw(duration_s=5.0), _draw(duration_s=5.0, target_start_s=5.0)))
 
 
 @pytest.mark.parametrize("bad", [{"cell": 0}, {"cell": 10},
@@ -166,3 +177,15 @@ def test_round_trips_through_a_dict():
               transforms=(("gain_jitter", {"db": 2.1}),),
               normalize={"container": "mp3", "bitrate": 96})
     assert SampleSpec.from_dict(s.to_dict()) == s
+
+
+def test_a_layer_is_a_noise_draw_and_may_ride_under_a_whole_file():
+    """DRAW-5: `snr_db` marks a pool-E layer; only a noise draw can carry it,
+    and a whole-file spec stays one row when a layer rides under it."""
+    with pytest.raises(ValueError, match="only a noise draw"):
+        _draw(snr_db=20.0)
+    layer = _draw(file_id="E00001", role="noise", snr_db=20.0)
+    _spec(render_mode="whole_file", components=(_draw(), layer))
+    with pytest.raises(ValueError, match="exactly one row"):
+        _spec(render_mode="whole_file",
+              components=(_draw(), _draw(file_id="A00002", role="noise")))

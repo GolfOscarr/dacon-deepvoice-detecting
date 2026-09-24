@@ -36,13 +36,17 @@ more than any tuning in here.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import pathlib
+import re
+import shutil
 import subprocess
 import sys
 import tarfile
 import zipfile
+from collections.abc import Sequence
 
 DEFAULT_BUCKET = "hyeonseop-s3"
 DEFAULT_PREFIX = "dacon-deepfake-detection/data/raw"
@@ -144,6 +148,20 @@ def human(n: float | None) -> str:
     return "?"
 
 
+def selected(names, only: Sequence[str]) -> list[str]:
+    """The payload-relative names matching any `--only` glob; all of them when
+    no glob is given.
+
+    Critical: the same function filters the sync and the verification. If the
+    two ever disagree, a partial fetch reports every unfetched file as
+    "missing" -- a red run for a corpus that is exactly what was asked for --
+    and the reader learns to ignore the one check that matters.
+    """
+    if not only:
+        return list(names)
+    return [n for n in names if any(fnmatch.fnmatch(n, g) for g in only)]
+
+
 def verify_dir(payload: pathlib.Path, want: dict[str, str]) -> tuple[list, list]:
     """`(ok, bad)` for the files a checksum manifest names.
 
@@ -164,9 +182,22 @@ def verify_dir(payload: pathlib.Path, want: dict[str, str]) -> tuple[list, list]
 
 
 def sync_down(bucket: str, prefix: str, name: str, version: str,
-              dest: pathlib.Path, dry_run: bool) -> None:
+              dest: pathlib.Path, dry_run: bool,
+              only: Sequence[str] = ()) -> None:
     uri = f"s3://{bucket}/{prefix.rstrip('/')}/{name}/{version}/"
     cmd = ["aws", "s3", "sync", uri, str(dest), "--only-show-errors"]
+    # `--only` is a *partial* fetch: exclude everything, then re-include the
+    # payload paths asked for. CompSpoof is the case it exists for -- 111.8 GB
+    # in the store, of which pool E needs the two `*_source.tar.gz` that carry
+    # `env_sources/`. Egress is billed and the rest is speech and mixtures we
+    # already have better sources for.
+    # Critical: ONE `--exclude "*"` first, then every include. aws applies
+    # filters in the order given, so a second `--exclude "*"` after an include
+    # cancels it and the sync transfers nothing at all.
+    if only:
+        cmd += ["--exclude", "*"]
+        for glob in only:
+            cmd += ["--include", f"payload/{glob}"]
     if dry_run:
         cmd.append("--dryrun")
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -176,17 +207,196 @@ def sync_down(bucket: str, prefix: str, name: str, version: str,
         print("\n".join("      " + l for l in proc.stdout.strip().splitlines()[:6]))
 
 
-def extract_archives(payload: pathlib.Path, out: pathlib.Path) -> int:
+# --------------------------------------------------------------------------
+# split archives
+# --------------------------------------------------------------------------
+
+#: A `split -b` piece: a two-letter tail after something archive-shaped.
+_SPLIT_TAIL = re.compile(r"^(?P<base>.+\.(?:tar|tgz|tar\.gz|tar\.bz2|tar\.xz|zip))"
+                         r"\.(?P<piece>[a-z]{2})$", re.IGNORECASE)
+#: A spanned zip piece: `name.z01` .. `name.zNN`, whose last part is `name.zip`.
+_SPANNED_ZIP = re.compile(r"^(?P<base>.+)\.z(?P<piece>\d{2})$", re.IGNORECASE)
+
+
+def split_groups(files: Sequence[pathlib.Path]) -> dict[pathlib.Path, list[pathlib.Path]]:
+    """`{whole archive -> its pieces, in order}` for the split sets in `files`.
+
+    Two conventions, because publishers use both and neither is guessable from
+    one filename:
+
+    * **`split -b`** -- `database_eval.tar.gz.aa/.ab/.ac`. Concatenating the
+      pieces *is* the archive (PartialSpoof, CompSpoof).
+    * **spanned zip** -- `CFAD.z01/.z02/.z03` plus `CFAD.zip`, where the `.zip`
+      is the **last** piece and holds the central directory. Concatenation is
+      NOT the archive: the parts must be joined by `zip -s 0`, and Python's
+      `zipfile` cannot read either the pieces or the set (CFAD, Codecfake).
+
+    ⚠️ A group is only returned when it is **contiguous from the first piece**.
+    A missing `.z02` would otherwise be joined into a corrupt archive that
+    extracts partially and reports success, which is worse than not extracting.
+    """
+    by_base: dict[pathlib.Path, dict[str, pathlib.Path]] = {}
+    kinds: dict[pathlib.Path, str] = {}
+    for f in files:
+        m = _SPLIT_TAIL.match(f.name)
+        if m:
+            base = f.with_name(m.group("base"))
+            by_base.setdefault(base, {})[m.group("piece").lower()] = f
+            kinds[base] = "cat"
+            continue
+        m = _SPANNED_ZIP.match(f.name)
+        if m:
+            base = f.with_name(m.group("base") + ".zip")
+            by_base.setdefault(base, {})[m.group("piece")] = f
+            kinds[base] = "zip"
+    out: dict[pathlib.Path, list[pathlib.Path]] = {}
+    for base, pieces in by_base.items():
+        if kinds[base] == "cat":
+            want = [f"{a}{b}" for a in "abcdefghijklmnopqrstuvwxyz"
+                    for b in "abcdefghijklmnopqrstuvwxyz"]
+            ordered, i = [], 0
+            while i < len(want) and want[i] in pieces:
+                ordered.append(pieces[want[i]]); i += 1
+            if len(ordered) != len(pieces):
+                continue                       # a hole: leave it to the warning
+            out[base] = ordered
+        else:
+            # The `.zip` last part must exist, or there is no central directory
+            # and nothing can be joined.
+            if not base.exists():
+                continue
+            ordered, i = [], 1
+            while f"{i:02d}" in pieces:
+                ordered.append(pieces[f"{i:02d}"]); i += 1
+            if len(ordered) != len(pieces):
+                continue
+            out[base] = ordered + [base]
+    return out
+
+
+def is_spanned_zip(base: pathlib.Path, pieces: Sequence[pathlib.Path]) -> bool:
+    """Was this group a `name.zNN` + `name.zip` set rather than `split -b`?
+
+    🔴 Asked here rather than inferred from the joined file, because inferring
+    it does not work. Python reads a *small* concatenated spanned zip happily
+    -- 41 entries, no complaint -- and refuses a zip64 one with "zipfiles that
+    span multiple disks are not supported". Codecfake's is zip64 because its
+    single entry is 91 GB, so a first version of this caught that message and
+    shelled out; CFAD's went through Python; and a set that is neither would
+    have picked whichever path its size happened to select. The convention is
+    known at grouping time and that is where the decision belongs.
+    """
+    return base.suffix.lower() == ".zip" and bool(pieces) and pieces[-1] == base
+
+
+def join_split(base: pathlib.Path, pieces: Sequence[pathlib.Path],
+               work: pathlib.Path) -> pathlib.Path:
+    """Reassemble one split archive under `work`, and **check the result**.
+
+    Two conventions, two joins, and only one of them is concatenation:
+
+    * **`split -b`** pieces concatenate. The joined size is exactly the summed
+      piece size.
+    * **A spanned zip does not.** Measured, on a fixture built with the real
+      tool: concatenating the pieces -- with or without stripping the 4-byte
+      `PK\x07\x08` spanning signature -- yields a file whose central directory
+      reads (41 entries) and whose *entries do not*, `BadZipFile: Bad magic
+      number for file header`. Only `zip -s 0 --out` rewrites the offsets, and
+      its output is byte-comparable to the pieces minus that signature.
+
+    🔴 **And the join is verified, because this one lied.** `zip -s 0` exited 0
+    on Codecfake and produced **10,737,418,467 bytes from 32,060,882,354** of
+    pieces -- Info-ZIP 3.0 mishandles segments above 4 GB, and these are 5 GB.
+    Nothing said so. The only reason it surfaced is that Python later refused
+    the truncated archive as a possible zip bomb; a smaller entry would have
+    extracted part of a corpus and reported success.
+    """
+    work.mkdir(parents=True, exist_ok=True)
+    want = sum(q.stat().st_size for q in pieces)
+
+    if is_spanned_zip(base, pieces):
+        joined = work / f"{base.stem}.joined.zip"
+        if not joined.exists():
+            if not shutil.which("zip"):
+                raise RuntimeError(
+                    f"{base.name} is a spanned zip and needs Info-ZIP `zip -s 0`; "
+                    f"Python's zipfile cannot read or join one")
+            proc = subprocess.run(
+                ["zip", "-q", "-s", "0", str(base), "--out", str(joined)],
+                capture_output=True, text=True)
+            if proc.returncode or not joined.exists():
+                raise RuntimeError(
+                    f"joining spanned zip {base.name} failed: "
+                    f"{(proc.stderr or proc.stdout).strip()[:300]}")
+        got = joined.stat().st_size
+        # The spanning signature is dropped, so the join is 4 bytes short of
+        # the pieces; anything more than that is a truncation.
+        if abs(got - want) > 64:
+            raise RuntimeError(
+                f"joining {base.name} produced {got} bytes from pieces totalling "
+                f"{want}. ⚠️ Measured, not inferred: this Info-ZIP joins CFAD's "
+                f"four 10 GB segments correctly and truncates Codecfake's six 5 GB "
+                f"ones, so segment size alone does not predict it -- which is "
+                f"exactly why the size is checked every time. A newer Info-ZIP or "
+                f"7-Zip can join it, or the source can be re-uploaded unsplit. A "
+                f"short join extracts part of a corpus and reports success")
+        return joined
+
+    joined = work / f"{base.name}.joined"
+    if joined.exists() and joined.stat().st_size == want:
+        return joined
+    with joined.open("wb") as fh:
+        for piece in pieces:
+            with piece.open("rb") as src:
+                for block in iter(lambda: src.read(CHUNK), b""):
+                    fh.write(block)
+    got = joined.stat().st_size
+    if got != want:
+        joined.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"joining {base.name} produced {got} bytes from pieces totalling "
+            f"{want}. A short join extracts partially and reports success")
+    return joined
+
+
+def extract_archives(payload: pathlib.Path, out: pathlib.Path,
+                     work: pathlib.Path | None = None, keep_joined: bool = False
+                     ) -> int:
     """Unpack tar/zip archives into `out`. Returns how many were unpacked.
+
+    Split sets are **joined first** (`split_groups`, `join_split`) and the
+    joined copy is deleted afterwards unless `keep_joined`. Four of the sources
+    in the store ship this way and none of them could be extracted before.
 
     Caveat: members whose path escapes `out` are skipped rather than written.
     These archives come from third parties, and a `../` member would otherwise
     write outside the extraction root.
     """
     out.mkdir(parents=True, exist_ok=True)
+    work = work or out.parent / "_joining"
     n = 0
-    for p in sorted(payload.iterdir()):
-        if not p.is_file():
+    unpacked: list[pathlib.Path] = []
+    files = [q for q in sorted(payload.rglob("*")) if q.is_file()]
+    groups = split_groups(files)
+    consumed = {q for pieces in groups.values() for q in pieces}
+    joined_paths: list[pathlib.Path] = []
+    for base, pieces in sorted(groups.items()):
+        try:
+            joined = join_split(base, pieces, work)
+        except Exception as exc:                       # noqa: BLE001
+            print(f"      [warn] {base.name}: {exc}")
+            continue
+        print(f"      [join] {base.name}: {len(pieces)} piece(s) -> {joined.name}")
+        joined_paths.append(joined)
+    # Critical: **recursive**. `iterdir()` misses any publisher that nests its
+    # archives, and SONICS does exactly that -- its ten zips live under
+    # `payload/fake_songs/`, so a non-recursive walk yielded the *directory*,
+    # `is_file()` was False, and 30 GiB extracted to nothing while the run
+    # reported success.
+    for p in files + joined_paths:
+        # A piece of a split set is not an archive on its own; the joined file
+        # stands in for the whole group.
+        if p in consumed:
             continue
         try:
             if tarfile.is_tarfile(p):
@@ -203,10 +413,74 @@ def extract_archives(payload: pathlib.Path, out: pathlib.Path) -> int:
                 with zipfile.ZipFile(p) as zf:
                     safe = [m for m in zf.namelist() if _inside(out, out / m)]
                     zf.extractall(out, members=safe)
-                    n += 1
+                n += 1
+            else:
+                unpacked.append(p)
+                continue
         except Exception as exc:                       # noqa: BLE001
             print(f"      [warn] {p.name}: {exc}")
+    # Critical: a file that looks like an archive and was not unpacked is
+    # reported. Split archives are the live case -- CompSpoof ships
+    # `development.tar.gz.part_aa..ae`, and neither `is_tarfile` nor
+    # `is_zipfile` recognises a part, so each is skipped. Silently returning a
+    # smaller `n` is the "validates and does nothing" failure: the caller sees a
+    # successful extraction of a corpus that is not there.
+    if not keep_joined:
+        for q in joined_paths:
+            q.unlink(missing_ok=True)
+        if work.exists() and not any(work.iterdir()):
+            work.rmdir()
+
+    # 🔴 An archive inside an archive. Codecfake's spanned zip holds exactly one
+    # entry -- `data7/xyk/codecfake/upload_zenodo/train.zip`, 91 GB unpacked --
+    # so a single pass leaves a corpus that is still one zip. Bounded rather
+    # than recursive: two levels is what publishers do, and an unbounded walk
+    # over extracted output is how a zip bomb gets its wish.
+    for depth in range(2):
+        nested = [q for q in sorted(out.rglob("*"))
+                  if q.is_file() and q.suffix.lower() == ".zip"]
+        if not nested:
+            break
+        for q in nested:
+            print(f"      [nest] {q.relative_to(out)}: unpacking in place")
+            try:
+                with zipfile.ZipFile(q) as zf:
+                    safe = [m for m in zf.namelist() if _inside(out, out / m)]
+                    zf.extractall(out, members=safe)
+                n += 1
+                q.unlink()
+            except Exception as exc:                   # noqa: BLE001
+                print(f"      [warn] {q.name}: {exc}")
+
+    missed = [p for p in unpacked if _looks_like_archive(p)]
+    if missed:
+        print(f"      [warn] {len(missed)} archive-looking file(s) not unpacked "
+              f"(split archive?): {', '.join(p.name for p in missed[:4])}")
     return n
+
+
+#: Suffix patterns that mean "this was meant to be unpacked". Deliberately not
+#: a general guess: payloads legitimately contain README.md, LICENSE and CSVs,
+#: and warning about those would train the reader to ignore the warning.
+_ARCHIVE_HINTS = (".zip", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".7z", ".rar")
+
+
+def _looks_like_archive(p: pathlib.Path) -> bool:
+    name = p.name.lower()
+    if ".part_" in name or re.search(r"\.z\d{2}$|\.\d{3}$", name):
+        return True
+    if any(name.endswith(s) for s in _ARCHIVE_HINTS):
+        return True
+    # 🔴 `split -b` names its pieces `.aa`, `.ab`, ... with no digits and no
+    # hint of their own, so the checks above miss them entirely. PartialSpoof
+    # ships `database_eval.tar.gz.aa/.ab/.ac` -- 5.4 GB, the whole eval set --
+    # and it was skipped silently, which is the SONICS defect wearing different
+    # letters. Only treat a two-letter tail as a split piece when what precedes
+    # it is itself archive-shaped, so an `.srt.en` or a `.model.pt` is not
+    # mistaken for one.
+    stem, _, tail = name.rpartition(".")
+    return (len(tail) == 2 and tail.isalpha()
+            and any(stem.endswith(s) for s in _ARCHIVE_HINTS))
 
 
 def _inside(root: pathlib.Path, target: pathlib.Path) -> bool:
@@ -246,6 +520,10 @@ def main() -> int:
     p.add_argument("--dest", type=pathlib.Path, default=pathlib.Path("data/raw"))
     p.add_argument("--extract", type=pathlib.Path,
                    help="also unpack archives under this directory")
+    p.add_argument("--only", action="append", default=[], metavar="GLOB",
+                   help="payload paths matching this glob only; repeatable. A "
+                        "partial fetch: DONE still means the upload was "
+                        "complete, but your copy deliberately is not")
     p.add_argument("--verify-only", action="store_true",
                    help="re-hash what is already local; transfer nothing")
     p.add_argument("--dry-run", action="store_true", help="show what would transfer")
@@ -310,10 +588,18 @@ def main() -> int:
 
         local = args.dest / name / s["version"]
         if not args.verify_only:
-            print(f"  [get ] {name}/{s['version']}  {human(s['bytes'])}, "
-                  f"{len(s['files'])} file(s)")
+            take = selected(s["files"], args.only)
+            if args.only and not take:
+                print(f"  [skip] {name}: no payload file matches {args.only}")
+                skipped.append(name)
+                continue
+            size = s["bytes"] if not args.only else None
+            print(f"  [get ] {name}/{s['version']}  "
+                  f"{human(size) if size else '(partial)'}, {len(take)} file(s)"
+                  + (f" of {len(s['files'])}" if args.only else ""))
             try:
-                sync_down(args.bucket, args.prefix, name, s["version"], local, args.dry_run)
+                sync_down(args.bucket, args.prefix, name, s["version"], local,
+                          args.dry_run, args.only)
             except Exception as exc:                   # noqa: BLE001
                 print(f"  [FAIL] {name}: {exc}", file=sys.stderr)
                 failures.append(name)
@@ -325,7 +611,12 @@ def main() -> int:
         if not text:
             print(f"  [warn] {name}: no checksums.sha256 in the store -- cannot verify")
         else:
-            ok, bad = verify_dir(local / "payload", parse_checksums(text))
+            # Critical: verify only what was asked for. Handing the full
+            # manifest to a partial fetch reports every file it deliberately
+            # did not take as "missing", which is a FAIL for a correct run.
+            want = parse_checksums(text)
+            want = {k: v for k, v in want.items() if k in set(selected(want, args.only))}
+            ok, bad = verify_dir(local / "payload", want)
             if bad:
                 for fname, why in bad[:5]:
                     print(f"  [BAD ] {name}/{fname}: {why}", file=sys.stderr)

@@ -96,6 +96,13 @@ _COVERAGE = (("voice", False), ("voice", True), ("music", False), ("music", True
              ("noise", False))
 
 
+#: How many times `probe_share` of the ROWS a family-advancing PROBE seal may
+#: reach before the group rotates instead (see `_seal_probe`). 2.0: PROBE is a
+#: ~10 % family share and may not, by atom size alone, become a fifth of the
+#: corpus that is never trained on.
+PROBE_ROW_BUDGET = 2.0
+
+
 class FoldInfeasible(ValueError):
     """The corpus cannot support the requested split. Never silently downgraded."""
 
@@ -183,12 +190,39 @@ class FoldConfig:
     allow_no_probe: bool = False
     #: Frozen for reproducible tests; `None` stamps the build time.
     assigned_at: str | None = None
+    #: Critical: the PROBE row budget counts only rows the sampler DRAWS --
+    #: component rows. Whole-file rows are never drawn under docs/processing/03
+    #: D-1 (`f8 = 1`), and on the built corpus 25,426 SONICS whole files spent
+    #: the whole budget, leaving PROBE's real side with 3 voice files, 1 track
+    #: and 8 noise clips (docs/processing/05 A2, 06 D1).
+    probe_budget_drawable_only: bool = True
+    #: PROBE's real side must be able to estimate a false-positive rate: at
+    #: least this many drawable hours and this many grouping atoms of real
+    #: voice, real music and noise each (06 D1). Real groups carry no fake
+    #: family, so sealing them never starves a head.
+    probe_min_real_hours: float = 5.0
+    probe_min_real_atoms: int = 5
+    #: What the fold rotation balances besides families: `hours` balances the
+    #: drawable hours of every (role, fake) pair per fold; `rows` is the
+    #: earlier row count. On the built corpus rows balanced (2.9x) while fake
+    #: voice VAL hours were 158 / 1.6 / 21 / 13 (05 B4, 06 D4).
+    balance_on: str = "hours"
+    #: A VAL side with fewer drawable hours than this on any (role, fake) pair
+    #: gets a caveat naming the fold; so does a > 3x spread across folds.
+    caveat_min_role_hours: float = 5.0
 
     def __post_init__(self) -> None:
         if self.n_folds < 2:
             raise ValueError(f"n_folds must be >= 2, got {self.n_folds}")
         if not 0.0 <= self.probe_share < 1.0:
             raise ValueError(f"probe_share must be in [0, 1), got {self.probe_share}")
+        if self.balance_on not in ("hours", "rows"):
+            raise ValueError(f"balance_on must be hours|rows, got {self.balance_on!r}")
+        for name in ("probe_min_real_hours", "caveat_min_role_hours"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
+        if self.probe_min_real_atoms < 0:
+            raise ValueError(f"probe_min_real_atoms must be >= 0, got {self.probe_min_real_atoms}")
 
     @property
     def val_family_share(self) -> float:
@@ -248,6 +282,8 @@ def _group_facts(manifest: pd.DataFrame, atoms: pd.Series) -> dict[str, dict]:
     for group, sub in df.groupby("_group", sort=True):
         fams: dict[str, set[str]] = {h: set() for h in HEADS}
         provides: set[tuple[str, bool]] = set()
+        hours: dict[tuple[str, bool], float] = {}
+        n_drawable = 0
         for row in sub.to_dict("records"):
             fam = row["artifact_family"]
             if isinstance(fam, str):
@@ -259,10 +295,16 @@ def _group_facts(manifest: pd.DataFrame, atoms: pd.Series) -> dict[str, dict]:
                     fams["music"].add(fam)
             pool = row["pool"]
             if row["row_kind"] == "component" and isinstance(pool, str):
-                provides.add((role_of_pool[pool], POOL_IS_FAKE[pool]))
+                key = (role_of_pool[pool], POOL_IS_FAKE[pool])
+                provides.add(key)
+                hours[key] = hours.get(key, 0.0) + float(row["duration_s"]) / 3600.0
+                n_drawable += 1
         facts[group] = {"n_rows": int(len(sub)), "families": fams,
                         "n_families": sum(len(f) for f in fams.values()),
-                        "provides": provides}
+                        "provides": provides,
+                        # what the sampler can draw: component rows and their hours
+                        "n_drawable": int(n_drawable), "hours": hours,
+                        "hours_total": float(sum(hours.values()))}
     return facts
 
 
@@ -298,10 +340,27 @@ def _seal_probe(facts: dict[str, dict], cfg: FoldConfig) -> set[str]:
     totals = {h: len({f for g in facts.values() for f in g["families"][h]})
               for h in HEADS}
     target = {h: cfg.probe_share * totals[h] for h in HEADS}
+    # The families a VAL side can actually DRAW from: those some group carries
+    # as component rows of the head's fake pool. A family present only as
+    # whole-file rows (SONICS under docs/processing/03 D-1) counts toward the
+    # sealing target but not toward the rotating floor below -- a fold whose
+    # only fake-music family is uncomposable fails coverage all the same.
+    composable = {h: {fam for g in facts.values() for fam in g["families"][h]
+                      if (h, True) in g["provides"]} for h in HEADS}
     got: dict[str, set] = {h: set() for h in HEADS}
     covered: set[tuple[str, bool]] = set()
     probe: set[str] = set()
+    rows_key = "n_drawable" if cfg.probe_budget_drawable_only else "n_rows"
+    total_rows = sum(g[rows_key] for g in facts.values())
+    probe_rows = 0
+    # Critical: among groups with the same family count, the ones that can
+    # COMPOSE (`provides` non-empty) come first. A group of whole-file rows
+    # only -- SONICS' two families under docs/processing/03 D-1 -- advances a
+    # head's family target while giving PROBE nothing it can draw a composed
+    # sample from; sealed first by size, it left PROBE with "fake music" it
+    # could not compose.
     for group in sorted(facts, key=lambda g: (-facts[g]["n_families"],
+                                              -len(facts[g]["provides"]),
                                               -facts[g]["n_rows"], g)):
         f = facts[group]
         # Take the group if it advances the family target on some head, or if
@@ -312,11 +371,84 @@ def _seal_probe(facts: dict[str, dict], cfg: FoldConfig) -> set[str]:
         advances = any(totals[h] and f["families"][h] and len(got[h]) < target[h]
                        for h in HEADS)
         closes = len(covered) < len(_COVERAGE) and bool(f["provides"] - covered)
-        if advances or closes:
+        # Critical: a group may carry families on BOTH heads (a cell-8 whole
+        # file is fake on both; docs/processing/03 D-14 keeps its family), and
+        # such groups sort first. Sealing them to advance the larger head
+        # can strip the smaller head of every rotating family -- measured on
+        # the built corpus: 7 music families, all 7 sealed for the voice
+        # target, 0 rotating. So a group is never sealed if that would leave
+        # any head below `n_folds` rotating families, which is precisely the
+        # condition `_check_feasible` refuses.
+        starves = any(
+            composable[h] and (f["families"][h] & composable[h])
+            and len(composable[h] - (got[h] | f["families"][h])) < cfg.n_folds
+            for h in HEADS)
+        # PROBE's target is a FAMILY share, but it is sealed forever (VG6), so
+        # a family-advancing seal also has a ROW budget: the LJSpeech pair atom
+        # (LJSpeech + seven WaveFake families, 89k rows, 32 % of the built
+        # corpus) reached PROBE first by family count and 64 % of the corpus
+        # was sealed. Over budget, the group rotates instead -- one fold's VAL
+        # is then large, which the A8 caveat below says out loud.
+        over_budget = (probe_rows + f[rows_key]
+                       > PROBE_ROW_BUDGET * cfg.probe_share * total_rows)
+        # A seal that closes a coverage gap is taken even if it starves a
+        # head: coverage is not optional, and the floor then fails loudly in
+        # `_check_feasible` with the message it should. The budget binds on
+        # both -- the second pass below closes what the budget left open.
+        if not over_budget and (closes or (advances and not starves)):
+            probe.add(group)
+            probe_rows += f[rows_key]
+            for h in HEADS:
+                got[h] |= f["families"][h]
+            covered |= f["provides"]
+    # Coverage the budget left open is closed from the SMALLEST groups that
+    # can close it, budget or not: PROBE that cannot compose a cell is unusable,
+    # and the cheapest closer costs the rotation the least.
+    for group in sorted(facts, key=lambda g: (facts[g]["n_rows"], g)):
+        if group in probe or len(covered) >= len(_COVERAGE):
+            continue
+        f = facts[group]
+        if f["provides"] - covered:
             probe.add(group)
             for h in HEADS:
                 got[h] |= f["families"][h]
             covered |= f["provides"]
+    # Critical: PROBE's REAL side gets a floor in hours and atoms per role.
+    # Coverage alone was closed by the smallest closers -- 3 voice files, 1
+    # track, 8 noise clips on the built corpus -- and a PROBE that cannot
+    # estimate a false-positive rate cannot answer its question (05 A2). Real
+    # groups carry no fake family, so sealing them never starves a head;
+    # the groups are taken largest first while they fit the remaining need,
+    # then smallest first for the atom count.
+    for role in ("voice", "music", "noise"):
+        key = (role, False)
+        pure = [g for g in facts if g not in probe and key in facts[g]["provides"]
+                and facts[g]["n_families"] == 0]
+        # the floor is capped at the budget's share of the role's real hours,
+        # and never seals a group the rotation needs (n_folds providers stay)
+        total_h = sum(facts[g]["hours"].get(key, 0.0) for g in facts)
+        floor_h = min(cfg.probe_min_real_hours, PROBE_ROW_BUDGET * cfg.probe_share * total_h)
+        have_h = sum(facts[g]["hours"].get(key, 0.0) for g in probe)
+        have_n = sum(1 for g in probe if key in facts[g]["provides"])
+
+        def rotating_providers() -> int:
+            return sum(1 for g in facts if g not in probe and key in facts[g]["provides"])
+
+        for group in sorted(pure, key=lambda g: (-facts[g]["hours"].get(key, 0.0), g)):
+            need = floor_h - have_h
+            if need <= 1e-9:
+                break
+            h = facts[group]["hours"].get(key, 0.0)
+            if h <= 1.5 * need and rotating_providers() > cfg.n_folds:
+                probe.add(group)
+                have_h += h
+                have_n += 1
+        for group in sorted(pure, key=lambda g: (facts[g]["hours"].get(key, 0.0), g)):
+            if have_n >= cfg.probe_min_real_atoms or rotating_providers() <= cfg.n_folds:
+                break
+            if group not in probe:
+                probe.add(group)
+                have_n += 1
     return probe
 
 
@@ -332,7 +464,10 @@ def _assign_folds(groups: Sequence[str], facts: dict[str, dict],
     not a worse fold, it is an unusable one.
     """
     n_folds = cfg.n_folds
-    total_rows = sum(facts[g]["n_rows"] for g in groups) or 1
+    size_key = "hours_total" if cfg.balance_on == "hours" else "n_rows"
+    total_rows = sum(facts[g][size_key] for g in groups) or 1
+    # the drawable hours of every (role, fake) pair, balanced per fold (06 D4)
+    total_hours = {k: sum(facts[g]["hours"].get(k, 0.0) for g in groups) for k in _COVERAGE}
     total_fam = {h: len({f for g in groups for f in facts[g]["families"][h]})
                  for h in HEADS}
     total_key: dict[object, int] = {}
@@ -344,19 +479,40 @@ def _assign_folds(groups: Sequence[str], facts: dict[str, dict],
     tallies: list[dict] = [{} for _ in range(n_folds)]
     fam_tally: list[dict[str, set]] = [{h: set() for h in HEADS}
                                        for _ in range(n_folds)]
-    rows_tally = [0] * n_folds
+    rows_tally = [0.0] * n_folds
+    hours_tally: list[dict] = [{k: 0.0 for k in _COVERAGE} for _ in range(n_folds)]
     covered: list[set] = [set() for _ in range(n_folds)]
     out: dict[str, int] = {}
     order = sorted(groups, key=lambda g: (-facts[g]["n_families"],
                                           -facts[g]["n_rows"], g))
     for group in order:
         f, keys = facts[group], strata.get(group, {})
+        if cfg.balance_on == "hours":
+            # Critical: the duration-bucket and channel strata count ROWS and
+            # every group shares them, so the fold holding the LJ atom (101k
+            # rows) repelled every other group under them -- fold 0's VAL had
+            # 0.0 h of noise. Under hours, only the source strata remain.
+            keys = {k: n for k, n in keys.items() if k[0] == "src"}
         best, best_cost = 0, np.inf
         for k in range(n_folds):
             cost = 2.0 * sum(
                 (len(fam_tally[k][h] | f["families"][h]) / (total_fam[h] / n_folds)) ** 2
                 for h in HEADS if total_fam[h])
-            cost += ((rows_tally[k] + f["n_rows"]) / (total_rows / n_folds)) ** 2
+            if cfg.balance_on == "hours":
+                # Critical: per (role, fake) pair ONLY -- a total-hours term
+                # beside it made every other group avoid the fold that holds
+                # the LJ atom (182 h of fake voice, indivisible), leaving that
+                # fold's VAL with 0.4 h of real music and no noise.
+                # ... and only over the pairs THIS group carries: a fold's
+                # excess on another pair is the same for every candidate and
+                # would make that fold lose every group (fold 0 held 182 h of
+                # fake voice and got 0.0 h of noise).
+                cost += 2.0 * sum(
+                    ((hours_tally[k][key] + f["hours"][key])
+                     / (total_hours[key] / n_folds)) ** 2
+                    for key in f["hours"] if total_hours.get(key, 0.0) > 0)
+            else:
+                cost += ((rows_tally[k] + f[size_key]) / (total_rows / n_folds)) ** 2
             cost += sum(
                 ((tallies[k].get(key, 0) + n) / (total_key[key] / n_folds)) ** 2
                 for key, n in keys.items()) / n_keys
@@ -366,7 +522,9 @@ def _assign_folds(groups: Sequence[str], facts: dict[str, dict],
         out[group] = best
         for h in HEADS:
             fam_tally[best][h] |= f["families"][h]
-        rows_tally[best] += f["n_rows"]
+        rows_tally[best] += f[size_key]
+        for key in _COVERAGE:
+            hours_tally[best][key] += f["hours"].get(key, 0.0)
         covered[best] |= f["provides"]
         for key, n in keys.items():
             tallies[best][key] = tallies[best].get(key, 0) + n
@@ -502,6 +660,25 @@ def build_folds(manifest: pd.DataFrame, cfg: FoldConfig | None = None,
             f"nothing is not a fold")
     per_fold = [sum(facts[g]["n_rows"] for g in rotating if fold_of[g] == k)
                 for k in range(cfg.n_folds)]
+    # Critical: rows balance while hours do not -- fake voice VAL hours were
+    # 158 / 1.6 / 21 / 13 on the built corpus under a silent row caveat (05
+    # B4). Every (role, fake) pair's drawable VAL hours are said per fold.
+    for key in _COVERAGE:
+        hours = [sum(facts[g]["hours"].get(key, 0.0) for g in rotating if fold_of[g] == k)
+                 for k in range(cfg.n_folds)]
+        name = f"{'fake' if key[1] else 'real'} {key[0]}"
+        shown = "[" + ", ".join(f"{h:.1f}" for h in hours) + "]"
+        if min(hours) < cfg.caveat_min_role_hours:
+            caveats.append(
+                f"{name}: VAL hours per fold {shown} -- fold(s) "
+                f"{[k for k, h in enumerate(hours) if h < cfg.caveat_min_role_hours]} "
+                f"validate on under {cfg.caveat_min_role_hours:g} h; a per-fold number "
+                f"on that side is a few-source estimate.")
+        elif max(hours) > 3 * max(min(hours), 1e-9):
+            caveats.append(
+                f"{name}: VAL hours per fold {shown} "
+                f"({max(hours) / max(min(hours), 1e-9):.1f}x between the largest and the "
+                f"smallest fold). The grouping atoms are indivisible.")
     # Critical: family disjointness dominates row balance: a fold is a whole
     # number of grouping atoms, and those differ in size by an order of
     # magnitude. This is where VG1 A8 bites (docs/validation/04), so it is said

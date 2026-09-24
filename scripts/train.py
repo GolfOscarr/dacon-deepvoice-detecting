@@ -56,14 +56,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from models.config import load_model_config, load_train_config        # noqa: E402
 from models.model import DeepVoiceNet, save_checkpoint                  # noqa: E402
+from processing.config import dump_processing_config, load_processing_config  # noqa: E402
+from processing.render import ManifestIndex                           # noqa: E402
+from processing.sampler import Sampler                                # noqa: E402
 from training.checkpoint import checkpoint_soup                       # noqa: E402
-from training.config import load_run_config                           # noqa: E402
 from training.dataset import SpecDataset, frozen_eval_specs           # noqa: E402
 from training.folds import apply_folds                                # noqa: E402
-from training.loop import run_schedule                                # noqa: E402
+from training.loop import check_chain, run_schedule                   # noqa: E402
 from training.manifest import load_manifest                           # noqa: E402
-from training.render import ManifestIndex                             # noqa: E402
-from training.sampler import Sampler                                  # noqa: E402
 from training.stages import STAGES                                    # noqa: E402
 from training.validate import (FoldResult, aggregate_folds, evaluate,  # noqa: E402
                                leak_tripwires, measured_split_kind, run_gates)
@@ -122,18 +122,22 @@ def select_weights(model: DeepVoiceNet, results, how: str) -> str:
 
 
 def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
+    # 06 P8: every sampler is built on the fold VIEW (05 A7); the raw manifest
+    # carries no fold and `processing.sampler.Sampler` refuses it.
     view = apply_folds(manifest, folds_tbl, fold)
     index = ManifestIndex.from_frame(view)
-    rcfg = dataclasses.replace(run_cfg.render, root=pathlib.Path(args.corpus))
+    rcfg = run_cfg.render
+    if args.corpus_root is not None:
+        rcfg = dataclasses.replace(rcfg, root=pathlib.Path(args.corpus_root))
     out = pathlib.Path(args.out) / f"fold{fold}"
 
     n_train = (view["slice"] == "train").sum()
     n_val = (view["slice"] == "val").sum()
     print(f"\n=== fold {fold}: {n_train} train rows, {n_val} val rows ===", flush=True)
 
-    train_sampler = Sampler(view, run_cfg.sampler, slice_="train")
+    train_sampler = Sampler(view, run_cfg.draw, slice_="train", fold=fold)
     ds = SpecDataset.from_sampler(train_sampler, args.draws, index, rcfg,
-                                  seed=train_cfg.seed)
+                                  seed=train_cfg.seed, ship=run_cfg.ship)
     # 🔴 Both overrides guard for None. `max_steps` did not, so invoking without
     # `--max-steps` overwrote a run config's `loop.max_steps: 200` with None: the
     # stage stopped being truncated, `StageResult.truncated` stayed False, the
@@ -148,6 +152,7 @@ def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
                           else run_cfg.loop.checkpoint_every))
 
     model = build_model(args.model, args.weights)
+    check_chain(model, ds)                      # one shipped chain, once (05 C2)
     t0 = time.time()
     results = run_schedule(model, ds, train_cfg=train_cfg, loop_cfg=loop_cfg,
                            stages=args.stages)
@@ -161,9 +166,14 @@ def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
     selection = select_weights(model, results, how)
     print(f"  weights scored: {selection}", flush=True)
 
-    val_specs = frozen_eval_specs(Sampler(view, run_cfg.sampler, slice_="val"),
+    # the evaluation draw: no augments, the test chain kept (06 P8 / 05 C5)
+    val_specs = frozen_eval_specs(Sampler(view, run_cfg.draw.for_eval(), slice_="val", fold=fold),
                                   args.eval_n, seed=args.eval_seed)
-    val_ds = SpecDataset.frozen(val_specs, index, rcfg, slice_="val", fold=fold)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "val_specs.json").write_text(json.dumps([s.to_dict() for s in val_specs]),
+                                        encoding="utf-8")
+    val_ds = SpecDataset.frozen(val_specs, index, rcfg, slice_="val", fold=fold,
+                                ship=run_cfg.ship)
     report = evaluate(model, val_ds, batch_size=model.cfg.runtime.batch_size,
                       device=args.device, precision=args.eval_precision, fold=fold)
 
@@ -189,6 +199,9 @@ def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
     # replacing the contract.
     save_checkpoint(model, out / "scored.pt")
     (out / "selection.txt").write_text(selection + "\n", encoding="utf-8")
+    # the chain the weights were trained behind, for `processing.infer`
+    (out / "processing.json").write_text(json.dumps(dump_processing_config(run_cfg), indent=2),
+                                         encoding="utf-8")
     report.predictions.to_parquet(out / "val_predictions.parquet", index=False)
 
     caveats = [c for r in results for c in r.caveats]
@@ -199,12 +212,18 @@ def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--corpus", required=True,
-                   help="root holding manifest.parquet and folds.parquet")
+    p.add_argument("--manifest-dir", required=True,
+                   help="directory holding manifest.parquet and folds.parquet "
+                        "(e.g. /data/project/private/dacon-corpus/manifests/strategy-v2)")
+    p.add_argument("--corpus-root", default=None,
+                   help="the audio root manifest paths are relative to; default: "
+                        "the processing config's render.root")
     p.add_argument("--out", required=True, help="run directory")
     p.add_argument("--model", default="configs/a_shared_trunk.yaml")
     p.add_argument("--train", default="configs/train_joint.yaml")
-    p.add_argument("--run", default="configs/run_default.yaml")
+    p.add_argument("--processing", default="configs/processing_v1.yaml",
+                   help="draw / render / ship / folds / loop (06 P8); the older "
+                        "run_*.yaml is the training sampler's and is not read")
     p.add_argument("--weights", help="frontend checkpoint dir; omit for a stub config")
     p.add_argument("--folds", default="0", help="comma-separated, or 'all'")
     p.add_argument("--stages", default=",".join(STAGES),
@@ -239,10 +258,10 @@ def main() -> int:
     p.add_argument("--dry-run", action="store_true", help="print the plan and exit")
     args = p.parse_args()
 
-    corpus = pathlib.Path(args.corpus)
+    corpus = pathlib.Path(args.manifest_dir)
     manifest = load_manifest(corpus / "manifest.parquet")
     folds_tbl = pd.read_parquet(corpus / "folds.parquet")
-    run_cfg = load_run_config(args.run)
+    run_cfg = load_processing_config(args.processing)
     train_cfg = load_train_config(args.train)
     # 🔴 `run_default.yaml` leaves `folds.scheme_version` null, and a null one makes
     # VG1 A10 -- "the run's scheme_version matches folds.parquet's" -- report SKIP
@@ -265,7 +284,8 @@ def main() -> int:
     if missing:
         raise SystemExit(f"fold(s) {missing} not in folds.parquet (has {available})")
 
-    print(f"corpus   {corpus}  ({len(manifest)} rows, folds {available}, scheme {run_cfg.folds.scheme_version})")
+    print(f"corpus   {corpus}  ({len(manifest)} rows, folds {available}, "
+          f"scheme {run_cfg.folds.scheme_version})")
     print(f"model    {args.model}" + (f"  weights {args.weights}" if args.weights else ""))
     print(f"stages   {' -> '.join(args.stages)}")
     print(f"folds    {wanted}   select={args.select}   device={args.device}")

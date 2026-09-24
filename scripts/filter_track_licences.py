@@ -20,8 +20,9 @@ cases with yes. So CC0, public domain, BY, BY-SA, BY-NC and BY-NC-SA all pass.
 *DERIVATIVES_BARRED* — the **ND** family. Provision of the unmodified file is
 fine, but our pipeline's whole design is augmentation and composition
 (docs/data/06), and ND plausibly bars the derivative we would actually train on.
-Held separately rather than merged into either bucket: the call is a legal read
-(the same one CtrSVDD is waiting on), not something this script should decide.
+Held separately rather than merged into either bucket, so the call stays
+visible. The owner ruled ND usable on 2026-09-08 and ND tracks are kept on
+purpose; this bucket records which tracks that ruling covers.
 
 *DENY* — the licence restricts provision. FMA's "FMA-Limited: Download Only" is
 the clear case, and anything unrecognised lands here too. Critical: unknown
