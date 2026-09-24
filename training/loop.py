@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import time
 import multiprocessing as mp
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -425,7 +426,11 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
             total_steps = min(total_steps, loop_cfg.max_steps)
         stream = _iter_batches(specs, batches, first_batch, dataset.index, dataset.cfg,
                                pool)
+        t_ready = time.perf_counter()
+        wait_s = step_s = 0.0
         for batch_index, batch in stream:
+            t_got = time.perf_counter()
+            wait_s += t_got - t_ready
             state = SamplerState(pass_index, start.epoch_seed, start.n_specs,
                                  batch_seed, batch_index)
             if loop_cfg.max_steps is not None and result.steps >= loop_cfg.max_steps:
@@ -464,9 +469,13 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
                 ema.update(model)
             result.steps += 1
             parts_acc.append(parts)
+            t_ready = time.perf_counter()
+            step_s += t_ready - t_got
             if loop_cfg.log_every and result.steps % loop_cfg.log_every == 0:
                 recent = _mean_parts(parts_acc[-loop_cfg.log_every:], stage, pass_index,
                                      group)
+                recent = {**recent, "data_wait_s": wait_s, "compute_s": step_s}
+                wait_s = step_s = 0.0
                 _log_line(loop_cfg, result.steps, total_steps, factor, recent)
 
             if loop_cfg.checkpoint_every and result.steps % loop_cfg.checkpoint_every == 0:

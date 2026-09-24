@@ -7,7 +7,9 @@ teachers:                       # frozen, training-only; never enter the inferen
                    adapter: {kind: none}, freq_pool: {kind: none}}
   audio_teacher:  {name: sslam,   weights: null, freeze: true, output_dim: 768,  fps: 50.0,
                    adapter: {kind: none}, freq_pool: {kind: none}}
-epochs: 20
+# 18 passes x --draws 48000 (the launcher) = 864k samples, 54k steps at batch 16:
+# ~18.5 h at the measured 1.24 s/step (13 samples/s, render supplies ~18).
+epochs: 18
 # 16: with layer checkpointing (loop.grad_checkpointing) a 60 s clip costs
 # ~2.8 GiB in training (8 x 60 s = 22 GiB measured), vs ~12.5 GiB without.
 batch_size: 16

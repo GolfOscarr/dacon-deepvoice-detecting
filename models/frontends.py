@@ -592,19 +592,31 @@ class BEATsFrontend(Frontend):
         """
         f = self.N_MELS // self.PATCH
         w = int(self.cfg.window_patches)
-        pieces: dict[int, list[tuple[int, int, Tensor]]] = {}
+        # Every window is padded to w columns and the encoder is told which
+        # tokens are padding: it zeroes them before its positional convolution
+        # (which zero-pads at a sequence end anyway) and masks them out of
+        # attention, so a valid token sees exactly what it would unpadded. One
+        # encoder call for the whole batch: per-length calls made the step
+        # launch-bound (3.7 s CPU for 1.05 s of GPU time on a mixed batch).
+        toks, place = [], []
         for i in range(wav.shape[0]):
             tok = self._tokens(wav[i, :int(lengths[i].item())], widths[i])
             for start in range(0, widths[i], w):
                 cols = min(w, widths[i] - start)
-                pieces.setdefault(cols, []).append(
-                    (i, start, tok[start * f:(start + cols) * f]))
+                piece = tok[start * f:(start + cols) * f]
+                if cols < w:
+                    piece = torch.cat([piece, piece.new_zeros((w - cols) * f, piece.shape[1])])
+                toks.append(piece)
+                place.append((i, start, cols))
+        x = torch.stack(toks)
+        pad = torch.zeros(x.shape[:2], dtype=torch.bool, device=x.device)
+        for k, (_, _, cols) in enumerate(place):
+            pad[k, cols * f:] = True
+        y, _ = self.encoder(x, padding_mask=pad if bool(pad.any()) else None)
+        grid = y.view(len(place), w, f, self.output_dim)
         out = wav.new_zeros(wav.shape[0], f, t_max, self.output_dim)
-        for cols, group in pieces.items():
-            x, _ = self.encoder(torch.stack([g[2] for g in group]))
-            grid = x.view(len(group), cols, f, self.output_dim)
-            for (i, start, _), g in zip(group, grid):
-                out[i, :, start:start + cols, :] = g.permute(1, 0, 2).to(out.dtype)
+        for (i, start, cols), g in zip(place, grid):
+            out[i, :, start:start + cols, :] = g[:cols].permute(1, 0, 2).to(out.dtype)
         return out
 
 

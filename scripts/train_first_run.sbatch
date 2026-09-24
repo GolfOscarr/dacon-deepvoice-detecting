@@ -53,4 +53,6 @@ exec "$DACON_VENV/bin/python" scripts/train.py \
   --stages joint \
   --out "runs/$RUN" \
   --device cuda \
+  --draws 48000 \
+  --eval-n 6000 \
   "${role[@]}" "$@"
