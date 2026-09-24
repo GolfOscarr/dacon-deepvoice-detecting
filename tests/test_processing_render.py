@@ -510,6 +510,27 @@ def test_drawn_specs_with_layers_render_reproducibly(corpus, cfg):
         assert torch.equal(r.wav, render(sp, index, cfg).wav)
 
 
+def test_a_multichannel_piece_composes_with_a_stereo_one_at_two_channels(corpus, cfg):
+    """Pool E holds 8- and 30-channel array recordings. The composite is
+    capped at two channels: the array piece keeps its leading channels, the
+    stereo piece is untouched, mono is broadcast. Before the cap, `_to_channels`
+    could not lift 2 to 8 and the composite raised."""
+    from processing.render import _compose, MAX_CHANNELS
+    _, manifest, _ = corpus
+    spec = _tiled(manifest, n_tiles=1, tile=2.0)
+    n = int(round(2.0 * SR))
+    pieces = [np.random.default_rng(0).standard_normal((8, n)).astype(np.float32),
+              np.random.default_rng(1).standard_normal((2, n)).astype(np.float32)]
+    two = SampleSpec(**{**spec.to_dict(), "components": (
+        spec.components[0], ComponentDraw(spec.components[0].file_id, "noise", 0.0, 2.0,
+                                          spec.components[0].target_start_s, 0.0))})
+    placements = placements_for(two, SR)
+    out = _compose(two, placements, pieces, cfg, SR)
+    assert out.shape[0] == MAX_CHANNELS == 2
+    s = placements[0].start
+    np.testing.assert_allclose(out[:, s:s + n], pieces[0][:2] + pieces[1], rtol=1e-6)
+
+
 def test_an_invalid_crossfade_shape_is_rejected(cfg):
     with pytest.raises(ValueError, match="crossfade_shape"):
         RenderConfig(root=cfg.root, crossfade_shape="cosine")

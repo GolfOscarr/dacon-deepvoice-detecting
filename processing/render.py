@@ -127,6 +127,10 @@ def _joints(placements: Sequence[Placement]) -> tuple[set[int], set[int]]:
 # Composition -- REN-2
 
 
+#: The composite's channel ceiling; a piece with more keeps its leading ones.
+MAX_CHANNELS = 2
+
+
 def _compose(spec: SampleSpec, placements: Sequence[Placement],
              pieces: Sequence[np.ndarray], cfg: RenderConfig, sample_rate: int) -> np.ndarray:
     """Place every decoded piece where the spec put it, tapering every joint.
@@ -136,7 +140,13 @@ def _compose(spec: SampleSpec, placements: Sequence[Placement],
     renderer does not overrule the draw (the spec *is* the ledger).
     """
     total = int(round(spec.duration_s * sample_rate))
-    channels = max(p.shape[0] for p in pieces)
+    # Critical: the composite has at most MAX_CHANNELS. The test set is mono
+    # and stereo; pool E holds 92 microphone-array recordings (8 and 30
+    # channels, RIRS isotropic noise) and `_to_channels` can lift mono to N
+    # or keep leading channels, never lift 2 to 8 -- so an uncapped canvas
+    # met a stereo piece with a broadcast error (found by the shipped-residue
+    # run over the built corpus, docs/processing/03 §7 item 3).
+    channels = min(MAX_CHANNELS, max(p.shape[0] for p in pieces))
     canvas = np.zeros((channels, total), dtype=np.float32)
     xfade = int(round(spec.crossfade_ms / 1000.0 * sample_rate))
     fade_in, fade_out = _joints(placements)
