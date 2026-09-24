@@ -33,13 +33,13 @@ The decisions, in the order the pipeline meets them. `D-` ids are used throughou
 |---|---|---|---|---|
 | D-1 | composition policy `f8` | **1.0** (strict — every mixed sample composed) | FIXED (sweep 2026-09-24: `1.0` 18/18 · `0.5` 15/18 · `0.0` 13/18 at n = 20,000 over the built manifest; presence heads read composedness at 0.635 / 0.672, the fake heads at 0.636 under `f8 = 0`; I2c fails at both lower values) | [02 §4.2](02-analysis-report.md#42-why--derived-not-fitted): only `f8 = 1` balances composedness on the component heads, for any mix |
 | D-2 | cell mix | reference `{.060 .130 .060 .135 .155 .125 .125 .095 .115}` | FIXED (owner, 2026-09-24: reference mix kept; revisit only from per-head VAL EER) | [02 §4.3](02-analysis-report.md#43-the-cell-mix-has-the-same-shape-of-gap): 0.60 presence-pattern residual on the component heads; minimax alternative reaches 0.51 |
-| D-3 | component take | `U(3, 8)` s, **strictly inside** the file (`edge_margin 0.5` s), random offset, **every role incl. whole-file** — **revised by D-21: `U(2, 3)` s, one take per sample** | FIXED (range fixed with D-5 by the owner, 2026-09-24) | [02 §3](02-analysis-report.md#3--crop-policies): music-only draw AUC 0.993 → 0.497 |
+| D-3 | component take | `U(1.5, 2.5)` s, **one take per sample** (D-21), tiled over the span with tiles drawn across the component's BUCKET (06 D5), each strictly inside its file (`edge_margin 0.5`) | FIXED (owner, 2026-09-24; as built in 06 P4) | [02 §3](02-analysis-report.md#3--crop-policies): music-only draw AUC 0.993 → 0.497; [05](05-review-findings.md) A6: repetition 0.86 → at chance under bucket tiling |
 | D-4 | timeline fill | **tile** the take to its span with sigmoid joins, every role | FIXED | [02 §2](02-analysis-report.md#2--baseline-what-rundefaultyaml-draws-today): 52.8 % vs 13.9 % silence was the largest cue |
-| D-5 | component duration floor | **2.0 s** (timeline floor stays 4.0 s) — **revised by D-21: 4.0 s**, bound to the take (`floor − 2·margin ≥ take_hi`) | FIXED (owner, 2026-09-24: 4.0 s / `U(2, 3)` kept) | [02 §11](02-analysis-report.md#11--manifest-actions-in-hours): the 4 s floor drops 22.5 % of pool B's hours; 2 s recovers 63.5 h — reachable only with a 1 s take |
+| D-5 | component duration floor | **2.5 s** = `take_lo + 2·margin`: a row must hold the shortest take; a longer tile is served by the rows that can hold it (bucket tiling, 06 D5) | FIXED (owner, 2026-09-24) | pool B keeps 271 of 303 h (4.0 s kept 235); pool A 192 of 195 |
 | D-6 | silence lead / tail | lead `U(0, 3.0)` s, tail `U(0, 1.0)` s, **every sample** | FIXED (owner, 2026-09-24: tail `U(0, 1.0)` kept, unmeasured) | [02 §5](02-analysis-report.md#5--silence): 0.595 → 0.553; tail unmeasured |
 | D-7 | silence trimming | **off** | FIXED | A5b asymmetry (A 7.78 pp vs B 4.12 pp) |
 | D-8 | gain jitter | `U(−12, 12)` dB, `p = 1` | FIXED | [02 §6](02-analysis-report.md#6--level): music 0.683 → 0.599, voice 0.586 → 0.579 |
-| D-9 | loudness normalisation | **off** | FIXED | [02 §6](02-analysis-report.md#6--level): normalising raises the voice residue to 0.786 |
+| D-9 | loudness normalisation | **per tile and per sample at render** (`tile_rms_dbfs`, `target_rms_dbfs` −23 dBFS, before the augments; 06 D7), then `gain_jitter ±12` | REVISED 2026-09-24 | [02 §6](02-analysis-report.md#6--level) measured per-file normalisation making a voice cue (0.786); at the SAMPLE the mixed-sums-louder presence cue (0.67 / 0.78, 04 §3) and the stitched-loudness crest cue (0.78) go, the level residues sit under 0.60 on every head (04, re-measured) |
 | D-10 | DC removal | **on**, shipped | FIXED | [02 §7](02-analysis-report.md#7--dc-and-the-high-pass): a generator id (0.994) that inverts across archives (0.392) |
 | D-11 | high-pass | **none** (`band_hz[0] = 0`) | FIXED | [02 §7](02-analysis-report.md#7--dc-and-the-high-pass): 40 Hz removes 25–75 % of four vocoders' pair difference |
 | D-12 | upper band edge | `band_hz = [0, 7200]` | FIXED (owner, 2026-09-24: `[0, 7200]` kept; `null` stays a training-time ablation) | [02 §8](02-analysis-report.md#8--bandwidth-the-resampler-shelf-and-codec): resampler shelf + SONICS 7.3 kHz rolloff |
@@ -241,42 +241,52 @@ drawn. **EXISTS**; values in §5. Verify: I2, I2b, I2c, I8.
 
 **Purpose.** The music-head fix, applied to every role.
 **In → Out.** (role, fake, span) → `ComponentDraw`s.
-**Rule.**
+**Rule (as built 2026-09-24, docs/processing/06 D5 — bucket tiling).**
 
 ```
-file    ← weighted draw over the role's rows, w = min(count(domain), cap) / count(domain)
-          (DOSS; applies to component AND whole-file rows -- CHANGE)
-take    ~ U(take_lo, take_hi)
-take     = min(take, file_duration − edge_margin_s, span)
-          if file_duration − edge_margin_s < take_lo: take = file_duration − edge_margin_s
-          (rows under component_floor_s never reach here: OFF-4)
-n_tiles  = ceil(span / take)
-for each tile: offset_i ~ U(0, file_duration − take)   # independent per tile
-               ComponentDraw(file, role, offset_i, take (last tile: span − (n−1)·take),
-                             target_start_s = slot_start + i·take, gain_db)
+take    ~ U(take_lo, take_hi)                       # ONCE per sample, shared by every role (D-21)
+anchor  ← DOSS-weighted draw over the role's rows, w = min(count(domain), cap) / count(domain)
+          (domain = the generator family for a fake row, the publisher atom for a real one — D2)
+bucket  ← the anchor's bucket: the speaker for voice; the whole pool per side for music and noise
+n       = ceil(span / take);  tile = span / n
+for each tile i:
+    dur_i    = tile + xfade  (every tile but the slot's last; a sequential slot's last too)
+    file_i   ~ Uniform{ bucket files with duration ≥ dur_i + 2·margin }, without replacement
+               within the slot; an exhausted bucket is reused round-robin; the pool only when
+               the bucket holds no file that can hold the tile
+    offset_i ~ U(margin, file_i − margin − dur_i)
+    ComponentDraw(file_i, role, offset_i, dur_i, target_start_s = slot_start + i·tile, gain_db,
+                  slot = the component's index)
 ```
 
-**Parameters.** `take_lo 3.0`, `take_hi 8.0`, `edge_margin_s 0.5`, `component_floor_s 2.0`
-(all **NEW** `SamplerConfig` fields); `domain_cap 500`.
-⚠️ **Measured in steps 3 and 6 (D-21):** the cap `take ≤ file − 2·margin` makes the tile count
-follow the file's length, and a take drawn per role makes the join count follow the presence
-pattern — the harness saw neither, because it audited joins only on the component heads and only
-on the training sampler's draws. As built, the take is drawn **once per sample**, shared by every
-role, and `take_hi ≤ floor − 2·margin` so no file caps it: `take_range_s [2, 3]`,
-`component_floor_s 4.0` (OPEN together — 3.0 / [1.5, 2] keeps 92 % of pool B's hours, 4.0 / [2, 3]
-80 %, 6.0 / [3, 5] 63 %; every pair passes the audit identically).
-**Why these values.** 3–8 s is below pool D's 10 s (so the offset range is never empty) and inside
-the segment grid ★ `[BirdCLEF playbook]` D4 recommends; the audit is flat across 2–8 s (P5/P7/P8
-within 0.03). `edge_margin 0.5` took onset exposure from 20 % → 0.8 % (voice) and 78 % → 1.9 %
-(noise; CompSpoof clips are exactly 4.00 s). Independent offsets per tile keep the join count a
-function of `(span, take)` only.
+**Parameters.** `take_range_s [1.5, 2.5]`, `edge_margin_s 0.5`, `component_floor_s 2.5`
+(= `take_lo + 2·margin`, asserted: the floor admits a row that can hold the shortest take),
+`domain_cap 500` (real rows too).
+**Why (measured).** A single file per component made the tile count follow the file's length
+(D-21, 0.65) and, once that was fixed, the *content* follow it: a 10 s fake-music file tiled over
+60 s repeated itself and "repeated music" read `music_fake` at 0.86 ([05](05-review-findings.md)
+A6). Tiles drawn across the bucket without replacement give every slot as many files as tiles on
+both sides, so `unique_fraction`, `n_files` and `n_buckets` (all audited) are label-independent
+by construction; the 2.5 s floor then keeps 271 of pool B's 303 h (4.0 s kept 235). Three
+variants were measured and dropped on the way: with replacement, `n_files` read the bucket's size
+(0.997 on a synthetic corpus); leaving an exhausted bucket for the pool made speakers-per-slot
+read it (0.81); a fixed 2–4-file budget made the repetition read the files' lengths. Music and
+noise are ONE bucket per side because a fake-music family (600–5,500 files) and a real artist
+atom (~3 tracks) are asymmetric buckets and whichever exhausts first reads the label. Tiles
+overlap by the crossfade so REN-2 fades over audio (05 A5). `edge_margin 0.5` took onset exposure
+from 20 % → 0.8 % (voice) and 78 % → 1.9 % (noise); where a tile sits *inside* its file still
+reads the pools' length distributions (05 B8: `relpos` 0.74 on the music head) and is reported by
+the audit's I1e, not gated, because it is not audible in itself.
 **Targets.** every role, every row kind.
-**Code.** `Sampler.sample_spec` (both branches); `SampleSpec` gains nothing — tiles are ordinary
-`ComponentDraw`s, so `frame_intervals` stay exact and I13 holds.
+**Code.** `processing.sampler.Sampler` (both branches); `ComponentDraw.slot` names the component
+a tile belongs to (tiles of one slot may name different files); `frame_intervals` merge per slot
+and I13 holds.
 **Consumed by.** REN-2.
-**Verify.** `P(offset < 10 ms)` per pool equal and < 1 %; music-only draw AUC < 0.60; joins AUC
-at chance on every head; mutation: `edge_margin_s → 0` must make the pool-D test fail.
-**Status.** CHANGE (rule) + NEW (fields).
+**Verify.** `P(offset < 10 ms)` per pool equal and < 1 %; music-only draw AUC < 0.60; joins,
+`unique_fraction`, `n_files`, `n_buckets` at chance on every head; mutation: `edge_margin_s → 0`
+must make the pool-D test fail. Measured on the fold-0 train view of strategy-v2 at n = 20,000:
+19/19 (`voice_fake` 0.55, `music_fake` 0.52, presence 0.58 / 0.58).
+**Status.** BUILT (06 P4).
 
 ### DRAW-4 · Placement: lead/tail, structure, gain ratio (D-6)
 
@@ -360,14 +370,22 @@ unverified) — do not add a container without `_codec_roundtrip`'s length asser
 16 kHz; raises `DecodeError` on a short or non-finite result (a corpus row that lies about its
 duration is a defect, not padding).
 
-### REN-2 · Tile and compose — CHANGE
+### REN-2 · Tile and compose — BUILT (06 P5)
 
-Each `ComponentDraw` is placed at `target_start_s`; consecutive tiles of one component get
-complementary sigmoid tapers over `crossfade_ms` at each join, exactly as sequential segments do
-today (`_place` + the taper code in `render.py`). Overlap components sum; the gain ratio is applied
-to the voice component. No length change, no time shift.
-**Verify.** `render(spec) == render(spec)` (I10); the canvas has no digital-silence run longer
-than `max(lead, tail)`; `frame_intervals` union = the placed spans (I13).
+Each `ComponentDraw` is placed at `target_start_s`, sample-exact. Consecutive tiles of one slot
+**overlap by the crossfade** and are faded with equal-power ramps (`out² + in² = 1`), so a joint is
+a crossfade over real audio; the first version faded both tiles to zero *at* the joint and every
+sample carried ~12 dips to silence, one every 2.3 s ([05](05-review-findings.md) A5). Each
+non-layer tile is scaled to `tile_rms_dbfs` before placement (bucket tiling stitches files of
+different loudness; the crest factor read `music_fake` at 0.78 before this), the gain ratio is
+applied to the voice slot, overlap slots sum, the noise layer is scaled once against the
+composite over its span (measured on the tapered audio, 05 B5), then the composite is scaled to
+`target_rms_dbfs` over the placed span (06 D7). After the augments the sample is clipped to
+[−1, 1] as a wav on disk would be (06 D6), then the test chain. The augment chain draws from the
+render RNG domain (05 B6) on one torch thread (06 D11). No length change, no time shift.
+**Verify.** `render(spec) == render(spec)` across processes and thread counts (I10); no zero
+sample inside a crossfade; the level through a joint is the tiles'; the layer within ±0.05 dB
+of its SNR; `frame_intervals` merge per slot and equal the placement (I13).
 
 ### REN-3 · Augment apply — EXISTS (`augment_chain(spec.transforms)`)
 ### REN-4 · Normalize apply — EXISTS (`_normalize(spec.normalize)`)
