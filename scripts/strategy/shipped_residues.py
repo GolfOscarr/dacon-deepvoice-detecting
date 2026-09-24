@@ -1,6 +1,6 @@
 """Acoustic residues on the audio the model receives (docs/processing/03 §7 item 3).
 
-    python scripts/strategy/shipped_residues.py --n 6000 --workers 16
+    python scripts/strategy/shipped_residues.py --n 6000 --workers 16 --fold 0
 
 The stream harness audits per-FILE scalars the EDA measured; this script
 measures the SAMPLE: ``processing.render`` (the decode cache, tiles, layer,
@@ -37,16 +37,29 @@ from processing.render import ManifestIndex, render                # noqa: E402
 from processing.sampler import Sampler                             # noqa: E402
 from processing.ship import ship_sample                            # noqa: E402
 from scripts.strategy.stream_harness import GATE, SEED, _cv_auc    # noqa: E402
+from training.folds import apply_folds                             # noqa: E402
 from training.spec import SampleSpec, stratum_of                   # noqa: E402
 from eda.analyze.shortcut import univariate_auc                    # noqa: E402
 
 OUT = ROOT / "eda" / "out" / "_strategy"
-MANIFEST = Path("/data/project/private/dacon-corpus/manifests/strategy-v1/manifest.parquet")
+MANIFEST_DIR = Path("/data/project/private/dacon-corpus/manifests/strategy-v2")
 
 #: The residues the harness audited per file, now measured per sample.
 FEATURES = ("rms_dbfs", "peak_dbfs", "crest_factor_db", "dc_offset",
             "effective_bandwidth_hz", "near_nyquist_ratio", "hf_ratio_8k",
             "spectral_flatness", "spectral_centroid_hz", "band_energy_0")
+#: Two families, judged apart. RESIDUES are what the pipeline can
+#: manufacture and the test chain cannot carry: the level (06 D7 equalises
+#: it), a DC offset and the resampler's near-Nyquist shelf (SHIP-4/5 remove
+#: them). CONTENT is the spectral shape and the dynamics -- a vocoder's
+#: high band, a generator's flatness, music's density -- which IS the signal
+#: the heads are asked for, transfers across sources because it is real,
+#: and is reported, not gated. The acceptance item (03 §7 item 3) binds on
+#: the residues. Caveat: with the level equalised, the peak IS the crest
+#: factor (music is denser than speech), so it sits with the content.
+RESIDUES = ("rms_dbfs", "dc_offset", "near_nyquist_ratio")
+CONTENT = ("peak_dbfs", "crest_factor_db", "effective_bandwidth_hz", "hf_ratio_8k",
+           "spectral_flatness", "spectral_centroid_hz", "band_energy_0")
 HEADS = ("file_fake", "voice_fake", "music_fake", "voice_present", "music_present")
 
 _STATE: dict = {}
@@ -102,9 +115,10 @@ def _group_for(s: pd.DataFrame, head: str) -> pd.Series:
 
 def audit(s: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    for stage in ("pre", "ship"):
-        cols = [f"{stage}__{f}" for f in FEATURES]
+    for stage, family in (("pre", "residue"), ("ship", "residue"), ("ship", "content")):
+        names = RESIDUES if family == "residue" else CONTENT
         for head in HEADS:
+            cols = [f"{stage}__{f}" for f in names]
             y_all = pd.to_numeric(s[head], errors="coerce")
             scored = y_all.notna()
             if head == "file_fake":
@@ -124,7 +138,8 @@ def audit(s: pd.DataFrame) -> pd.DataFrame:
                 uni = sorted(((univariate_auc(x[:, i], y), keep[i].split("__", 1)[1])
                               for i in range(x.shape[1])), reverse=True)[:5]
                 rows.append({
-                    "stage": stage, "head": head, "stratum": stratum, "n": int(len(y)),
+                    "stage": stage, "family": family, "head": head, "stratum": stratum,
+                    "n": int(len(y)),
                     "positive_rate": float(y.mean()),
                     "auc": _cv_auc(x, y, groups, grouped=False),
                     "auc_source_grouped": _cv_auc(x, y, groups, grouped=True),
@@ -132,7 +147,8 @@ def audit(s: pd.DataFrame) -> pd.DataFrame:
                     "top_features": "; ".join(f"{n}={a:.3f}" for a, n in uni)})
     out = pd.DataFrame(rows)
     judged = out["auc_source_grouped"].fillna(out["auc"])
-    out["gate"] = np.where(judged < GATE, "pass", "fail")
+    out["gate"] = np.where(out["family"] == "content", "reported",
+                           np.where(judged < GATE, "pass", "fail"))
     return out
 
 
@@ -142,19 +158,23 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--seed", type=int, default=SEED)
     ap.add_argument("--processing-config", default="configs/processing_v1.yaml")
-    ap.add_argument("--manifest", default=str(MANIFEST))
+    ap.add_argument("--manifest-dir", default=str(MANIFEST_DIR))
+    ap.add_argument("--fold", type=int, default=0, help="the fold view to draw the TRAIN slice of")
     args = ap.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
 
     cfg = load_processing_config(args.processing_config)
-    manifest = pd.read_parquet(args.manifest)
-    sampler = Sampler(manifest, cfg.draw, slice_="train")
+    # 05 A7: the raw manifest carries no fold; the sampler refuses it
+    manifest = apply_folds(pd.read_parquet(Path(args.manifest_dir) / "manifest.parquet"),
+                           pd.read_parquet(Path(args.manifest_dir) / "folds.parquet"), args.fold)
+    manifest_path = str(Path(args.manifest_dir) / "manifest.parquet")
+    sampler = Sampler(manifest, cfg.draw, slice_="train", fold=args.fold)
     specs = [s.to_dict() for s in sampler.epoch_specs(args.n, epoch=0, seed=args.seed)]
     print(f"drew {len(specs)} specs; rendering + shipping with {args.workers} workers",
           flush=True)
     rows = []
     with ProcessPoolExecutor(args.workers, initializer=_init,
-                             initargs=(args.processing_config, args.manifest)) as pool:
+                             initargs=(args.processing_config, manifest_path)) as pool:
         for i, row in enumerate(pool.map(_one, specs, chunksize=8)):
             rows.append(row)
             if (i + 1) % 500 == 0:
@@ -166,11 +186,11 @@ def main() -> int:
     a.to_parquet(OUT / "shipped_residues_audit.parquet", index=False)
     pd.set_option("display.width", 250, "display.max_colwidth", 120)
     print(a.to_string(index=False))
-    summary = {"n": len(s), "seed": args.seed,
+    summary = {"n": len(s), "seed": args.seed, "fold": args.fold,
                "ship_dc_offset_abs_max": float(s["ship__dc_offset"].abs().max()),
                "ship_near_nyquist_max": float(s["ship__near_nyquist_ratio"].max()),
                "pre_near_nyquist_max": float(s["pre__near_nyquist_ratio"].max()),
-               "fails": a[a["gate"] == "fail"][["stage", "head", "stratum"]]
+               "fails": a[a["gate"] == "fail"][["stage", "family", "head", "stratum"]]
                         .to_dict(orient="records")}
     (OUT / "shipped_residues_summary.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary, indent=2))

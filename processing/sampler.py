@@ -336,6 +336,12 @@ class Sampler:
             else:
                 in_bucket = pool.eligible(need, bucket, exclude_flagged=exclude_flagged,
                                           exclude=exclude)
+                if not in_bucket.size and exclude:
+                    # a pool too small to keep the layer off every primary
+                    # file (a test corpus of 5 noise files): the exclusion is
+                    # a preference, the tile is not optional
+                    in_bucket = pool.eligible(need, bucket, exclude_flagged=exclude_flagged,
+                                              exclude=None)
                 cand = in_bucket[~np.isin(in_bucket, used)] if used else in_bucket
                 if not cand.size and in_bucket.size:
                     counts = np.array([uses.get(int(j), 0) for j in in_bucket])

@@ -1,7 +1,7 @@
 """I10 across processes, I13 and I14 on real corpus samples
 (docs/processing/03 §7 item 6).
 
-    python scripts/strategy/verify_reproducibility.py --n 64
+    python scripts/strategy/verify_reproducibility.py --n 64 --fold 0
 
 * I10: ``render(spec) == render(spec)`` bitwise -- the same specs rendered in
   two FRESH interpreters (``subprocess``), compared by the sha256 of the
@@ -35,10 +35,11 @@ from processing.config import load_processing_config              # noqa: E402
 from processing.render import ManifestIndex, render                # noqa: E402
 from processing.sampler import Sampler                             # noqa: E402
 from processing.ship import ship, ship_sample                      # noqa: E402
+from training.folds import apply_folds                             # noqa: E402
 from training.spec import CELL_TABLE, SampleSpec                   # noqa: E402
 
 OUT = ROOT / "eda" / "out" / "_strategy"
-MANIFEST = "/data/project/private/dacon-corpus/manifests/strategy-v1/manifest.parquet"
+MANIFEST_DIR = "/data/project/private/dacon-corpus/manifests/strategy-v2"
 
 
 def _digest(specs_path: str, cfg_path: str, manifest_path: str) -> dict[str, str]:
@@ -94,9 +95,9 @@ def check_i13(spec: SampleSpec, intervals: dict) -> list[str]:
     if not whole:
         want_file += [(s, e, 0) for s, e in _merged_spans(spec, "noise")]
     merged: list[tuple[float, float, int]] = []
-    for s, e, lab in sorted(want_file):       # abutting, same label: one entry
-        if merged and merged[-1][2] == lab and abs(merged[-1][1] - s) < 1e-6:
-            merged[-1] = (merged[-1][0], e, lab)
+    for s, e, lab in sorted(want_file):       # abutting or overlapping, same label: one
+        if merged and merged[-1][2] == lab and s <= merged[-1][1] + 1e-6:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e), lab)
         else:
             merged.append((s, e, lab))
     got = sorted((round(s, 6), round(e, 6), lab) for s, e, lab in intervals["file"])
@@ -114,23 +115,26 @@ def main() -> int:
     ap.add_argument("--n", type=int, default=64)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--processing-config", default="configs/processing_v1.yaml")
-    ap.add_argument("--manifest", default=MANIFEST)
+    ap.add_argument("--manifest-dir", default=MANIFEST_DIR)
+    ap.add_argument("--fold", type=int, default=0)
     args = ap.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
 
     cfg = load_processing_config(args.processing_config)
-    manifest = pd.read_parquet(args.manifest)
-    sampler = Sampler(manifest, cfg.draw, slice_="train")
+    manifest_path = str(Path(args.manifest_dir) / "manifest.parquet")
+    manifest = apply_folds(pd.read_parquet(manifest_path),
+                           pd.read_parquet(Path(args.manifest_dir) / "folds.parquet"), args.fold)
+    sampler = Sampler(manifest, cfg.draw, slice_="train", fold=args.fold)
     specs = list(sampler.epoch_specs(args.n, epoch=0, seed=args.seed))
     specs_path = OUT / "reproducibility_specs.json"
     specs_path.write_text(json.dumps([s.to_dict() for s in specs]))
-    report: dict = {"n": len(specs), "seed": args.seed}
+    report: dict = {"n": len(specs), "seed": args.seed, "fold": args.fold}
 
     # I10 -- two fresh interpreters
     code = (f"import json,sys; sys.path.insert(0,{str(ROOT)!r}); "
             f"from scripts.strategy.verify_reproducibility import _digest; "
             f"print(json.dumps(_digest({str(specs_path)!r}, {args.processing_config!r}, "
-            f"{args.manifest!r})))")
+            f"{manifest_path!r})))")
     digests = []
     for _ in range(2):
         res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
