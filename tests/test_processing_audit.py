@@ -10,6 +10,8 @@ trusted green on the one that does not (docs/processing/03 §6 step 6).
 
 import pytest
 
+from dataclasses import replace
+
 from processing.audit import (HOP_S, audit_specs, collapse_tiles, draw_features,
                               run_audit)
 from processing.config import DrawConfig
@@ -155,7 +157,7 @@ def test_h1_edge_exposure_fails_on_the_old_sampler(old_report):
 
 def test_the_new_sampler_passes_every_draw_shortcut_gate(new_report):
     keys = [k for k in new_report.ran if k.startswith("I1c_") or k == "I1d_edge_exposure"]
-    assert len(keys) == 6
+    assert len([k for k in keys if k != "I1c_warnings"]) == 6
     for k in keys:
         passed, detail = new_report.ran[k]
         assert passed, f"{k}: {detail}"
@@ -223,3 +225,109 @@ def test_layers_are_collapsed_apart_from_components_and_read_by_the_features(man
         assert len(layers) == 1 and layers[0].role == "noise"
         assert len([d for d in c.components if d.snr_db is None]) == len(
             {(d.role, d.slot) for d in spec.components if d.snr_db is None})
+
+
+# --------------------------------------------------------------------------- #
+# P6 (docs/processing/06): the gates the review found blind -- each mutation
+# below passed the audit as it was (05 B9-B11) and must fail it now
+
+
+class _Mutated:
+    """A sampler whose specs are rewritten by ``fn`` after the draw."""
+
+    def __init__(self, sampler, fn):
+        self._s, self._fn, self.slice_, self.fold = sampler, fn, sampler.slice_, sampler.fold
+
+    def epoch_specs(self, n, epoch=0, seed=0):
+        for spec in self._s.epoch_specs(n, epoch=epoch, seed=seed):
+            yield self._fn(spec)
+
+
+def _shift(spec, seconds):
+    """Every component ``seconds`` later on a timeline ``seconds`` longer."""
+    comps = tuple(replace(c, target_start_s=c.target_start_s + seconds) for c in spec.components)
+    return replace(spec, duration_s=spec.duration_s + seconds, components=comps)
+
+
+N_MUT = 6_000
+
+
+def test_a_cue_on_cell_nine_alone_fails_the_presence_heads(manifest):
+    """05 B9: every probe dropped cell 9 while the presence heads train on it."""
+    biased = _Mutated(Sampler(manifest), lambda s: _shift(s, 2.0) if s.cell == 9 else s)
+    rep = run_audit(biased, manifest, n=N_MUT)
+    failed = [k for k, (ok, _) in rep.ran.items() if not ok]
+    assert any(k.startswith("I1c_draw_shortcut_auc_") and k.endswith("_present")
+               for k in failed), failed
+
+
+def test_a_transform_parameter_set_by_presence_fails_i1bp(manifest):
+    """05 B10: rir's wet level set by music_present passed I1 and I1b."""
+    def wet_by_music(s):
+        wet = 0.9 if s.music_present else 0.3
+        return replace(s, transforms=s.transforms + (("rir", {"wet": wet, "pick": 0.5}),))
+    rep = run_audit(_Mutated(Sampler(manifest), wet_by_music), manifest, n=N_MUT)
+    ok, detail = rep.ran["I1bp_transform_params_by_music_present"]
+    assert not ok, detail
+    assert rep.ran["I1bp_transform_params_by_voice_present"][0]
+
+
+def test_a_normalize_draw_set_by_presence_fails_i1bp(manifest):
+    def mono_iff_voice(s):
+        return replace(s, normalize={**s.normalize,
+                                     "channels": "mono" if s.voice_present else "stereo"})
+    rep = run_audit(_Mutated(Sampler(manifest), mono_iff_voice), manifest, n=N_MUT)
+    assert not rep.ran["I1bp_transform_params_by_voice_present"][0]
+
+
+def test_a_transform_name_taken_by_presence_fails_i1p(manifest):
+    def rir_when_music(s):
+        if not s.music_present:
+            return s
+        return replace(s, transforms=s.transforms + (("rir", {"wet": 0.5, "pick": 0.5}),))
+    rep = run_audit(_Mutated(Sampler(manifest), rir_when_music), manifest, n=N_MUT)
+    ok, detail = rep.ran["I1p_transform_names_by_music_present"]
+    assert not ok and "'rir'" in detail, detail
+
+
+def test_a_sub_gate_cue_many_standard_errors_from_chance_is_a_warning(manifest):
+    """05 B11: +0.3 s of lead on fakes only scored 0.597 -- under the gate,
+    17 SE from chance. It stays under the gate and is now said out loud."""
+    biased = _Mutated(Sampler(manifest), lambda s: _shift(s, 0.3) if s.file_fake else s)
+    rep = run_audit(biased, manifest, n=N_MUT)
+    _, detail = rep.ran["I1c_warnings"]
+    assert "file_fake" in detail and "SE" in detail, detail
+    clean = run_audit(Sampler(manifest), manifest, n=N_MUT)
+    assert "file_fake" not in clean.ran["I1c_warnings"][1]
+
+
+def test_a_bimodal_cue_the_linear_probe_misses_fails_on_the_folded_feature(manifest):
+    """05 B11: fake leads at both ends of the range, real in the middle,
+    scored 0.509 on the linear probe. The folded single feature reads it."""
+    import numpy as np
+
+    def bimodal(s):
+        # the same mean shift on both sides: fakes get 0 or 2.5 s, reals 1.25 s
+        rng = np.random.default_rng(s.sample_id)
+        if s.file_fake:
+            return _shift(s, 2.5) if rng.random() < 0.5 else s
+        return _shift(s, 1.25)
+    rep = run_audit(_Mutated(Sampler(manifest), bimodal), manifest, n=N_MUT)
+    ok, detail = rep.ran["I1c_draw_shortcut_auc_file_fake"]
+    assert not ok and "|x-med|" in detail, detail
+
+
+def test_the_val_view_audit_accepts_the_folds_family_count(manifest):
+    """05 C6: I21 needs 3 fake-music families and a VAL fold has 1 by design
+    (D-22); the val view reads the floor from the view."""
+    df = manifest.copy()
+    df.loc[df.pool == "D", "artifact_family"] = "the-one-family"
+    df.loc[df.pool == "D", "domain_key"] = "the-one-family"
+    df["slice"] = "val"
+    s = Sampler(df, DrawConfig().for_eval(), slice_="val", fold=0)
+    rep = run_audit(s, df, n=4_000, view="val", eval_floors=False)
+    ok, detail = rep.ran["I21_generator_diversity"]
+    assert ok and "floor 1" in detail, detail
+    train_like = run_audit(s, df, n=4_000)
+    assert not train_like.ran["I21_generator_diversity"][0]
+    assert rep.ran["I1_transform_name_independence"][0], "no augments in eval mode"

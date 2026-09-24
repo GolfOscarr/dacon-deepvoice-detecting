@@ -258,27 +258,62 @@ def _head_frame(features: pd.DataFrame, head: str) -> pd.DataFrame:
 # the audit
 
 
+def _univariate_worst(X: np.ndarray, y: np.ndarray, names: Sequence[str]
+                      ) -> tuple[float, str]:
+    """The strongest single feature, raw or folded about its median: a
+    bimodal cue (fake leads at the ends of the range, real in the middle)
+    is invisible to a linear probe -- it scored 0.509 -- and obvious folded
+    (05 B11)."""
+    from eda.analyze.shortcut import univariate_auc
+    best, best_name = 0.5, "-"
+    for j, name in enumerate(names):
+        x = X[:, j]
+        if np.unique(x).size < 2:
+            continue
+        for tag, v in (("", x), ("|x-med|", np.abs(x - np.median(x)))):
+            a = univariate_auc(v, y)
+            a = max(a, 1.0 - a)
+            if a > best:
+                best, best_name = a, f"{name}{tag}"
+    return best, best_name
+
+
 def _draw_shortcuts(specs: Sequence[SampleSpec], manifest: pd.DataFrame
                     ) -> dict[str, tuple[bool, str]]:
     """I1c: can the draw features alone predict a head? Per head, inside the
-    head's population, pooled and per stratum, worst taken, noise-aware."""
-    specs = [s for s in specs if s.cell != 9]
+    head's population, pooled and per stratum, worst taken, noise-aware;
+    a linear probe and the strongest single feature (raw or folded).
+
+    Critical: cell 9 stays IN for the presence heads -- they are trained on
+    it, and a cue that marks the "neither" cell alone (a longer lead, a
+    crossfade) was invisible while every probe dropped it (05 B9). It stays
+    OUT of the fake heads' populations and of file_fake, where it is always
+    real and never composed (training.audit's reason).
+
+    A sub-gate cue that is still many standard errors from chance is a
+    WARNING in the detail (05 B11): at n = 20,000 the SE is ~0.005 and 0.58
+    is a certain cue that the 0.60 floor lets through; the floor is the
+    design's allowance, the warning is what the reader needs to see."""
     out: dict[str, tuple[bool, str]] = {}
     if not specs:
-        out["I1c_draw_shortcut_auc"] = (True, AuditReport.SKIP + "no cells 1-8 in the stream")
+        out["I1c_draw_shortcut_auc"] = (True, AuditReport.SKIP + "no specs")
         return out
     features = draw_features(specs, manifest)
+    warnings: list[str] = []
     for head, (label, population) in HEADS.items():
+        presence = head in ("voice_present", "music_present")
         keep = [i for i, s in enumerate(specs)
-                if population is None or getattr(s, population)]
+                if (population is None or getattr(s, population)) and (presence or s.cell != 9)]
         sub = [specs[i] for i in keep]
         y_all = np.array([int(getattr(s, label) or 0) for s in sub])
-        X_all = _head_frame(features.iloc[keep].reset_index(drop=True), head)
-        X_all = X_all.loc[:, X_all.nunique() > 1].to_numpy(dtype=float)
+        frame = _head_frame(features.iloc[keep].reset_index(drop=True), head)
+        frame = frame.loc[:, frame.nunique() > 1]
+        names = list(frame.columns)
+        X_all = frame.to_numpy(dtype=float)
         scored: list[tuple[float, str]] = []
         counts: dict[str, tuple[int, int]] = {}
         probes = [("pooled", list(range(len(sub))))]
-        if head not in ("voice_present", "music_present"):
+        if not presence:
             probes += [(st, [i for i, s in enumerate(sub) if s.stratum == st])
                        for st in ("voice-only", "music-only", "mixed")]
         for where, idx in probes:
@@ -286,9 +321,11 @@ def _draw_shortcuts(specs: Sequence[SampleSpec], manifest: pd.DataFrame
                 continue
             auc = _auc_or_none(X_all[idx], y_all[idx])
             if auc is not None:
-                scored.append((auc, where))
                 ys = y_all[idx]
                 counts[where] = (int((ys == 1).sum()), int((ys == 0).sum()))
+                uni, uni_name = _univariate_worst(X_all[idx], ys, names)
+                scored.append((auc, where))
+                scored.append((uni, f"{where}:{uni_name}"))
         key = f"I1c_draw_shortcut_auc_{head}"
         if not scored:
             out[key] = (True, AuditReport.SKIP + "not enough samples to estimate an AUC")
@@ -302,10 +339,13 @@ def _draw_shortcuts(specs: Sequence[SampleSpec], manifest: pd.DataFrame
         component = head in ("voice_fake", "music_fake")
         verdicts = []
         for auc, where in scored:
-            se = _auc_se(*counts[where])
-            floor = POOLED_COMPONENT_GATE if (component and where == "pooled") \
+            stratum = where.split(":", 1)[0]
+            se = _auc_se(*counts[stratum])
+            floor = POOLED_COMPONENT_GATE if (component and stratum == "pooled") \
                 else SHORTCUT_AUC_GATE
             verdicts.append((auc < max(floor, 0.5 + NOISE_K * se), auc, where, floor, se))
+            if auc < max(floor, 0.5 + NOISE_K * se) and auc - 0.5 > NOISE_K * se:
+                warnings.append(f"{head} {where}={auc:.3f} ({(auc - 0.5) / se:.0f} SE)")
         passed = all(v[0] for v in verdicts)
         _, worst, where, floor, se = min(verdicts, key=lambda v: (v[0], -v[1]))
         gate = max(floor, 0.5 + NOISE_K * se)
@@ -314,9 +354,59 @@ def _draw_shortcuts(specs: Sequence[SampleSpec], manifest: pd.DataFrame
                     f"{'worst' if passed else 'failing'} draw-feature CV AUC = "
                     f"{worst:.4f} in {where!r} over {X_all.shape[1]} feature(s); gate < "
                     f"{gate:.4f} (floor {floor}, {NOISE_K:g} SE = {NOISE_K * se:.4f} at "
-                    f"n={counts[where]}) [{detail}]"
+                    f"n={counts[where.split(':', 1)[0]]}) [{detail}]"
                     + ("; the pooled component-head floor is the D-2 residual "
                        "allowance (03 §7)" if component else ""))
+    out["I1c_warnings"] = (True, ("sub-gate cues more than 4 SE from chance (reported, "
+                                  "05 B11): " + "; ".join(warnings)) if warnings
+                           else "no sub-gate cue beyond 4 SE from chance")
+    return out
+
+
+def _presence_probes(specs: Sequence[SampleSpec]) -> dict[str, tuple[bool, str]]:
+    """I1p / I1bp (05 B10): the transform names, their parameters and the
+    normalize draw against each PRESENCE label, cell 9 included. training's
+    I1 and I1b regress file_fake only; a wet level set by music_present, a
+    gain by voice_present, mono iff voice_present all passed them. Safe by
+    construction today (DRAW-6/7 are drawn before the cell); this is what
+    verifies it."""
+    out: dict[str, tuple[bool, str]] = {}
+    X, names = _ta._feature_frame(specs)
+    cols = [j for j, n in enumerate(names) if n.startswith(("t:", "n:"))]
+    for label in ("voice_present", "music_present"):
+        y = np.array([int(getattr(s, label)) for s in specs])
+        n1, n0 = int((y == 1).sum()), int((y == 0).sum())
+        # names: |P(T | present) - P(T | absent)| within a noise-aware tolerance
+        by: dict[int, Counter] = {0: Counter(), 1: Counter()}
+        for s, lab in zip(specs, y):
+            for name, _ in s.transforms:
+                by[int(lab)][name] += 1
+        worst, worst_name = 0.0, "-"
+        for name in set(by[0]) | set(by[1]):
+            p1, p0 = by[1][name] / max(n1, 1), by[0][name] / max(n0, 1)
+            if abs(p1 - p0) > worst:
+                worst, worst_name = abs(p1 - p0), name
+        p_bar = 0.5
+        tol = max(0.02, NOISE_K * float(np.sqrt(
+            p_bar * (1 - p_bar) * (1 / max(n1, 1) + 1 / max(n0, 1)))))
+        out[f"I1p_transform_names_by_{label}"] = (
+            worst <= tol, f"worst |P(T|present) - P(T|absent)| = {worst:.4f} on {worst_name!r}; "
+                          f"tol {tol:.4f} (floor 0.02, {NOISE_K:g} SE at n=({n1}, {n0}))")
+        # parameters and the normalize draw: a CV AUC against the presence label
+        if cols and n1 >= 50 and n0 >= 50:
+            auc = _auc_or_none(X[:, cols], y)
+            se = _auc_se(n1, n0)
+            gate = max(SHORTCUT_AUC_GATE, 0.5 + NOISE_K * se)
+            if auc is None:
+                out[f"I1bp_transform_params_by_{label}"] = (
+                    True, AuditReport.SKIP + "not enough samples")
+            else:
+                out[f"I1bp_transform_params_by_{label}"] = (
+                    auc < gate, f"transform-parameter and normalize CV AUC = {auc:.4f} over "
+                                f"{len(cols)} feature(s); gate < {gate:.4f}")
+        else:
+            out[f"I1bp_transform_params_by_{label}"] = (
+                True, AuditReport.SKIP + "no transform or normalize columns")
     return out
 
 
@@ -379,17 +469,38 @@ def audit_specs(specs: Sequence[SampleSpec], manifest: pd.DataFrame,
     draw features, per head) and I1d (edge exposure per pool) over the tiled
     ones. The manifest is required: the draw features read file durations."""
     collapsed = [collapse_tiles(s) for s in specs]
+    # I1's tolerance on the transform-name rates is noise-aware here: the
+    # flat 0.02 fired on clean streams of 3-5k (05 C6)
+    n1 = sum(s.file_fake == 1 for s in specs)
+    n0 = len(specs) - n1
+    kw.setdefault("tol", max(0.02, NOISE_K * float(np.sqrt(
+        0.25 * (1 / max(n1, 1) + 1 / max(n0, 1))))))
     base = _ta.audit_specs(collapsed, manifest=manifest, **kw)
     results = dict(base.results)
     results.update(_draw_shortcuts(specs, manifest))
+    results.update(_presence_probes(specs))
     results["I1d_edge_exposure"] = _exposure(specs, manifest)
     results["I1e_edge_proximity"] = _edge_proximity(specs, manifest)
     return AuditReport(results)
 
 
 def run_audit(sampler: Any, manifest: pd.DataFrame, n: int = 20_000, epoch: int = 0,
-              seed: int = 0, **kw: Any) -> AuditReport:
-    """Draw ``n`` specs from any sampler with ``epoch_specs`` and audit them."""
+              seed: int = 0, *, view: str = "train", **kw: Any) -> AuditReport:
+    """Draw ``n`` specs from any sampler with ``epoch_specs`` and audit them.
+
+    ``view="val"`` (05 C6): a VAL fold validates the music head on the one or
+    two families D-22 leaves it, by design, so I21's floor is the count the
+    view actually carries (the fold caveat says the rest); the eval-size
+    floors (I7) are on."""
     specs = list(sampler.epoch_specs(n, epoch=epoch, seed=seed))
+    if view == "val":
+        fams = manifest.loc[manifest["slice"] == getattr(sampler, "slice_", "val")]
+        fams = fams[fams["fold"] == getattr(sampler, "fold", None)] if "fold" in fams else fams
+        n_fam = min(int(fams.loc[fams["pool"] == p, "artifact_family"].nunique())
+                    for p in ("B", "D"))
+        kw.setdefault("min_families", max(1, min(3, n_fam)))
+        kw.setdefault("eval_floors", True)
+    elif view != "train":
+        raise ValueError(f"view must be train|val, got {view!r}")
     return audit_specs(specs, manifest, slice_=getattr(sampler, "slice_", "train"),
                        fold=getattr(sampler, "fold", None), **kw)
