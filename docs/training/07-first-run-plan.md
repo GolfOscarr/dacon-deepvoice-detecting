@@ -119,3 +119,76 @@ Then, in order: manifest `strategy-v3`, folds, cache extension, gates and the fo
 All GPU work goes through `sbatch` / `srun -p debug`. Tracks K and M write data only under
 `/data/project/private/dacon-corpus/`. They do not commit; the main session reviews and
 commits their scripts.
+
+## 6 · As built and measured (2026-09-25 00:30 KST)
+
+The run `first-v3` is Slurm array 218976: tasks 0-3 are folds 0-3, tasks 4-7 are
+all-data seeds 0-3. Outputs go to `/data/project/private/dacon-runs/first-v3/` (symlinked as
+`runs/first-v3`). It runs 18 passes × 48,000 draws at batch 16, about 54,000 steps per task.
+Measured at 1.24–1.40 s/step on all eight tasks at once, so about 20 h.
+
+**Data (strategy-v3, 400,944 rows)**
+
+| corpus | rows | h | note |
+|---|---|---|---|
+| ko-synth | 19,432 | 39.6 | 7 families (mms, melo, knnvc, openvoice, xtts, cosyvoice, bark); cosyvoice and bark stopped early to free GPUs |
+| sonics-sep | 3,458 | 62.9 | 5 generator versions; vocal-bleed screen, same rule both sides |
+| realmusic-sep | 3,853 | 41.8 | fma + MUSAN music through the same htdemucs |
+| libritts-r | 24,206 | 49.6 | 243 speakers; 9,026 clips under the 2.5 s floor dropped |
+| common-voice-ko | 1,697 | 2.7 | validated.tsv only |
+
+- **Folds.** VG1 passes. Every VAL fold has ≥ 2 fake-music families, so the one-family
+  music caveat is gone.
+- **Fake voice VAL hours.** 182 / 22 / 28 / 28 h across folds 0–3 (the LJ atom).
+- **Cache.** 49,638 files added, 0 failures.
+
+**The draw.** The audit passes 25/25 at n = 40,000.
+
+- **Language shares.** Real voice draws ko 0.536 / en 0.464; fake voice draws ko 0.497 /
+  en 0.442, plus MLAAD's long tail.
+- **CFAD sits in PROBE.** Its 59.4 h of Chinese fakes are sealed in PROBE with their pair
+  atoms, so Chinese is dropped from every train and VAL view. It had been Chinese on the
+  real side only: 20 % of real draws against 0 % of fake.
+- **I3 threshold.** I3 reads ≈ 0.5 at n = 20,000 by construction (2p(1−p) = 0.48 for a
+  component drawn twice), so audit at n ≥ 40,000.
+
+**Model (`configs/c_first_run.yaml`).**
+
+- **Trunks.** BEATs has 12 layers, LoRA on six projections, and encodes in 62-column
+  (9.92 s) windows. XLS-R-300M uses 12 of its 24 layers. Of 264M parameters, 9.7M are
+  trainable.
+- **Alignment.** XLS-R's 50 fps is pooled onto BEATs' 6.25 fps grid.
+
+**Training.**
+
+- **Settings.** One joint stage, batch 16, lr 2e-4 with a 0.2× frontend rate, warmup 1,000
+  steps, then cosine to 5 %. EMA 0.999, layer checkpointing, 7 render workers per task.
+  Steps take 1.24–1.40 s.
+
+What stood between the first launch and that speed, in order:
+
+| symptom | cause | fix |
+|---|---|---|
+| OOM at batch 32, then at 8 | both trunks stored every layer's attention maps | layer checkpointing: 100 → 22 GiB at 8 × 60 s |
+| memory +0.75 GB / step, then cuFFT alloc failure | cuFFT cached a plan per transform length, outside PyTorch's allocator | `bandpass` caps the plan cache at 8 (also an L4 inference leak) |
+| 3.9 s/step, 3.7 s in BEATs | one 3,000-token attention per 60 s row | 62-column windows: 0.79 s |
+| 2.7 s/step on real batches | a separate encoder call per partial-window length (launch-bound) | pad windows and use the encoder's padding mask: 1.24 s |
+| 22 s/step with 8 tasks, GPUs idle | CUDA JIT cache `~/.nv` on EFS, every task blocked on its index over NFS | `CUDA_CACHE_PATH` on node-local /tmp |
+
+**Submission path.** `scripts/package_submission.py` has been verified on the 100-step smoke
+model.
+
+- **Offline load.** The zip is 1.66 GB. `script.py`, run in a venv that mirrors the server
+  (`/data/project/private/dacon-venvs/server-mirror`: torch 2.7.1+cu128, numpy 1.26.4,
+  pandas 2.0.3, transformers 4.57.6), loaded the model offline from `model/weights/`.
+- **Result.** It scored WAV / FLAC / MP3 files with no fallback row.
+- **Not measured.** L4 wall time. The pre-window estimate was 29 min fp32 worst case.
+
+**Open.**
+
+- **L4 wall time.**
+- **Choosing between the four all-data runs.** They share their initialisation (the model
+  seed is fixed), so the plan is a uniform soup of their EMA weights, checked on PROBE
+  against the single runs.
+- **The remaining synthesis.** CosyVoice and Bark can resume if a second run is wanted
+  (`scripts/synth/run_family.sbatch`).
