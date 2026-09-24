@@ -487,17 +487,32 @@ def _assign_folds(groups: Sequence[str], facts: dict[str, dict],
                                           -facts[g]["n_rows"], g))
     for group in order:
         f, keys = facts[group], strata.get(group, {})
+        if cfg.balance_on == "hours":
+            # Critical: the duration-bucket and channel strata count ROWS and
+            # every group shares them, so the fold holding the LJ atom (101k
+            # rows) repelled every other group under them -- fold 0's VAL had
+            # 0.0 h of noise. Under hours, only the source strata remain.
+            keys = {k: n for k, n in keys.items() if k[0] == "src"}
         best, best_cost = 0, np.inf
         for k in range(n_folds):
             cost = 2.0 * sum(
                 (len(fam_tally[k][h] | f["families"][h]) / (total_fam[h] / n_folds)) ** 2
                 for h in HEADS if total_fam[h])
-            cost += ((rows_tally[k] + f[size_key]) / (total_rows / n_folds)) ** 2
             if cfg.balance_on == "hours":
+                # Critical: per (role, fake) pair ONLY -- a total-hours term
+                # beside it made every other group avoid the fold that holds
+                # the LJ atom (182 h of fake voice, indivisible), leaving that
+                # fold's VAL with 0.4 h of real music and no noise.
+                # ... and only over the pairs THIS group carries: a fold's
+                # excess on another pair is the same for every candidate and
+                # would make that fold lose every group (fold 0 held 182 h of
+                # fake voice and got 0.0 h of noise).
                 cost += 2.0 * sum(
-                    ((hours_tally[k][key] + f["hours"].get(key, 0.0))
+                    ((hours_tally[k][key] + f["hours"][key])
                      / (total_hours[key] / n_folds)) ** 2
-                    for key in _COVERAGE if total_hours[key] > 0)
+                    for key in f["hours"] if total_hours.get(key, 0.0) > 0)
+            else:
+                cost += ((rows_tally[k] + f[size_key]) / (total_rows / n_folds)) ** 2
             cost += sum(
                 ((tallies[k].get(key, 0) + n) / (total_key[key] / n_folds)) ** 2
                 for key, n in keys.items()) / n_keys
