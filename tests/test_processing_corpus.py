@@ -28,9 +28,9 @@ def _files():
              "cfad-fake", "B", gk="cfad-fake/dev_clean/fake_clean/wavenet"),
         _row("cf3", "cfad/x/CFAD/clean_version/dev_clean/fake_clean/gl/SSB99990001_gl.wav",
              "cfad-fake", "B", gk="cfad-fake/dev_clean/fake_clean/gl"),
-        _row("cr1", "cfad/x/CFAD/clean_version/dev_clean/real_clean/aishell3/SSB03540001.wav",
+        _row("cr1", "cfad/x/CFAD/clean_version/dev_clean/real_clean/aishell3/SSB03540001_aishell3.wav",
              "cfad-real", "A", gk="cfad-real/dev_clean/real_clean/aishell3"),
-        _row("cr2", "cfad/x/CFAD/clean_version/dev_clean/real_clean/aishell3/SSB03540002.wav",
+        _row("cr2", "cfad/x/CFAD/clean_version/dev_clean/real_clean/aishell3/SSB03540002_aishell3.wav",
              "cfad-real", "A", gk="cfad-real/dev_clean/real_clean/aishell3"),
         _row("cr3", "cfad/x/CFAD/clean_version/dev_clean/real_clean/thchs30/A7_191.wav",
              "cfad-real", "A", gk="cfad-real/dev_clean/real_clean/thchs30"),
@@ -65,9 +65,11 @@ def _files():
 
 
 def _tracks():
-    cols = pd.MultiIndex.from_tuples([("artist", "id"), ("track", "license")])
-    return pd.DataFrame([[10, "Attribution"], [10, "Attribution-NonCommercial-NoDerivatives 4.0"],
-                         [11, "FMA-Limited: Download Only"]], index=[2, 5, 10], columns=cols)
+    cols = pd.MultiIndex.from_tuples([("artist", "id"), ("artist", "name"), ("track", "license")])
+    return pd.DataFrame([[10, "Airglow", "Attribution"],
+                         [10, "Airglow", "Attribution-NonCommercial-NoDerivatives 4.0"],
+                         [11, "Kevin MacLeod", "FMA-Limited: Download Only"]],
+                        index=[2, 5, 10], columns=cols)
 
 
 def _inputs(**over):
@@ -84,7 +86,7 @@ def _inputs(**over):
                            {"file_id": "cf1", "signal_ok": True}])
     base = dict(files=files, worklist=worklist, duplicates=duplicates, signal=signal,
                 fma_tracks=_tracks(), fma_allow={2}, stages={"mlaad": "raw"},
-                component_floor_s=4.0)
+                component_floor_s=4.0, min_cfad_pairs=1)
     return BuildInputs(**{**base, **over})
 
 
@@ -103,15 +105,20 @@ def test_keys_per_source(built):
     assert r.at["cf1", "artifact_family"] == "cfad/gl" and r.at["cf1", "domain_key"] == "cfad-fake|cfad/gl"
     assert r.at["cf1", "speaker_ref_id"] == "SSB0354" and r.at["cf1", "pair_id"] == "cfad:SSB03540001"
     assert r.at["cr1", "pair_id"] == "cfad:SSB03540001" and pd.isna(r.at["cr1", "artifact_family"])
+    # 05 A1: the real file is SSB03540001_aishell3.wav; the speaker is read from it too
+    assert r.at["cr1", "speaker_ref_id"] == "SSB0354" and r.at["cr3", "speaker_ref_id"] == "thchs30_A7"
     assert pd.isna(r.at["cf3", "pair_id"]) and pd.isna(r.at["cr3", "pair_id"]), "one side is no pair"
     assert r.at["lj1", "speaker_ref_id"] == "ljspeech_LJ" and r.at["lj1", "pair_id"] == "lj:LJ001-0001"
     assert r.at["wf1", "artifact_family"] == "wf_melgan" and r.at["wf2", "artifact_family"] == "wf_gan"
     assert r.at["wf3", "artifact_family"] == "wf_mb_melgan"
     assert r.at["wf4", "artifact_family"] == "wf_jsut_parallel_wavegan" and r.at["wf4", "speaker_ref_id"] == "jsut"
     assert r.at["wf5", "artifact_family"] == "wf_cv_fastspeech2_pwg" and pd.isna(r.at["wf5", "pair_id"])
+    assert r.at["wf5", "speaker_ref_id"] == "ljspeech_LJ", "05 B2: LJ's voice under the cv subset"
     assert r.at["wf1", "pair_id"] == "lj:LJ001-0001" and r.at["wf1", "domain_key"] == "wavefake|ljspeech_melgan"
     assert r.at["ml1", "artifact_family"] == "mlaad/Edge-TTS" and r.at["ml1", "speaker_ref_id"] == "ko/Edge-TTS"
-    assert r.at["fm2", "speaker_ref_id"] == "fma_artist_10"
+    assert r.at["fm2", "speaker_ref_id"] == "artist:airglow" and r.at["fm2", "source_name"] == "fma_artist_10"
+    assert r.at["mm1", "speaker_ref_id"] == "artist:airglow", "05 B3: one artist atom across fma and MUSAN"
+    assert assign_keys(_files(), _tracks()).set_index("file_id").at["fm3", "speaker_ref_id"] == "artist:kevinmacleod"
     assert r.at["fc2", "artifact_family"] == "fakemusiccaps/MusicGen_medium"
     assert r.at["fc2", "speaker_ref_id"] == "fakemusiccaps/MusicGen_medium/SLdVSirZMSI"
     assert r.at["fc1", "speaker_ref_id"] == "fakemusiccaps/musicldm/SLdVSirZMSI"
@@ -127,7 +134,7 @@ def test_paths_carry_the_stage_and_labels_come_from_the_tables(built):
     assert tuple(r.loc["cf1", ["label_voice_present", "label_music_present", "label_voice_fake"]]) == (1, 0, 1)
     assert pd.isna(r.at["cf1", "label_music_fake"])
     assert r.at["cf1", "label_confidence"] == "exact" and r.at["cr1", "label_confidence"] == "reported"
-    assert (m["aug_strength"] == 1.0).all() and (m["scheme_version"] == "strategy-v1").all()
+    assert (m["aug_strength"] == 1.0).all() and (m["scheme_version"] == "strategy-v2").all()
     assert list(m.columns) == list(REQUIRED_COLUMNS) + list(EXTRA_COLUMNS)
 
 

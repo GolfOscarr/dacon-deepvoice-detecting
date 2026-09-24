@@ -10,7 +10,7 @@ a whole-file row's from ``CELL_TABLE``.
 
 The per-source rules are docs/processing/03 §4.1's, each derived from the
 path or the publisher's metadata and each asserted after the build
-(``check_rules``). Three departures from the table as written, measured:
+(``check_rules``). The departures from the table as written, each measured:
 
 * ``fma``'s ``speaker_ref_id`` is the **artist id from ``tracks.csv``**
   (2,309 atoms), not the 156 path buckets the EDA's ``group_key`` used --
@@ -21,6 +21,16 @@ path or the publisher's metadata and each asserted after the build
 * ``fakemusiccaps``'s ``speaker_ref_id`` is the parent clip **scoped to the
   generator**: shared across generators it fused the five families into one
   fold atom.
+* CFAD's real files are ``SSB03540001_aishell3.wav``; the pair id is read
+  before the underscore on both sides (2,354 aishell3 utterances have fake
+  twins), and the speaker (``SSB0354``, aishell1 ``S0724``, thchs30 ``B11``)
+  is read from the same name so A3 sees CFAD speakers (docs/processing/05 A1).
+* The LJ voice is ONE atom wherever it is synthesised: LJSpeech real, the
+  WaveFake LJ subsets, ``conformer_fastspeech2_pwg_ljspeech`` and MLAAD's
+  ``tts_models_en_ljspeech_*`` all carry ``speaker_ref_id = ljspeech_LJ`` (05 B2).
+* fma and MUSAN music share artists (29 after normalisation): the
+  normalised artist NAME is the ``speaker_ref_id`` atom for both, the fma
+  artist id stays in ``source_name`` (05 B3).
 
 Paths are written **relative to the corpus root** (``<root>/interim/...`` or
 ``<root>/raw/...``), because a source's stage is a property of the EDA config
@@ -34,6 +44,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -44,7 +56,7 @@ from training.spec import CELL_TABLE, is_fake_cell
 __all__ = ["EXTRA_COLUMNS", "SCHEME_VERSION", "BuildInputs", "apply_worklist", "assign_keys",
            "build_manifest", "check_rules", "dup_groups", "licence_verdicts", "verdicts"]
 
-SCHEME_VERSION = "strategy-v1"
+SCHEME_VERSION = "strategy-v2"
 
 #: Columns beyond ``training.manifest.REQUIRED_COLUMNS``. ``corpus`` is the
 #: EDA's source name (``cfad-real``, ``wavefake``, ...): the manifest's own
@@ -91,7 +103,8 @@ class BuildInputs:
     fma_tracks: pd.DataFrame | None = None
     fma_allow: set[int] = field(default_factory=set)
     stages: Mapping[str, str] = field(default_factory=dict)   # source_name -> interim | raw
-    component_floor_s: float = 4.0            # OFF-4 usable_duration, the sampler's floor
+    component_floor_s: float = 2.5            # OFF-4 usable_duration, the sampler's floor
+    min_cfad_pairs: int = 2_000               # check_rules: the CFAD twins must be bound
 
 
 # --------------------------------------------------------------------------- #
@@ -109,6 +122,7 @@ def assign_keys(files: pd.DataFrame, fma_tracks: pd.DataFrame | None = None) -> 
     src, path, gk = df["source_name"], df["path"], df["group_key"]
     fam = pd.Series(pd.NA, index=df.index, dtype="object")
     spk = gk.astype("object").copy()
+    df["publisher_atom"] = gk.astype("object")          # source_name for a real row
     dom = pd.Series(pd.NA, index=df.index, dtype="object")
     pair = pd.Series(pd.NA, index=df.index, dtype="object")
 
@@ -121,8 +135,18 @@ def assign_keys(files: pd.DataFrame, fma_tracks: pd.DataFrame | None = None) -> 
     pair[m] = ("cfad:" + ssb).where(ssb.notna())
 
     m = src == "cfad-real"
-    ssb = _rx(path[m], r"/(SSB\d+)\.")
+    # Critical: the real files are `SSB03540001_aishell3.wav`, not `SSB03540001.wav`
+    # -- a regex expecting the dot matched nothing, no CFAD pair was ever
+    # linked, and 11,014 real/fake twins straddled the PROBE seal
+    # (docs/processing/05 A1). The speaker is read from the same name: aishell3
+    # `SSB0354`, aishell1 `BAC009S0724W0145` -> `S0724`; the zenodo sub-corpus
+    # has no id and keeps its group key.
+    ssb = _rx(path[m], r"/(SSB\d+)_")
     pair[m] = ("cfad:" + ssb).where(ssb.notna())
+    a1 = _rx(path[m], r"/BAC009(S\d{4})W\d+")
+    th = _rx(path[m], r"/thchs30/([A-Z]\d+)_")
+    spk[m] = (ssb.str[:7].where(ssb.notna(), ("aishell1_" + a1).where(a1.notna(), spk[m]))
+              .where(th.isna(), "thchs30_" + th))
 
     m = src == "ljspeech"
     lj = _rx(path[m], r"/(LJ\d{3}-\d{4})\.")
@@ -133,7 +157,11 @@ def assign_keys(files: pd.DataFrame, fma_tracks: pd.DataFrame | None = None) -> 
     subset = _rx(path[m], r"/generated_audio/([^/]+)/")
     lj = _rx(path[m], r"/(LJ\d{3}-\d{4})")
     fam[m] = subset.map(WAVEFAKE_FAMILY)
-    spk[m] = np.where(subset.str.startswith("ljspeech_"), "ljspeech_LJ",
+    # `conformer_fastspeech2_pwg_ljspeech` speaks in LJ's voice although it
+    # sits under the common_voice subset; keying it `common_voice` put ~7,600
+    # LJ-voice fakes in another fold than LJ real (docs/processing/05 B2).
+    spk[m] = np.where(subset.str.startswith("ljspeech_") | subset.str.contains("ljspeech"),
+                      "ljspeech_LJ",
                       np.where(subset.str.startswith("jsut_"), "jsut", "common_voice"))
     dom[m] = "wavefake|" + subset
     pair[m] = ("lj:" + lj).where(lj.notna() & subset.str.startswith("ljspeech_"))
@@ -141,7 +169,9 @@ def assign_keys(files: pd.DataFrame, fma_tracks: pd.DataFrame | None = None) -> 
     m = src == "mlaad"
     parts = path[m].str.extract(r"/payload/fake/([^/]+)/([^/]+)/")
     fam[m] = "mlaad/" + parts[1]
-    spk[m] = parts[0] + "/" + parts[1]
+    # the `tts_models_en_ljspeech_*` models are LJ's voice (05 B2)
+    spk[m] = (parts[0] + "/" + parts[1]).where(~parts[1].str.contains("ljspeech", na=False),
+                                               "ljspeech_LJ")
     dom[m] = "mlaad|" + parts[1]
 
     m = src == "fakemusiccaps"
@@ -167,15 +197,36 @@ def assign_keys(files: pd.DataFrame, fma_tracks: pd.DataFrame | None = None) -> 
         artist = fma_tracks[("artist", "id")]
         spk[m] = ("fma_artist_" + tid.map(artist).astype("Int64").astype(str)).where(
             tid.map(artist).notna())
+        # Critical: the artist NAME, normalised, is the grouping atom shared
+        # with MUSAN music (which has an `fma` subset and 29 artists in common
+        # -- Kevin MacLeod sat in fma fold 0 and MUSAN folds 1-2, 05 B3). The
+        # id stays in `source_name` (the publisher atom); the name goes to
+        # `speaker_ref_id`, which the fold union-find reads.
+        df.loc[m, "publisher_atom"] = spk[m]            # fma_artist_<id>, for source_name
+        name = tid.map(fma_tracks[("artist", "name")]).map(_artist_atom)
+        spk[m] = name.where(name.notna(), spk[m])
+
+    m = src == "musan-music"
+    art = gk[m].str.rsplit("/", n=1).str[-1].map(_artist_atom)
+    spk[m] = art.where(art.notna(), spk[m])
 
     df["artifact_family"], df["speaker_ref_id"] = fam, spk
     df["domain_key"], df["pair_id"] = dom, _both_sides(pair, src)
     return df
 
 
+def _artist_atom(name: object) -> object:
+    """``"Kevin MacLeod"`` -> ``"artist:kevinmacleod"``; NA stays NA."""
+    if name is None or (isinstance(name, float) and np.isnan(name)):
+        return pd.NA
+    key = re.sub(r"[^a-z0-9]", "", str(name).lower())
+    return ("artist:" + key) if key else pd.NA
+
+
 def _both_sides(pair: pd.Series, source: pd.Series) -> pd.Series:
     """A pair is a claim that the same utterance exists on BOTH sides. cfad-fake
-    has 16,553 utterance ids and cfad-real 7,900 of them; an id with one side
+    has 16,553 utterance ids and cfad-real ~7,900 of them (measured 7,918 after
+    the regex fix, 05 A1); an id with one side
     only is not a pair (§4.1: "where the id exists in cfad-fake") -- and a
     twin a filter dropped leaves no pair either, so this runs again after the
     drops."""
@@ -337,7 +388,7 @@ def build_manifest(inp: BuildInputs) -> tuple[pd.DataFrame, pd.DataFrame, dict[s
     # row's atom is its family; a real row's is its group key (cfad-real's
     # sub-corpus, zeroth's speaker, musan's partition, CompSpoof's parent) --
     # except fma, whose key is the artist (its path buckets are numbering).
-    real_key = keyed["speaker_ref_id"].where(keyed["source_name"] == "fma", keyed["group_key"])
+    real_key = keyed["publisher_atom"]
     m["source_name"] = keyed["artifact_family"].where(fake_row, real_key)
     m["speaker_ref_id"] = keyed["speaker_ref_id"]
     m["pair_id"] = keyed["pair_id"]
@@ -359,7 +410,7 @@ def build_manifest(inp: BuildInputs) -> tuple[pd.DataFrame, pd.DataFrame, dict[s
     m["cell"] = m["cell"].astype("Int64")
     m = m[list(REQUIRED_COLUMNS) + list(EXTRA_COLUMNS)]
     validate_manifest(m)
-    check_rules(m)
+    check_rules(m, min_cfad_pairs=inp.min_cfad_pairs)
     report = {
         "rows": int(len(m)),
         "dropped": {k: int(v) for k, v in
@@ -378,7 +429,7 @@ def build_manifest(inp: BuildInputs) -> tuple[pd.DataFrame, pd.DataFrame, dict[s
     return m, side, report
 
 
-def check_rules(m: pd.DataFrame) -> None:
+def check_rules(m: pd.DataFrame, *, min_cfad_pairs: int = 2_000) -> None:
     """Every §4.1 rule, as an assertion. ``validate_manifest`` proves the
     schema; this proves the corpus."""
     def bad(mask: pd.Series, what: str) -> None:
@@ -405,6 +456,10 @@ def check_rules(m: pd.DataFrame) -> None:
     if len(lonely):
         raise AssertionError(f"{len(lonely)} pair_id(s) with one side only, e.g. "
                              f"{lonely.index[:3].tolist()}")
+    cfad_pairs = m.loc[m["corpus"].isin(["cfad-real", "cfad-fake"]), "pair_id"].nunique()
+    if cfad_pairs < min_cfad_pairs:
+        raise AssertionError(f"only {cfad_pairs} CFAD pair(s) bound; the real/fake twins "
+                             f"must be linked (docs/processing/05 A1)")
     bad(comp & m["noise_has_speech"] & (m["pool"] != "E"), "noise_has_speech outside pool E")
     bad(m["licence_verdict"].eq("deny"), "with a denied licence still present")
     bad((m["corpus"] == "fma") & m["licence_verdict"].isna(),

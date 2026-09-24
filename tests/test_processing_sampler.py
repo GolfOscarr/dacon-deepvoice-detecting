@@ -195,7 +195,7 @@ def test_rows_at_the_floor_are_drawn_and_rows_below_it_are_not(manifest):
     at_floor, below = b[:20], b[20:40]
     df.loc[at_floor, "duration_s"] = 4.0
     df.loc[below, "duration_s"] = 3.9
-    s = Sampler(df)
+    s = Sampler(df, DrawConfig(component_floor_s=4.0, take_range_s=(2.0, 3.0)))
     assert s.n_dropped_short == 20
     drawn = Counter(c.file_id for spec in s.epoch_specs(3000) for c in spec.components)
     assert any(f in drawn for f in df.loc[at_floor, "file_id"]), \
@@ -218,7 +218,7 @@ def test_a_corpus_of_only_short_components_fails_loudly(manifest):
     df = manifest.copy()
     df.loc[df.row_kind == "component", "duration_s"] = 3.0
     with pytest.raises(ValueError, match="shorter than component_floor_s"):
-        Sampler(df)
+        Sampler(df, DrawConfig(component_floor_s=4.0, take_range_s=(2.0, 3.0)))
 
 
 # --------------------------------------------------------------------------- #
@@ -358,9 +358,13 @@ def test_no_file_can_cap_the_take(sampler, manifest):
             assert dur[c.file_id] - 2 * m >= hi - 1e-9
 
 
-def test_a_take_longer_than_the_floors_interior_is_rejected():
+def test_a_floor_below_the_shortest_take_plus_margins_is_rejected():
+    """D-21 under bucket tiling (docs/processing/06 D5): the floor admits a
+    row only if it can hold the SHORTEST take; a longer take is served by
+    the rows that can hold it, never capped."""
     with pytest.raises(ValueError, match="D-21"):
-        DrawConfig(take_range_s=(2.0, 3.5), component_floor_s=4.0, edge_margin_s=0.5)
+        DrawConfig(take_range_s=(2.0, 3.5), component_floor_s=2.5, edge_margin_s=0.5)
+    DrawConfig(take_range_s=(2.0, 3.5), component_floor_s=3.0, edge_margin_s=0.5)
     DrawConfig(take_range_s=(2.0, 3.0), component_floor_s=4.0, edge_margin_s=0.5)
     with pytest.raises(ValueError, match="D-21"):
         DrawConfig(take_range_s=(3.0, 8.0), component_floor_s=2.0)      # the spec's draft
@@ -653,7 +657,7 @@ _KNOBS: dict[str, tuple] = {
     "balance_marginal_composedness": (True, False, "cell9_composed", {}),
     "domain_cap": (500, 1, "component_files", {}),
     "duration_range": ((4.0, 60.0), (4.0, 8.0), "durations", {}),
-    "take_range_s": ((2.0, 3.0), (1.5, 1.5), "tile_lengths", {}),
+    "take_range_s": ((1.5, 2.5), (1.0, 1.0), "tile_lengths", {}),
     "edge_margin_s": (0.5, 0.0, "offsets", {}),
     "component_floor_s": (4.0, 40.0, "component_files", {}),
     "gain_db_range": ((-15.0, 15.0), (-1.0, 1.0), "gains", {}),
@@ -727,9 +731,9 @@ _V1_DEFAULTS = {
     "balance_marginal_composedness": True,
     "domain_cap": 500,
     "duration_range": (4.0, 60.0),
-    "take_range_s": (2.0, 3.0),
+    "take_range_s": (1.5, 2.5),
     "edge_margin_s": 0.5,
-    "component_floor_s": 4.0,
+    "component_floor_s": 2.5,
     "gain_db_range": (-15.0, 15.0),
     "gain_db_mean": -3.6,
     "gain_db_sigma": 4.0,
@@ -741,7 +745,7 @@ _V1_DEFAULTS = {
     "noise_snr_db_range": (10.0, 30.0),
     "augments": AUGMENTS_V1,
     "normalize_menu": NORMALIZE_MENU_V1,
-    "scheme_version": "strategy-v1",
+    "scheme_version": "strategy-v2",
     "allow_unsound_mix": False,
 }
 
@@ -764,7 +768,7 @@ def test_the_v1_defaults_are_pinned():
     {"sequential_prob": 1.5},
     {"crossfade_ms_range": (200.0, 10.0)},
     {"f8": 1.5},
-    {"take_range_s": (2.0, 3.01)},
+    {"take_range_s": (2.0, 3.0), "component_floor_s": 2.9},
     {"augments": (AugmentSpec("gain_jitter", 0.5), AugmentSpec("gain_jitter", 0.5))},
 ])
 def test_malformed_draw_configs_are_rejected(bad):

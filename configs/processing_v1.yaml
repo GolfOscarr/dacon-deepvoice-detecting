@@ -29,11 +29,11 @@ draw:
   # span with independent offsets per tile. take_range_s[1] must not exceed
   # component_floor_s - 2 * edge_margin_s (asserted): no file ever caps the
   # take, so the join count is a function of (span, take) only.
-  take_range_s: [2.0, 3.0]
+  take_range_s: [1.5, 2.5]
   edge_margin_s: 0.5
   # D-5 (revised). OPEN with the take: floor 3.0 / take [1.5, 2.0] keeps 92 %
   # of pool B's hours, 4.0 / [2, 3] keeps 80 %, 6.0 / [3, 5] keeps 63 %.
-  component_floor_s: 4.0
+  component_floor_s: 2.5
   # DRAW-4. The voice/music level ratio, skewed quiet (A-A3).
   gain_db_range: [-15.0, 15.0]
   gain_db_mean: -3.6
@@ -73,7 +73,7 @@ draw:
     channels:  {mono: 0.5, stereo: 0.5}
     telephone: {none: 0.80, ulaw: 0.10, alaw: 0.05, plain: 0.05}
     telephone_hz: 8000
-  scheme_version: strategy-v1
+  scheme_version: strategy-v2
   # Leave false: it exists for the audit's own mutation tests.
   allow_unsound_mix: false
 

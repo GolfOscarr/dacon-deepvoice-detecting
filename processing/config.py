@@ -196,7 +196,7 @@ class DrawConfig:
     #: role makes the larger of two join counts read as "two components"
     #: (voice_present 0.68). OPEN with the floor: {3.0 / U(1.5, 2), 4.0 /
     #: U(2, 3), 6.0 / U(3, 5)} keep 92 / 80 / 63 % of pool B's hours.
-    take_range_s: tuple[float, float] = (2.0, 3.0)
+    take_range_s: tuple[float, float] = (1.5, 2.5)
     #: D-3. The take lies *strictly inside* the file: offset >= margin and
     #: offset + take <= file - margin. Took onset exposure from 20 % -> 0.8 %
     #: (voice) and 78 % -> 1.9 % (noise; CompSpoof clips are exactly 4.00 s).
@@ -206,7 +206,7 @@ class DrawConfig:
     #: ``floor - 2 * margin`` must hold the longest take. 4.0 keeps 80 % of
     #: pool B's hours (59 % of its rows); the spec's 2.0 is reachable only with
     #: a 1 s take.
-    component_floor_s: float = 4.0
+    component_floor_s: float = 2.5
 
     # -- DRAW-4: placement -------------------------------------------------- #
     gain_db_range: tuple[float, float] = (-15.0, 15.0)
@@ -239,7 +239,7 @@ class DrawConfig:
     #: ``spec.normalize`` (REN-4 applies it). ``None`` = as rendered.
     normalize_menu: NormalizeMenu | None = NORMALIZE_MENU_V1
 
-    scheme_version: str = "strategy-v1"
+    scheme_version: str = "strategy-v2"
     #: The audit's mutation-test hatch, as in ``training.sampler``. A run that
     #: sets it is not quotable.
     allow_unsound_mix: bool = False
@@ -253,18 +253,17 @@ class DrawConfig:
             raise ValueError(f"take_range_s must be 0 < lo <= hi, got {self.take_range_s}")
         if self.edge_margin_s < 0:
             raise ValueError(f"edge_margin_s must be >= 0, got {self.edge_margin_s}")
-        # Critical: the one invariant the tile rule rests on (D-21). The
-        # longest take must fit inside the interior of a row at the floor, so
-        # no file ever caps a take and the join count is a function of
-        # (span, take) alone. Violated, the tile count reads the pool's
-        # length distribution -- measured as voice_fake 0.65 and
-        # voice_present 0.75 on the S-tier stream.
-        interior = self.component_floor_s - 2.0 * self.edge_margin_s
-        if t_hi > interior + 1e-9:
+        # Critical: under bucket tiling (docs/processing/06 D5) a file is used
+        # only for tiles it can hold, so the floor's job is to admit a row that
+        # can hold at least the shortest take: floor >= take_lo + 2 * margin.
+        # No file ever caps the take (D-21); a file that cannot hold a tile is
+        # simply not eligible for it.
+        floor_min = t_lo + 2.0 * self.edge_margin_s
+        if self.component_floor_s + 1e-9 < floor_min:
             raise ValueError(
-                f"take_range_s[1] ({t_hi}) must not exceed component_floor_s - "
-                f"2 * edge_margin_s ({interior}): a file at the floor must supply "
-                f"the longest take, or the join count reads the file's length (D-21)")
+                f"component_floor_s={self.component_floor_s} admits rows that cannot hold "
+                f"the shortest take: need >= take_lo + 2 * edge_margin_s = {floor_min} (D-21 "
+                f"under bucket tiling, docs/processing/06 D5)")
         if self.domain_cap < 1:
             raise ValueError(f"domain_cap must be >= 1, got {self.domain_cap}")
         for name in ("silence_lead_s", "silence_tail_s"):

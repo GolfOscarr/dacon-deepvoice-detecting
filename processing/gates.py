@@ -29,8 +29,10 @@ __all__ = ["GateResult", "g4_table", "g7_pack", "g_eda3", "g_eda4", "g_eda7", "r
 PASS, FAIL, NA = "pass", "fail", "na"
 
 #: G-EDA7: the largest |drop rate(FAKE) - drop rate(REAL)| a filter may have
-#: before it is manufacturing a cue (docs/data/10 G4 uses the same 10 points
-#: for salvage parity across cells; R2 asks for "a stated tolerance").
+#: on one role before it is manufacturing a cue. docs/EDA/07 asks for "a
+#: stated tolerance" and states none; 0.10 is docs/data/10 G4's salvage-parity
+#: line, adopted for this gate on 2026-09-24 (docs/processing/06 §0). The one
+#: standing exception is the duration floor, recorded in the G-EDA7 ledger.
 G_EDA7_TOL = 0.10
 #: G4: a filter that drops more than this share of any pool escalates.
 G4_MAX_DROP = 0.05
@@ -122,16 +124,29 @@ def g_eda4(folds: pd.DataFrame) -> GateResult:
 # G-EDA7 -- every filter's rate, per label
 
 
+#: The role a row's pool or cell belongs to, for the per-role ledger.
+_ROLE_OF = {"A": "voice", "B": "voice", "C": "music", "D": "music", "E": "noise"}
+
+
 def g_eda7_ledger(verdict: pd.DataFrame, files: pd.DataFrame) -> pd.DataFrame:
-    """One row per (filter, label): rows judged, rows dropped, drop rate.
-    ``files`` is the EDA file table (every probed file), which carries the pool
-    and cell the label is read from."""
-    lab = files.set_index("file_id").pipe(_label_of)
+    """One row per (filter, role, label): rows judged, rows dropped, drop
+    rate. ``files`` is the EDA file table (every probed file), which carries
+    the pool and cell the label and role are read from. Per ROLE, because a
+    filter that drops fake voice and real music at the same rate is not
+    symmetric on either head (docs/processing/05 B13): pooled, the 4 s floor
+    read as a 0.126 gap; within voice it is 0.187."""
+    keyed = files.set_index("file_id")
+    lab = _label_of(keyed)
+    cell = pd.to_numeric(keyed["cell"], errors="coerce")
+    role = keyed["pool"].map(_ROLE_OF).where(keyed["pool"].notna(),
+                                             cell.map(lambda c: "file" if pd.notna(c) else None))
     v = verdict.copy()
     v["file_fake"] = v["file_id"].map(lab)
-    v = v[v["file_fake"].notna()]
+    v["role"] = v["file_id"].map(role)
+    v = v[v["file_fake"].notna() & v["role"].notna()]
     v["dropped"] = v["verdict"].eq("drop")
-    g = v.groupby(["filter", "file_fake"])["dropped"].agg(n="size", dropped="sum").reset_index()
+    g = (v.groupby(["filter", "role", "file_fake"])["dropped"]
+         .agg(n="size", dropped="sum").reset_index())
     g["rate"] = g["dropped"] / g["n"]
     g["file_fake"] = g["file_fake"].astype(bool)
     return g
@@ -139,18 +154,27 @@ def g_eda7_ledger(verdict: pd.DataFrame, files: pd.DataFrame) -> pd.DataFrame:
 
 def g_eda7(verdict: pd.DataFrame, files: pd.DataFrame, tol: float = G_EDA7_TOL
            ) -> tuple[GateResult, pd.DataFrame]:
-    """Symmetry: for every filter, |rate(FAKE) - rate(REAL)| <= ``tol``.
-    Returns the gate and the ledger it was read from."""
+    """Symmetry: for every (filter, role) with rows on both sides,
+    |rate(FAKE) - rate(REAL)| <= ``tol``. A filter that only ever sees one
+    label (a licence gate on real music, a label-evidence drop of fake voice)
+    is reported as one-sided, not as a gap of 1.0. Returns the gate and the
+    ledger it was read from."""
     ledger = g_eda7_ledger(verdict, files)
-    parts, worst = [], []
-    for name, sub in ledger.groupby("filter"):
+    parts, worst, one_sided = [], [], []
+    for (name, role), sub in ledger.groupby(["filter", "role"]):
         rates = sub.set_index("file_fake")["rate"]
-        r_fake, r_real = float(rates.get(True, 0.0)), float(rates.get(False, 0.0))
+        if True not in rates.index or False not in rates.index:
+            side = "fake" if True in rates.index else "real"
+            one_sided.append(f"{name}/{role} ({side} only, rate {float(rates.iloc[0]):.3f})")
+            continue
+        r_fake, r_real = float(rates[True]), float(rates[False])
         gap = abs(r_fake - r_real)
-        parts.append(f"{name}: fake {r_fake:.3f} vs real {r_real:.3f} (gap {gap:.3f})")
+        parts.append(f"{name}/{role}: fake {r_fake:.3f} vs real {r_real:.3f} (gap {gap:.3f})")
         if gap > tol:
-            worst.append(name)
+            worst.append(f"{name}/{role}")
     detail = f"tol {tol:.2f}: " + "; ".join(parts)
+    if one_sided:
+        detail += " -- one-sided: " + ", ".join(one_sided)
     if worst:
         detail += f" -- asymmetric: {', '.join(worst)}"
     return GateResult("G-EDA7", FAIL if worst else PASS, detail), ledger
@@ -189,17 +213,20 @@ def g4_table(verdict: pd.DataFrame, files: pd.DataFrame) -> pd.DataFrame:
 def g7_pack(manifest: pd.DataFrame, files: pd.DataFrame, n_examples: int = 10,
             seed: int = 0) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Per (corpus, from-pool, to-cell): rows reassigned and the rate against
-    the corpus's probed rows in that pool; plus ``n_examples`` rows per
-    (from, to) to listen to. ``reassigned_from`` is the manifest column OFF-2
-    writes; ``corpus`` is the EDA's source name (the manifest's
-    ``source_name`` is the finer publisher atom the folds group by)."""
+    the corpus's rows that sit in that pool or were moved out of it -- both
+    counted on the MANIFEST, after the drops, so the rate is a share of what
+    is used. Plus ``n_examples`` rows per (from, to) to listen to.
+    ``reassigned_from`` is the manifest column OFF-2 writes; ``corpus`` is the
+    EDA's source name (the manifest's ``source_name`` is the finer publisher
+    atom the folds group by)."""
     corpus_col = "corpus" if "corpus" in manifest.columns else "source_name"
     moved = manifest[manifest["reassigned_from"].notna()]
     by = (moved.groupby([corpus_col, "reassigned_from", "cell"]).size()
           .rename("reassigned").reset_index().rename(columns={corpus_col: "corpus"}))
-    pool_rows = (files.groupby(["source_name", "pool"]).size().rename("corpus_rows")
-                 .reset_index()
-                 .rename(columns={"source_name": "corpus", "pool": "reassigned_from"}))
+    origin = manifest["pool"].where(manifest["pool"].notna(), manifest["reassigned_from"])
+    pool_rows = (manifest.assign(origin=origin).dropna(subset=["origin"])
+                 .groupby([corpus_col, "origin"]).size().rename("corpus_rows").reset_index()
+                 .rename(columns={corpus_col: "corpus", "origin": "reassigned_from"}))
     table = by.merge(pool_rows, on=["corpus", "reassigned_from"], how="left")
     table["rate"] = table["reassigned"] / table["corpus_rows"]
     table["cell"] = pd.to_numeric(table["cell"]).astype(int)

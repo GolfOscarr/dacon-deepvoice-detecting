@@ -94,16 +94,18 @@ def test_g_eda4_counts_a_probe_versus_fold_split_as_a_straddle(manifest):
 # G-EDA7 and G4
 
 
-def test_g_eda7_ledger_reads_labels_from_pool_and_cell_and_rates_are_per_label(manifest):
+def test_g_eda7_ledger_reads_labels_from_pool_and_cell_and_rates_are_per_role(manifest):
     files = _files(manifest)
     drop = files["pool"].eq("B")            # a filter that only ever drops fake voice
     ledger = g_eda7_ledger(_verdict(files, drop), files)
-    fake = ledger[ledger["file_fake"]].iloc[0]
-    real = ledger[~ledger["file_fake"]].iloc[0]
-    assert fake["rate"] > 0 and real["rate"] == 0
-    assert fake["n"] + real["n"] == files["pool"].notna().sum() + \
-        pd.to_numeric(files["cell"], errors="coerce").isin([5, 8]).sum() - \
-        (files["pool"].notna() & pd.to_numeric(files["cell"], errors="coerce").isin([5, 8])).sum()
+    voice = ledger[ledger["role"] == "voice"].set_index("file_fake")
+    assert voice.at[True, "rate"] == 1.0 and voice.at[False, "rate"] == 0.0
+    music = ledger[ledger["role"] == "music"]
+    assert (music["rate"] == 0.0).all() and set(music["file_fake"]) == {True, False}
+    assert "file" in set(ledger["role"]), "whole-file rows are a role of their own"
+    labelled = files["pool"].isin(list("ABCDE")) | pd.to_numeric(
+        files["cell"], errors="coerce").isin([5, 8])
+    assert ledger["n"].sum() == labelled.sum()
 
 
 def test_g_eda7_is_symmetric_at_equal_rates_and_fires_past_the_tolerance(manifest):
