@@ -38,7 +38,6 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import torch
 
-from models.audio import prepare_waveform
 from models.config import TrainConfig
 from models.losses import multitask_loss
 from models.model import DeepVoiceNet
@@ -47,7 +46,8 @@ from training.checkpoint import (EMA, SamplerState, TrainCheckpoint,
                                  load_train_checkpoint, save_train_checkpoint)
 from training.collate import bucket_batches, collate, spec_durations
 from training.dataset import SpecDataset
-from training.render import ManifestIndex, RenderConfig, render
+from processing.render import ManifestIndex, RenderConfig, render
+from processing.ship import ShipConfig, ship
 from training.spec import SampleSpec
 from training.stages import (CODEC_VARIANTS, STAGES, StagePlan, _stage_loss_config,
                              autocast_for, codec_variant_specs, pass_plan,
@@ -181,6 +181,30 @@ def _render_batch(specs: Sequence[SampleSpec], indices: Sequence[int],
     return collate([render(specs[i], index, cfg) for i in indices])
 
 
+def check_chain(model: DeepVoiceNet, dataset: SpecDataset) -> None:
+    """06 P8 / 05 C2: the shipped chain (`processing.ship`) is applied ONCE,
+    between the collator and the model, in training, evaluation and
+    inference alike. The model's own `AudioConfig.band_hz` must therefore be
+    off, and the three sample rates must agree -- they are defined in three
+    places with no other cross-check."""
+    sr_render = int(dataset.cfg.audio.sample_rate)
+    sr_ship = int(dataset.ship.sample_rate)
+    sr_model = int(model.cfg.audio.sample_rate)
+    if not sr_render == sr_ship == sr_model:
+        raise ValueError(
+            f"sample rates disagree: render {sr_render}, ship {sr_ship}, model {sr_model}")
+    if model.cfg.audio.band_hz is not None:
+        raise ValueError(
+            f"model.cfg.audio.band_hz = {model.cfg.audio.band_hz}: the band limit is the "
+            f"shipped chain's (ShipConfig.band_hz = {dataset.ship.band_hz}); applying it in "
+            f"the model too would filter twice in training and once at test")
+
+
+def shipped(batch: Mapping[str, Any], cfg: ShipConfig, device: torch.device) -> torch.Tensor:
+    """The model input: the collated ``(B, C, S)`` through the shipped chain."""
+    return ship(batch["wav"].to(device), cfg, batch["lengths"].to(device))
+
+
 def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
                 train_cfg: TrainConfig, loop_cfg: LoopConfig | None = None,
                 stage: str | None = None,
@@ -303,7 +327,8 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
 
             batch = _render_batch(specs, batches[batch_index], dataset.index, dataset.cfg)
             # float32 in, and it stays float32: the model casts under autocast.
-            wav = prepare_waveform(batch["wav"].to(device), model.cfg.audio)
+            # 06 P8: the shipped chain, once, here -- not `prepare_waveform`.
+            wav = shipped(batch, dataset.ship, device)
             lengths = batch["lengths"].to(device)
             targets = {k: v.to(device) for k, v in batch["targets"].items()}
 

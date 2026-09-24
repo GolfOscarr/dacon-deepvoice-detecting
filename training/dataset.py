@@ -25,10 +25,12 @@ from typing import Any, Sequence
 import pandas as pd
 from torch.utils.data import Dataset
 
+from processing.audit import audit_specs as processing_audit_specs
+from processing.render import ManifestIndex, RenderConfig, RenderedSample, render
+from processing.ship import ShipConfig
 from training.audit import AuditReport, audit_specs
 from training.collate import bucket_batches, spec_durations
 from training.folds import apply_folds
-from training.render import ManifestIndex, RenderConfig, RenderedSample, render
 from training.sampler import Sampler
 from training.spec import SampleSpec
 
@@ -121,11 +123,16 @@ class SpecDataset(Dataset):
                  index: ManifestIndex | pd.DataFrame,
                  cfg: RenderConfig | None = None, *,
                  slice_: str | None, fold: int | None,
-                 sampler: Sampler | None = None, n: int | None = None,
-                 seed: int = 0, epoch: int = 0):
+                 sampler: Any | None = None, n: int | None = None,
+                 seed: int = 0, epoch: int = 0, ship: ShipConfig | None = None):
         self._specs: tuple[SampleSpec, ...] = tuple(specs)
         self.index = ManifestIndex.coerce(index)
-        self.cfg = cfg or RenderConfig()
+        # 06 P8: rendered by `processing.render` (a `training.render.RenderConfig`
+        # is lifted into its config), shipped by `processing.ship` -- the ONE
+        # chain train and test share. The loop and the validator read `ship`
+        # from here, so a dataset is the whole path from spec to model input.
+        self.cfg = RenderConfig.coerce(cfg)
+        self.ship = ship or ShipConfig()
         self.slice_, self.fold = slice_, fold
         self._sampler, self._n = sampler, n
         self.seed, self.epoch = seed, epoch
@@ -140,21 +147,25 @@ class SpecDataset(Dataset):
     # -- construction -------------------------------------------------------- #
 
     @classmethod
-    def from_sampler(cls, sampler: Sampler, n: int,
+    def from_sampler(cls, sampler: Any, n: int,
                      index: ManifestIndex | pd.DataFrame,
                      cfg: RenderConfig | None = None, *,
-                     epoch: int = 0, seed: int = 0) -> SpecDataset:
-        """The training mode: a spec list that `set_epoch` redraws."""
+                     epoch: int = 0, seed: int = 0, ship: ShipConfig | None = None
+                     ) -> SpecDataset:
+        """The training mode: a spec list that `set_epoch` redraws. ``sampler``
+        is anything with ``epoch_specs``, ``slice_`` and ``fold`` -- the
+        training sampler or ``processing.sampler.Sampler``."""
         return cls(sampler.epoch_specs(n, epoch=epoch, seed=seed), index, cfg,
                    slice_=sampler.slice_, fold=sampler.fold,
-                   sampler=sampler, n=n, seed=seed, epoch=epoch)
+                   sampler=sampler, n=n, seed=seed, epoch=epoch, ship=ship)
 
     @classmethod
     def frozen(cls, specs: Sequence[SampleSpec],
                index: ManifestIndex | pd.DataFrame,
                cfg: RenderConfig | None = None, *,
                slice_: str | _Unset = UNSET,
-               fold: int | None | _Unset = UNSET) -> SpecDataset:
+               fold: int | None | _Unset = UNSET,
+               ship: ShipConfig | None = None) -> SpecDataset:
         """The evaluation mode: this exact spec list, for as long as it lives.
 
         Critical: ``fold`` and ``slice_`` both distinguish **stated** from
@@ -185,7 +196,7 @@ class SpecDataset(Dataset):
         slice_stated = not isinstance(slice_, _Unset)
         ds = cls(specs, index, cfg,
                  slice_=None if not slice_stated else slice_,
-                 fold=None if not fold_stated else fold)
+                 fold=None if not fold_stated else fold, ship=ship)
         ds._fold_stated = fold_stated
         ds._slice_stated = slice_stated
         return ds
@@ -253,8 +264,16 @@ class SpecDataset(Dataset):
         the same order you train in"; this is the argument that makes that
         possible.
         """
-        report = audit_specs(self._specs, manifest=manifest, slice_=self.slice_,
-                             fold=self.fold, batches=batches, **kw)
+        # 06 P8 / 05 C5: with a manifest, the processing audit -- it collapses
+        # the tiles of a slot into one draw (I3 read tiles as draws, 0.100
+        # FAIL) and adds the draw-feature and presence probes. Without one,
+        # the training audit, which SKIPs what needs the manifest.
+        if manifest is not None:
+            report = processing_audit_specs(self._specs, manifest, slice_=self.slice_,
+                                            fold=self.fold, batches=batches, **kw)
+        else:
+            report = audit_specs(self._specs, manifest=None, slice_=self.slice_,
+                                 fold=self.fold, batches=batches, **kw)
         if not self._slice_stated:
             # Critical: same rule as the fold below. With no slice named,
             # `audit_specs` already SKIPs I5 outright -- there is nothing to

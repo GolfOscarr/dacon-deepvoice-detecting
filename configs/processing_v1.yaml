@@ -101,6 +101,15 @@ render:
   # (scripts/build_cache.py), and a file missing from the cache is an error --
   # one decode regime per run. null: decode from the corpus.
   cache_root: /data/project/private/dacon-corpus/cache16k
+  # 06 D7: the composite's RMS over the placed span, before the augments;
+  # each tile is scaled to the same level before placement (bucket tiling
+  # stitches files of different loudness).
+  target_rms_dbfs: -23.0
+  tile_rms_dbfs: -23.0
+  # 06 D6: clip to [-1, 1] after the augments, as a wav on disk would.
+  clip: true
+  # 06 D11: the augment chain on one torch thread (bitwise across counts).
+  single_thread: true
 
 ship:
   # The shipped chain (`processing.ship.ship`): what happens between the
@@ -138,3 +147,18 @@ folds:
   probe_min_real_atoms: 5
   balance_on: hours
   caveat_min_role_hours: 5.0
+
+loop:
+  # 06 P8, `training.loop.LoopConfig` -- the run's own knobs, so one file
+  # drives draw, render, ship, folds and the loop. Values are run_default's.
+  out_dir: runs/dev
+  n_buckets: 4
+  # 0 disables the EMA entirely.
+  ema_decay: 0.999
+  grad_clip: 5.0
+  device: cpu
+  # 0 = checkpoint at pass boundaries only.
+  checkpoint_every: 0
+  # Critical: a run with max_steps set is a TRUNCATED run. StageResult.truncated
+  # says so, and its numbers are not quotable.
+  max_steps: null

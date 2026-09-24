@@ -43,13 +43,14 @@ import torch
 from metrics.aggregate import AggregateMetrics, fold_mean
 from metrics.breakdown import breakdown_table, t3_gap
 from metrics.dacon import PREDICTION_COLUMNS, MetricSet, dacon_score
-from models.audio import prepare_waveform
 from models.model import DeepVoiceNet
 from training.audit import AuditReport, audit_specs
 from training.collate import collate
 from training.dataset import SpecDataset, eval_batches
 from training.folds import check_split_integrity
-from training.render import ManifestIndex, render
+from processing.audit import audit_specs as processing_audit_specs
+from processing.render import ManifestIndex, render
+from processing.ship import ship
 from training.spec import SampleSpec
 from training.stages import autocast_for
 
@@ -158,7 +159,8 @@ def predict(model: DeepVoiceNet, dataset: SpecDataset, *,
             specs = [dataset.specs[i] for i in indices]
             ids.extend(eval_file_id(s) for s in specs)
             batch = collate([render(s, dataset.index, dataset.cfg) for s in specs])
-            wav = prepare_waveform(batch["wav"].to(device), model.cfg.audio)
+            # 06 P8: the shipped chain, the same call the loop and `script.py` make
+            wav = ship(batch["wav"].to(device), dataset.ship, batch["lengths"].to(device))
             with autocast_for(precision, device):
                 out = model(wav, batch["lengths"].to(device))
                 probs = model.submission_probs(out)
@@ -596,8 +598,14 @@ def run_gates(report: ValidationReport, *,
         # `slice_`/`fold` are what make **I5** run rather than SKIP -- the
         # draw-time form of VG1 A1-A6, which re-derives the allowed `file_id`
         # set from the manifest and reports any drawn component outside it.
-        spec_report = audit_specs(list(eval_specs), manifest=manifest,
-                                  slice_=slice_, fold=fold, eval_floors=True)
+        # 06 P8: with a manifest, the processing audit (tiles collapsed into
+        # draws, the draw-feature probes); training's audit otherwise
+        if manifest is not None:
+            spec_report = processing_audit_specs(list(eval_specs), manifest,
+                                                 slice_=slice_, fold=fold, eval_floors=True)
+        else:
+            spec_report = audit_specs(list(eval_specs), manifest=None,
+                                      slice_=slice_, fold=fold, eval_floors=True)
         r["VG1_A8A9_eval_size_floors"] = spec_report.results["I7_eval_size_floors"]
         r["VG1_I5_split_safety"] = spec_report.results["I5_split_safety"]
         r["VG2_shortcut_audit"] = spec_report.results["I1b_metadata_shortcut_auc"]

@@ -29,8 +29,9 @@ import yaml
 from models.config import ConfigError, _build
 from processing.render import RenderConfig
 from processing.ship import PreprocessStep, ShipConfig
-from training.config import RESAMPLERS, _cell_mix_from
+from training.config import RESAMPLERS, _cell_mix_from, _loop_from_dict
 from training.folds import FoldConfig
+from training.loop import LoopConfig
 from training.registries import AUGMENT
 from training.render import CODEC_CONTAINERS
 from training.sampler import CellMix, check_mix, composed_fractions
@@ -320,7 +321,7 @@ class DrawConfig:
 
 #: The sections a processing config is made of. Grows as the stages land.
 SECTIONS: dict[str, type] = {"draw": DrawConfig, "render": RenderConfig, "ship": ShipConfig,
-                             "folds": FoldConfig}
+                             "folds": FoldConfig, "loop": LoopConfig}
 
 
 def _draw_from_dict(d: Mapping[str, Any]) -> DrawConfig:
@@ -375,6 +376,7 @@ def _folds_from_dict(d: Mapping[str, Any]) -> FoldConfig:
 
 
 _BUILDERS = {"draw": _draw_from_dict, "render": _render_from_dict, "ship": _ship_from_dict,
+             "loop": _loop_from_dict,
              "folds": _folds_from_dict}
 
 
@@ -386,6 +388,11 @@ class ProcessingConfig:
     #: OFF-5. ``training.folds.FoldConfig``; D-22: four folds, the number of
     #: composable fake-music families minus PROBE's one.
     folds: FoldConfig = dataclasses.field(default_factory=lambda: FoldConfig(n_folds=4))
+    #: 06 P8. The training loop's own knobs (``training.loop.LoopConfig``), so
+    #: one file drives a run: draw, render, ship, folds and loop. The older
+    #: ``configs/run_*.yaml`` (sampler / render / folds / loop) is the
+    #: training sampler's and is not read by ``scripts/train.py`` any more.
+    loop: LoopConfig = dataclasses.field(default_factory=LoopConfig)
 
 
 def processing_config_from_dict(d: Mapping[str, Any]) -> ProcessingConfig:
