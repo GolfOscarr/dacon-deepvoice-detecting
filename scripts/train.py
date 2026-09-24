@@ -193,7 +193,7 @@ def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
     check_chain(model, ds)                      # one shipped chain, once (05 C2)
     t0 = time.time()
     results = run_schedule(model, ds, train_cfg=train_cfg, loop_cfg=loop_cfg,
-                           stages=args.stages)
+                           stages=args.stages, resume_from=args.resume)
     print(f"  trained {sum(r.steps for r in results)} step(s) across "
           f"{len(results)} stage(s) in {time.time() - t0:.0f}s", flush=True)
     for r in results:
@@ -273,7 +273,7 @@ def train_all_data(*, manifest, folds_tbl, args, run_cfg, train_cfg) -> str:
     check_chain(model, ds)
     t0 = time.time()
     results = run_schedule(model, ds, train_cfg=train_cfg, loop_cfg=loop_cfg,
-                           stages=args.stages)
+                           stages=args.stages, resume_from=args.resume)
     print(f"  trained {sum(r.steps for r in results)} step(s) in {time.time() - t0:.0f}s",
           flush=True)
     how = "soup-all" if (args.select == "soup" and args.soup_all_stages) else args.select
@@ -311,6 +311,9 @@ def main() -> int:
                    help="train on TRAIN+VAL of every fold (PROBE sealed), no validation; "
                         "writes <out>/all_data_seed<seed>/ (docs/training/07 §3)")
     p.add_argument("--seed", type=int, help="override TrainConfig.seed (draw and batch order)")
+    p.add_argument("--resume", help="a training checkpoint (e.g. <out>/fold1/joint-pass0.pt) "
+                        "to continue the first --stages stage from; the run's other "
+                        "arguments must match the ones it was started with")
     p.add_argument("--stages", default=",".join(STAGES),
                    help=f"comma-separated subset of {STAGES}, in order")
     p.add_argument("--select", choices=SELECTIONS, default="raw",

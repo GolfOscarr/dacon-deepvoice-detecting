@@ -545,7 +545,8 @@ def _checkpoint(result: StageResult, model, optimizer, ema, stage, state,
 
 def run_schedule(model: DeepVoiceNet, dataset: SpecDataset, *,
                  train_cfg: TrainConfig, loop_cfg: LoopConfig | None = None,
-                 stages: Sequence[str] = STAGES) -> list[StageResult]:
+                 stages: Sequence[str] = STAGES,
+                 resume_from: Path | str | None = None) -> list[StageResult]:
     """S1 -> S2 -> S3 on one model, in order, carrying the weights forward.
 
     Our own inference: ``codec_aware`` last and never skipped when time is
@@ -567,8 +568,11 @@ def run_schedule(model: DeepVoiceNet, dataset: SpecDataset, *,
     """
     for s in stages:
         stage_plan(s, model.cfg)              # refuse rank_polish before any work
+    # `resume_from` resumes the FIRST stage listed: a checkpoint names its stage
+    # and `train_stage` refuses a mismatch, so pass the stages from that one on.
     return [train_stage(model, dataset, train_cfg=train_cfg, loop_cfg=loop_cfg,
-                        stage=s) for s in stages]
+                        stage=s, resume_from=resume_from if i == 0 else None)
+            for i, s in enumerate(stages)]
 
 
 # --------------------------------------------------------------------------- #
