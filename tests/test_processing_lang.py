@@ -85,3 +85,16 @@ def test_the_shares_round_trip_through_the_config_file():
     back = processing_config_from_dict(dump_processing_config(cfg))
     assert back.draw.lang_shares == (("en", 0.6), ("ko", 0.4))
     assert back == cfg
+
+
+def test_a_language_on_one_side_only_is_drawn_on_neither():
+    """strategy-v3: CFAD's Chinese fakes sit in PROBE, so a train view had
+    Chinese as real only -- 20 % of real draws against 0 % of fake ones."""
+    m = _skewed()
+    real_en = m.index[(m.pool == "A") & (m.lang == "en")]
+    m.loc[real_en[: len(real_en) // 2], "lang"] = "zh"          # zh: real side only
+    cfg = DrawConfig(lang_shares={"ko": 0.4, "en": 0.4, "zh": 0.2})
+    shares = _drawn_shares(m, cfg)
+    assert "zh" not in shares["A"] and "zh" not in shares["B"]
+    assert shares["A"]["ko"] == pytest.approx(shares["B"]["ko"], abs=0.06)
+    assert Sampler(m, cfg).lang_shares_dropped == ["zh"]

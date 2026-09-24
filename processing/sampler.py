@@ -153,6 +153,27 @@ class Sampler:
                 f"than component_floor_s={self.cfg.component_floor_s}s")
         comp = usable
 
+        # docs/training/07 D-d: a language keeps its share only when this view
+        # has it on BOTH voice sides. Measured on strategy-v3: CFAD's Chinese
+        # fakes are sealed in PROBE with their pair atoms, so every train view
+        # had Chinese as real only (20 % of real draws, 0 % of fake) -- per-side
+        # renormalisation cannot fix a language one side lacks. `other` is the
+        # exception: it exists for MLAAD's generator diversity, fake side only.
+        self._shares = None
+        if self.cfg.lang_shares is not None:
+            voice = comp[comp.pool.isin(ROLE_POOLS["voice"])]
+            if "lang" not in voice.columns:
+                raise ValueError("draw.lang_shares is set but the manifest has no `lang` column")
+            fake_side = voice.pool.map(POOL_IS_FAKE).astype(bool)
+            listed = [k for k, _ in self.cfg.lang_shares]
+            key = voice["lang"].fillna("other").astype(str)
+            key = key.where(key.isin(listed), "other")
+            both = set(key[fake_side]) & set(key[~fake_side])
+            self._shares = {k: (v if (k in both or k == "other") else 0.0)
+                            for k, v in self.cfg.lang_shares}
+            self.lang_shares_dropped = sorted(k for k, v in self.cfg.lang_shares
+                                              if v > 0 and self._shares[k] == 0)
+
         self._pools: dict[tuple[str, bool], _Pool] = {}
         for role, pools in ROLE_POOLS.items():
             sub = comp[comp.pool.isin(pools)]
@@ -184,7 +205,7 @@ class Sampler:
         if role == "voice" and self.cfg.lang_shares is not None and not rows.empty:
             # share 0 removes the language outright: the bucket fallback draws
             # from the whole pool, so a zero weight alone would still leak it
-            rows = rows[self._lang_of(rows).map(dict(self.cfg.lang_shares)).gt(0)]
+            rows = rows[self._lang_of(rows).map(self._shares).gt(0)]
         if rows.empty:
             empty = np.empty(0, dtype=int)
             return _Pool(np.empty(0, dtype=object), np.empty(0), empty, np.empty(0),
@@ -218,7 +239,7 @@ class Sampler:
     def _lang_balanced(self, rows: pd.DataFrame, weights: np.ndarray) -> np.ndarray:
         """docs/training/07 D-d: rescale so each language holds its configured
         share of the pool, after the DOSS cap and within it."""
-        shares = dict(self.cfg.lang_shares)
+        shares = self._shares
         lang = self._lang_of(rows).to_numpy()
         out = np.zeros_like(weights)
         for code in np.unique(lang):
