@@ -65,6 +65,11 @@ _ALT: dict[str, dict] = {
         "require_component_coverage": False,
         "allow_no_probe": True,
         "assigned_at": "2026-01-01T00:00:00",
+        "probe_budget_drawable_only": False,
+        "probe_min_real_hours": 1.0,
+        "probe_min_real_atoms": 2,
+        "balance_on": "rows",
+        "caveat_min_role_hours": 0.0,
     },
     "loop": {
         "out_dir": "runs/alt",

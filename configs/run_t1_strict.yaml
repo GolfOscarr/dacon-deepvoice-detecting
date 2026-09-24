@@ -97,6 +97,14 @@ folds:
   allow_no_probe: false
   # null stamps the build time; set it to freeze a table for a reproducible test.
   assigned_at: null
+  # 06 D1 / D4 (training.folds.FoldConfig): the PROBE row budget counts
+  # drawable rows only, PROBE's real side gets a floor in hours and atoms per
+  # role, and the rotation balances the drawable hours of every (role, fake).
+  probe_budget_drawable_only: true
+  probe_min_real_hours: 5.0
+  probe_min_real_atoms: 5
+  balance_on: hours
+  caveat_min_role_hours: 5.0
 
 loop:
   out_dir: runs/dev
