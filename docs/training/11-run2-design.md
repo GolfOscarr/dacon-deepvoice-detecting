@@ -279,7 +279,7 @@ So ~20,000 fine-tune steps on the new data is enough to show the data effect.
 
 ## 4 · The eight tasks (ablations)
 
-One exclusive job; task *i* on GPU *i*. The strategy-v4 draw is used unless stated.
+One 8-task Slurm array (`scripts/train_run2.sbatch`); task *i* on its own GPU. The strategy-v4 draw is used unless stated.
 
 | task | kind | init | data | answers |
 |---|---|---|---|---|
@@ -367,7 +367,7 @@ One exclusive job; task *i* on GPU *i*. The strategy-v4 draw is used unless stat
    - the WaveFake share of English fakes.
 7. The speedup track's flags verified: run-1 `scored.pt` loads strictly and gives unchanged
    outputs.
-8. Launch `scripts/train_run2.sbatch` (one exclusive job, T0–T7). Check within 10 min:
+8. Launch `MANIFEST_DIR=…/strategy-v4 sbatch scripts/train_run2.sbatch run2` (8-task array, T0–T7). Check within 10 min:
    - s/step;
    - `data_wait_s`;
    - GPU busy;
@@ -379,7 +379,7 @@ One exclusive job; task *i* on GPU *i*. The strategy-v4 draw is used unless stat
 |---|---|
 | en-synth2 late or thin | launch without it: `ONLY` drops `en-synth2`; F1 still gets Emilia-en reals + WaveFake cap |
 | a new row bridges two v3 atoms | the pinned builder aborts; find the row and fix its keys, don't unpin |
-| hyperthread affinity starves another job | only inside the exclusive node job; nothing else can be scheduled there |
+| 8 concurrent tasks slower than the 1-task measurement (CPU contention) | read s/step + `data_wait_s` at 10 min; the timeline assumes up to 1.0 s/step |
 | B-init carries the shortcut | T4 (scratch) and T5 (control) show it; run 3 can switch |
 | a fold task exits 1 ("not quotable") | not a crash; read `ledger_row.json` (mistake 15) |
 | PROBE read under the wrong config | always `processing_first_run.yaml` (§1.2) |
