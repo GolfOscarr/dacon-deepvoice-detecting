@@ -200,4 +200,4 @@ loop:
   frontend_lr_scale: 0.2
   log_every: 50
   # a 60 s clip holds ~17 GiB of attention maps across both trunks otherwise
-  grad_checkpointing: true
+  grad_checkpointing: false   # run 2 (docs/training/11 §3): 0.86-1.0 vs 1.05-1.14 s/step; peak ~99-103 GiB of 141
