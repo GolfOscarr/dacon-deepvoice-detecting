@@ -214,3 +214,34 @@ S1–S3 (+ S4/S5), and v3 is not overwritten. Then, in order:
    - Emilia's own transcripts, or scam-style scripts written by an open-weight LLM
      (e.g. Qwen2.5-7B-Instruct, Apache-2.0) run locally.
    - Recommendation: transcripts first; scripts only if time allows.
+
+## 5 · Owner decisions (2026-09-25) and the timeline
+
+- **Q1: Emilia including Emilia-YODAS.** Both parts are downloaded for the Korean subset.
+  Each part's README terms are recorded beside the data.
+- **Q3: dataset transcripts** are the TTS texts. No LLM scripts.
+- **Execution: start now.** CPU work (installs, downloads, DSP, ingestion readers) begins
+  immediately.
+- **GPU jobs are submitted to the `debug` queue as soon as each family's installs are ready.**
+  They start as run 1's tasks free their GPUs, so no training task is stopped.
+- **Q2 (stop the fold runs early?): asked again with this timeline.**
+
+Run 1's finish times, measured 2026-09-25 17:10 KST from the last 1,000 steps:
+
+| task | ends (training) |
+|---|---|
+| fold 0, fold 2 | ~20:55 |
+| all-data seeds 1, 3 | ~21:35 |
+| fold 1 | ~22:00 |
+| all-data seeds 0, 2; fold 3 | ~22:35 |
+
+Fold tasks then spend ~20 min on their end-of-run evaluation (6,000 specs).
+
+| plan | synthesis done (~55 GPU-h) | + ingest / audit / smoke | run 2 (~20 h) ends |
+|---|---|---|---|
+| wait for run 1 (recommended) | ~05:00 09-26 | ~07:00 09-26 | ~03:00 09-27 |
+| stop the 4 fold runs at 17:30 | ~03:00 09-26 | ~05:00 09-26 | ~01:00 09-27 |
+
+**Stopping the fold runs buys ~2 h and loses their end-of-run fold scores**, so run 1
+finishes. Either way run 2 ends by 09-27 morning, which leaves room for a run 3 before
+09-29 10:00.
