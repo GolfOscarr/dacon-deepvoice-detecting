@@ -161,6 +161,13 @@ class FrontendConfig:
     #: duration: a 60 s row was 3,000 tokens and 3.7 of a 3.9 s step. None =
     #: one sequence per row (candidate A as specified).
     window_patches: int | None = None
+    #: BEATs with `window_patches` only: compute the filterbank, the patch
+    #: embedding and the window cut for the whole batch in a few kernels rather
+    #: than a loop over rows and windows (HANDOFF_TRAINING D6). The same arithmetic
+    #: on the same valid samples, so it is exact up to kernel choice: fp32
+    #: outputs move by float rounding, not by what a row can see. False = the
+    #: per-row loop run 1 trained with.
+    batched_tokens: bool = False
 
     def __post_init__(self) -> None:
         if self.window_patches is not None and self.window_patches < 1:

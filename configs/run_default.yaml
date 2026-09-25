@@ -126,3 +126,5 @@ loop:
   log_every: 0
   # recompute the frontends' transformer layers in backward (same numbers, less memory)
   grad_checkpointing: false
+  # render workers also use the hyperthread siblings of this task's CPUs
+  render_on_ht_siblings: false

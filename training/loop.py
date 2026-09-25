@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import time
 import multiprocessing as mp
 from dataclasses import dataclass, field
@@ -42,7 +43,7 @@ import numpy as np
 import torch
 
 from models.config import TrainConfig
-from models.losses import multitask_loss
+from models.losses import multitask_loss, parts_to_floats
 from models.model import DeepVoiceNet
 from training.checkpoint import (EMA, SamplerState, TrainCheckpoint,
                                  _set_rng_state, checkpoint_soup,
@@ -103,6 +104,13 @@ class LoopConfig:
     #: and keys its RNG on the spec), so the batches are the inline batches and
     #: the bitwise-resume guarantee is unchanged (docs/training/07 §3).
     render_workers: int = 0
+    #: Let the render workers also run on the hyperthread siblings of the CPUs
+    #: this process is pinned to. Slurm here allocates cores but pins a task to
+    #: one thread of each, and its accounting never hands the siblings to
+    #: another job; measured with -c 8: 7 workers 14.6-15.2 samples/s, 14
+    #: workers on the siblings 20.2, 16 workers 21.8. Renders are pure
+    #: functions of their spec, so where they run changes no sample.
+    render_on_ht_siblings: bool = False
     #: "constant" (the historical behaviour) or "cosine": linear warmup over
     #: `warmup_steps`, then cosine decay to `min_lr_ratio` of the base rate at
     #: the last step of the stage. A pure function of the global step, so a
@@ -220,8 +228,24 @@ def _render_batch(specs: Sequence[SampleSpec], indices: Sequence[int],
 _WORKER: dict[str, Any] = {}
 
 
-def _worker_init(index: ManifestIndex, cfg: RenderConfig) -> None:
+def _worker_init(index: ManifestIndex, cfg: RenderConfig,
+                 cpus: frozenset[int] | None = None) -> None:
+    if cpus:
+        os.sched_setaffinity(0, cpus)
     _WORKER["index"], _WORKER["cfg"] = index, cfg
+
+
+def ht_siblings(cpus) -> frozenset[int]:
+    """``cpus`` plus every hardware thread sharing a core with one of them."""
+    out = set(cpus)
+    for c in cpus:
+        path = Path(f"/sys/devices/system/cpu/cpu{c}/topology/thread_siblings_list")
+        if not path.exists():
+            continue
+        for part in path.read_text().strip().split(","):
+            lo, _, hi = part.partition("-")
+            out.update(range(int(lo), int(hi or lo) + 1))
+    return frozenset(out)
 
 
 def _worker_render(spec: SampleSpec):
@@ -374,8 +398,10 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
     optimizer: torch.optim.Optimizer | None = None
     # spawn, not fork: the parent may already hold a CUDA context, which a
     # forked child inherits and must never touch.
+    cpus = (ht_siblings(os.sched_getaffinity(0)) if loop_cfg.render_on_ht_siblings
+            else None)
     pool = (mp.get_context("spawn").Pool(loop_cfg.render_workers, _worker_init,
-                                          (dataset.index, dataset.cfg))
+                                          (dataset.index, dataset.cfg, cpus))
             if loop_cfg.render_workers else None)
 
     for pass_index in range(start.pass_index, len(passes)):
@@ -451,8 +477,10 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
 
             with autocast_for(train_cfg.precision, device):
                 out = model(wav, lengths)
+                # Parts stay on the device until a log line needs them: one
+                # sync per `log_every` steps instead of eleven per step.
                 total, parts = multitask_loss(out, targets, loss_cfg_model,
-                                              train_cfg.loss)
+                                              train_cfg.loss, tensor_parts=True)
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(total).backward()
             if loop_cfg.grad_clip:
@@ -472,6 +500,8 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
             t_ready = time.perf_counter()
             step_s += t_ready - t_got
             if loop_cfg.log_every and result.steps % loop_cfg.log_every == 0:
+                parts_acc[-loop_cfg.log_every:] = parts_to_floats(
+                    parts_acc[-loop_cfg.log_every:])
                 recent = _mean_parts(parts_acc[-loop_cfg.log_every:], stage, pass_index,
                                      group)
                 recent = {**recent, "data_wait_s": wait_s, "compute_s": step_s}
@@ -486,6 +516,7 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
                             tag=f"step{result.steps}")
 
         result.passes_done += 1
+        parts_acc = parts_to_floats(parts_acc)
         result.loss_history.append(_mean_parts(parts_acc, stage, pass_index, group))
         _checkpoint(result, model, optimizer, ema, stage,
                     SamplerState(pass_index + 1, start.epoch_seed, start.n_specs,

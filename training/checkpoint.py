@@ -67,9 +67,14 @@ class EMA:
     @torch.no_grad()
     def update(self, model: torch.nn.Module) -> None:
         state = model.state_dict()
-        for k, shadow in self._shadow.items():
-            shadow.mul_(self.decay).add_(state[k].detach().to(torch.float32),
-                                         alpha=1.0 - self.decay)
+        # One multi-tensor kernel per op instead of two launches per tensor: the
+        # shadow covers every float tensor, frozen trunks included (~800), and
+        # the per-tensor loop was a measurable share of a launch-bound step.
+        # The same `mul_` then `add_(alpha=)` arithmetic, element for element.
+        shadows = list(self._shadow.values())
+        torch._foreach_mul_(shadows, self.decay)
+        torch._foreach_add_(shadows, [state[k].detach().to(torch.float32)
+                                      for k in self._shadow], alpha=1.0 - self.decay)
         for k in self._frozen:
             self._frozen[k] = state[k].clone()
         self.steps += 1

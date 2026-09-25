@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from models.config import LossConfig, load_model_config
-from models.losses import multitask_loss, pairwise_ranking_loss
+from models.losses import multitask_loss, pairwise_ranking_loss, parts_to_floats
 from models.model import DeepVoiceNet
 
 SR = 16_000
@@ -451,3 +451,19 @@ def test_gem_exponent_can_recover_from_below_one():
     assert float(pool.p) >= 1.0, "the effective exponent must stay >= 1"
     pool(torch.rand(2, 4, 5, 3) + 0.1).sum().backward()
     assert float(pool.raw_p.grad) != 0.0, "a frozen exponent can never recover"
+
+
+def test_tensor_parts_convert_to_the_same_floats():
+    """The loop keeps parts on the device (no sync per value); converted, they
+    must be the float path's numbers exactly, diagnostics and the absent-
+    component 0 included."""
+    model, cfg = _model()
+    out = model(torch.randn(4, SR * 4))
+    for targets in (_targets([1, 0, 0, 0], [1, 1, 0, 0], voice_fake=[1, 0, 0, 0],
+                             music_fake=[0, 1, 0, 0]),
+                    _targets([0, 0, 0, 0], [1, 1, 1, 1])):
+        _, want = multitask_loss(out, targets, cfg, LossConfig())
+        _, lazy = multitask_loss(out, targets, cfg, LossConfig(), tensor_parts=True)
+        got = parts_to_floats([lazy])[0]
+        assert got == want
+        assert all(type(v) is float for v in got.values())

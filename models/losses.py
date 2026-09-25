@@ -29,7 +29,7 @@ from models.config import LossConfig, ModelConfig
 from models.heads import frame_max
 
 __all__ = ["TRAIN_CONSUMED_ELSEWHERE", "TARGET_FOR_COLUMN", "multitask_loss",
-           "pairwise_ranking_loss"]
+           "pairwise_ranking_loss", "parts_to_floats"]
 
 #: TrainConfig fields the loss deliberately does not read, with who owns them.
 #: ⚠️ This exists because the ModelConfig-only version of the ignored-field guard
@@ -138,6 +138,7 @@ def multitask_loss(
     loss_cfg: LossConfig,
     frame_masks: dict[str, Tensor] | None = None,
     teacher_emb: Tensor | None = None,
+    tensor_parts: bool = False,
 ) -> tuple[Tensor, dict[str, float]]:
     """Total loss and a per-part breakdown for the experiment ledger.
 
@@ -150,6 +151,11 @@ def multitask_loss(
     branch's component and ``<branch>/w_eff`` the `w_c / p_c` of docs/training/02
     §4. Averaging them over a pass, as `training.loop._mean_parts` does, is the
     intended reading.
+
+    ``tensor_parts=True`` leaves every part a detached 0-d tensor on the loss's
+    device, for `parts_to_floats` to convert later: each ``float(...)`` here is
+    a device sync, eleven per training step, and the loop only reads the parts
+    every `log_every` steps. The converted values are the same floats.
     """
     missing = [k for k in TARGET_FOR_COLUMN.values() if k not in targets]
     if missing:
@@ -206,7 +212,7 @@ def multitask_loss(
         # this reads them as required so the two cannot drift apart.
         weight = loss_cfg.weights[WEIGHT_KEY_FOR_COLUMN[br_cfg.column]]
         contribution = weight * head_loss
-        parts[branch] = float(head_loss.detach())
+        parts[branch] = head_loss.detach() if tensor_parts else float(head_loss.detach())
         # 🔴 The standing diagnostic docs/training/02 §4 commits to. `_masked_mean`
         # divides by the present-count, so the per-sample weight a masked head
         # exerts on the shared trunk is `w_c / p_c`, not `w_c` -- and §4 says
@@ -214,9 +220,16 @@ def multitask_loss(
         # nowhere, which made T2 unreadable as specified. `p_c` is 1.0 for an
         # unmasked head, and `w_eff` is 0 when the batch carries the component
         # nowhere, because then the head contributes nothing at all.
-        p_c = 1.0 if sample_mask is None else float(sample_mask.float().mean())
-        parts[f"{branch}/p_c"] = p_c
-        parts[f"{branch}/w_eff"] = weight / p_c if p_c else 0.0
+        if tensor_parts and sample_mask is not None:
+            # float64 on the device: the same IEEE division as the float path.
+            p_c64 = sample_mask.float().mean().double()
+            parts[f"{branch}/p_c"] = p_c64
+            parts[f"{branch}/w_eff"] = torch.where(
+                p_c64 > 0, torch.full_like(p_c64, weight) / p_c64, torch.zeros_like(p_c64))
+        else:
+            p_c = 1.0 if sample_mask is None else float(sample_mask.float().mean())
+            parts[f"{branch}/p_c"] = p_c
+            parts[f"{branch}/w_eff"] = weight / p_c if p_c else 0.0
         total = contribution if total is None else total + contribution
 
     if teacher_emb is not None:
@@ -230,8 +243,19 @@ def multitask_loss(
         # not here (docs/architecture/06 §3 -- and see 09 B9, which flags that a
         # frozen frontend weakens the mechanism this borrows).
         distill = F.mse_loss(aux["distill_emb"], teacher_emb.detach())
-        parts["distill"] = float(distill.detach())
+        parts["distill"] = distill.detach() if tensor_parts else float(distill.detach())
         total = total + loss_cfg.distill_weight * distill
 
-    parts["total"] = float(total.detach())
+    parts["total"] = total.detach() if tensor_parts else float(total.detach())
     return total, parts
+
+
+def parts_to_floats(parts: list[dict]) -> list[dict[str, float]]:
+    """`multitask_loss(..., tensor_parts=True)` parts -> plain floats, with one
+    device sync for the whole list rather than one per value."""
+    tensors = [v for p in parts for v in p.values() if isinstance(v, Tensor)]
+    if not tensors:
+        return [dict(p) for p in parts]
+    values = iter(torch.stack([t.double() for t in tensors]).tolist())
+    return [{k: (next(values) if isinstance(v, Tensor) else v) for k, v in p.items()}
+            for p in parts]

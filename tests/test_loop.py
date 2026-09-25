@@ -79,6 +79,8 @@ _NOT_VARIABLE_ON_THIS_HARDWARE = {
                           "asserts equal outputs and gradients on real layers",
     "render_workers": "must NOT move the run: tests/test_loop_pool.py asserts pooled "
                       "rendering trains the inline model bitwise",
+    "render_on_ht_siblings": "must NOT move the run: only where the render workers "
+                             "run; tests/test_loop_pool.py asserts it bitwise",
 }
 
 

@@ -86,6 +86,7 @@ _ALT: dict[str, dict] = {
         "frontend_lr_scale": 0.5,
         "log_every": 10,
         "grad_checkpointing": True,
+        "render_on_ht_siblings": True,
     },
 }
 

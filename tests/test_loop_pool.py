@@ -9,12 +9,13 @@ sample, every resume and every comparison between runs would inherit it.
 
 import json
 import math
+import os
 
 import pytest
 import torch
 
 from loop_fixtures import _dataset, _flat, _model, _same, _train_cfg, corpus, model_cfg  # noqa: F401
-from training.loop import LoopConfig, _param_groups, lr_factor, train_stage
+from training.loop import LoopConfig, _param_groups, ht_siblings, lr_factor, train_stage
 
 
 def _train(corpus, model_cfg, tmp_path, **loop):
@@ -32,6 +33,20 @@ def test_pooled_rendering_trains_the_inline_model_bitwise(corpus, model_cfg, tmp
     assert r1.steps == r2.steps > 0
     assert r1.pass_digests == r2.pass_digests
     assert _same(_flat(inline), _flat(pooled))
+
+
+def test_rendering_on_ht_siblings_trains_the_inline_model_bitwise(corpus, model_cfg,
+                                                                  tmp_path):
+    inline, r1 = _train(corpus, model_cfg, tmp_path / "inline")
+    wide, r2 = _train(corpus, model_cfg, tmp_path / "wide", render_workers=2,
+                      render_on_ht_siblings=True)
+    assert r1.pass_digests == r2.pass_digests
+    assert _same(_flat(inline), _flat(wide))
+
+
+def test_ht_siblings_keep_the_own_cpus():
+    own = os.sched_getaffinity(0)
+    assert ht_siblings(own) >= own
 
 
 def test_the_constant_schedule_is_the_historical_behaviour():

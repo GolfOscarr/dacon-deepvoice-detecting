@@ -359,6 +359,7 @@ class BEATsFrontend(Frontend):
     MEL_FPS = 100.0                 # kaldi fbank at frame_shift=10 ms
     _FRAME_LENGTH = 400             # 25 ms at 16 kHz
     _FRAME_SHIFT = 160              # 10 ms at 16 kHz
+    _FFT = 512                      # kaldi rounds the 400-sample window up to 2^9
     FBANK_MEAN = 15.41663           # upstream BEATs.preprocess defaults
     FBANK_STD = 6.55582
 
@@ -540,6 +541,8 @@ class BEATsFrontend(Frontend):
         t_max = max(widths)
 
         if self.cfg.window_patches is not None:
+            if self.cfg.batched_tokens:
+                return self._encode_windowed_batched(wav, lengths, widths, t_max)
             return self._encode_windowed(wav, lengths, widths, t_max)
         out = wav.new_zeros(b, self.N_MELS // self.PATCH, t_max, self.output_dim)
         for i in range(b):
@@ -618,6 +621,121 @@ class BEATsFrontend(Frontend):
         for (i, start, cols), g in zip(place, grid):
             out[i, :, start:start + cols, :] = g[:cols].permute(1, 0, 2).to(out.dtype)
         return out
+
+
+    # -- batched tokens (FrontendConfig.batched_tokens) ----------------------
+
+    def _fbank_consts(self, device: torch.device) -> tuple[Tensor, Tensor, Tensor]:
+        """The povey window, the (128, 257) mel matrix and kaldi's epsilon, as
+        `ta_kaldi.fbank` builds them on every call -- built once per device."""
+        cache = self.__dict__.setdefault("_fbank_cache", {})
+        if device not in cache:
+            import torchaudio.compliance.kaldi as ta_kaldi
+            window = ta_kaldi._feature_window_function(
+                ta_kaldi.POVEY, self._FRAME_LENGTH, 0.42, device, torch.float32)
+            banks, _ = ta_kaldi.get_mel_banks(self.N_MELS, self._FFT,
+                                              float(self.audio.sample_rate), 20.0,
+                                              0.0, 100.0, -500.0, 1.0)
+            banks = F.pad(banks, (0, 1)).to(device=device, dtype=torch.float32)
+            cache[device] = (window, banks,
+                             ta_kaldi._get_epsilon(device, torch.float32))
+        return cache[device]
+
+    def _fbank_batch(self, wav: Tensor, n_frames: int) -> Tensor:
+        """`_fbank` for every row at once: (B, S) -> (B, n_frames, 128).
+
+        Frame j of row i reads samples [160 j, 160 j + 400) of row i only, and
+        every step after the framing is per frame, so row i's first
+        `_mel_frames(lengths[i])` frames are `_fbank(wav[i, :lengths[i]])`'s
+        frames -- the same operations in the same order as
+        `ta_kaldi.fbank` with `_fbank`'s arguments (dither 0, DC removal,
+        pre-emphasis 0.97, povey window, 512-point power spectrum, log mel).
+        The raw-energy column kaldi also computes is not used and not computed.
+        Frames past a row's own count read its zeroed padding; the caller never
+        keeps them.
+        """
+        window, banks, eps = self._fbank_consts(wav.device)
+        x = wav.to(torch.float32) * (2 ** 15)
+        if x.shape[-1] < self._FRAME_LENGTH:
+            x = F.pad(x, (0, self._FRAME_LENGTH - x.shape[-1]))
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            frames = x.unfold(-1, self._FRAME_LENGTH, self._FRAME_SHIFT)[:, :n_frames]
+            frames = frames - frames.mean(dim=-1, keepdim=True)
+            prev = F.pad(frames, (1, 0), mode="replicate")[..., :-1]
+            frames = (frames - 0.97 * prev) * window
+            frames = F.pad(frames, (0, self._FFT - self._FRAME_LENGTH))
+            power = torch.fft.rfft(frames).abs().pow(2.0)
+            fbank = torch.max(torch.matmul(power, banks.T), eps).log()
+        return (fbank - self.FBANK_MEAN) / (2 * self.FBANK_STD)
+
+    def _encode_windowed_batched(self, wav: Tensor, lengths: Tensor, widths: list[int],
+                                 t_max: int) -> Tensor:
+        """`_encode_windowed` without the Python loops over rows and windows.
+
+        Run 1's step was launch-bound (GPU ~53 % busy): a filterbank, a patch
+        embedding and a window slice per row, a pad-mask write per window and a
+        scatter per window back out. Here each is one batched op. The encoder
+        sees the same windows, in the same (row, start) order, with the same
+        zero padding and padding mask, so everything from the encoder on is
+        unchanged; the filterbank and patch embedding run on a batch-shaped
+        tensor, so kernel choice may round differently (fp32: ~1e-6).
+        """
+        b = wav.shape[0]
+        f = self.N_MELS // self.PATCH
+        w = int(self.cfg.window_patches)
+        n_mel = [max(1, int(self._mel_frames(max(int(n), self._FRAME_LENGTH))))
+                 for n in lengths.tolist()]
+        usable = t_max * self.PATCH
+        fbank = self._fbank_batch(wav, max(n_mel))                   # (B, M, 128)
+        # 🔴 Per-row sizes come from `lengths` on the device, never from
+        # `torch.tensor(list, device=...)`: a host-to-device copy of a Python
+        # list blocks until the GPU has drained its queue, and the row loop's
+        # per-row copies (the mel matrix, `lengths[i].item()`) were exactly that
+        # -- ~35 stalls a forward.
+        dev_len = lengths.to(wav.device)
+        if any(m < wd * self.PATCH for m, wd in zip(n_mel, widths)):
+            # A row shorter than one patch repeats its last frame (`_encode`'s
+            # tail rule): frame j reads min(j, n_mel - 1) of its own row.
+            last = self._mel_frames(dev_len.clamp(min=self._FRAME_LENGTH)).clamp(min=1) - 1
+            idx = torch.arange(usable, device=wav.device)[None, :].minimum(last[:, None])
+            fbank = fbank.gather(1, idx[..., None].expand(-1, -1, self.N_MELS))
+        else:
+            fbank = fbank[:, :usable]
+        x = self.patch_embedding(fbank.unsqueeze(1))                 # (B, C, T', F')
+        x = x.reshape(b, x.shape[1], -1).transpose(1, 2)             # (B, T'*F', C)
+        x = self.layer_norm(x)
+        if self.post_extract_proj is not None:
+            x = self.post_extract_proj(x)
+
+        n_win = -(-t_max // w)
+        span = n_win * w
+        width_t = self._frames_for(dev_len)
+        col_ok = torch.arange(span, device=wav.device)[None, :] < width_t[:, None]
+        grid = F.pad(x.view(b, t_max, f, -1), (0, 0, 0, 0, 0, span - t_max))
+        grid = grid.masked_fill(~col_ok[:, :, None, None], 0.0)
+        # The windows that hold any valid column, in (row, start) order. Indexed
+        # by a list built on the host and copied without blocking: a boolean
+        # mask index would need `nonzero`, i.e. a device sync, to size its output.
+        flat = [i * n_win + j for i, wd in enumerate(widths) for j in range(-(-wd // w))]
+        flat = _index_to(flat, wav.device)
+        toks = grid.view(b * n_win, w * f, -1).index_select(0, flat)   # (K, w*F', D)
+        any_pad = any(wd % w for wd in widths)
+        pad = (~col_ok.view(b * n_win, w)).index_select(0, flat).repeat_interleave(f, dim=1)
+        y, _ = self.encoder(toks, padding_mask=pad if any_pad else None)
+        out = y.new_zeros(b * n_win, w * f, self.output_dim, dtype=wav.dtype)
+        out = out.index_copy(0, flat, y.to(wav.dtype))
+        out = out.view(b, span, f, self.output_dim)[:, :t_max]
+        out = out.masked_fill(~col_ok[:, :t_max, None, None], 0.0)
+        return out.permute(0, 2, 1, 3).contiguous()
+
+
+def _index_to(values: list[int], device: torch.device) -> Tensor:
+    """A host list as a device index tensor, without a device sync: through
+    pinned memory, the copy is queued on the stream instead of waited for."""
+    t = torch.tensor(values, dtype=torch.long)
+    if device.type != "cuda":
+        return t
+    return t.pin_memory().to(device, non_blocking=True)
 
 
 class _BEATsEncoderConfig:
