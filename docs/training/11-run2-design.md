@@ -39,7 +39,12 @@ the final model.
   `proc-*|wavefake|` ×0.25, `ljspeech/` ×25.
   - Measured on a 20,000-spec draw: LJ went from 1.2 % of drawn English *real* and 39 % of
     drawn English *fake* to 17.6 % / 15.8 %.
-  - That is F1's mechanism, and it sits in the draw, not only in the corpus.
+  - That is F1's mechanism for the **all-data** models.
+  - **It cannot act on fold 0** (independent review M5): LJ and WaveFake-en sit entirely in
+    fold 0's VAL, so fold-0 training never draws them. The 0.52 LJ false-alarm rate came from
+    a model that never saw LJ.
+  - Fold 0 (T0) therefore tests the *new data only*. The draw fix is read on the all-data models
+    and through musan-speech (folds 1–2, v3 VAL).
 
 **Label symmetry of the draw — found by the v4 rehearsal, must be fixed before launch.**
 Rehearsal: v3 + proc + emilia-ko + ko-synth2 + emilia-en; fold 1, `audit_fold.py` n = 40,000
@@ -107,8 +112,18 @@ assigned.** This is implemented by `scripts/build_folds_pinned.py` (§5). It che
   | 3 | cosyvoice + chatterbox | ko-synth bark, knnvc, mms |
 
 - **Emilia prompt speakers:** a speaker whose voice prompted a clone family goes to that
-  family's fold. With several families, it goes to the first one alphabetically. VAL then holds
-  the real speaker **and** their clone, which is a same-speaker check for ko/en (the D1 analogue).
+  family's fold. With several families, it goes to the first one alphabetically.
+  - For most Emilia speakers, VAL then holds the real speaker **and** their clone.
+  - **Not all of them** (review M1). Clones prompted by *pinned* v3 speakers (Zeroth; en-synth2
+    also uses LibriTTS-R) follow their family, not the speaker.
+    - That is 3,278 of 12,979 ko-synth2 rows; 75 % of them sit in a different fold from their
+      speaker.
+    - Multi-cloner speakers are split too (1,923 Emilia speakers).
+  - So some VAL reals are voices the fold trained on as *fake*.
+    `scripts/diag/run_breakdown.py` tags them (`voice_spk_cloned_in_train`) and reports them as
+    their own slice; headline F1 numbers use the untagged reals.
+  - In run 1 the tagged reals were **not** hurt: false-alarm rate 0.000 / 0.011 / 0.003 on
+    folds 1–3, vs 0.226 / 0.034 / 0.022 untagged.
 - **Other Emilia speakers:** greedy by hours, filling each fold's (lang, real) VAL hours
   toward the per-fold mean. v3 ko-real VAL hours are very uneven: 34.0 / 0.2 / 6.4 / 14.9.
 
@@ -119,8 +134,20 @@ assigned.** This is implemented by `scripts/build_folds_pinned.py` (§5). It che
   - **PROBE ranking must use `configs/processing_first_run.yaml`**, which is how run 1 was
     ranked. It stays a zh-heavy, harsh ranking tool, not an estimate.
   - The leaderboard is the real judge.
-- Fold 0 VAL keeps the LJ/WaveFake block and 34 h of Zeroth, and gains fishspeech (ko + en).
-  Fold 0 remains the F1 test.
+- Fold 0 VAL keeps the LJ/WaveFake block and 32.6 h of Zeroth, and gains fishspeech (ko + en).
+  - v3 fold-0 VAL drew **no Korean clips** (no Korean fake was in it). Korean in fold-0 VAL is
+    new in v4.
+  - Fold 0 remains the F1 test on LJ.
+- **`for_eval()` keeps `domain_weights`, so the training weights also shape v4 VAL** (review
+  minor 1). On the rehearsal:
+  - fold-0 English real in VAL is 53 % LJ;
+  - fold-1 English real is 94 % Emilia, with musan-speech at 3.7 %.
+
+  v4 VAL moves whenever the weights are retuned. The F1/F2 slices that must stay comparable
+  are read on **v3 VAL** (run 1's exact specs, §4).
+- On v3 VAL, ~6 % of fake voice in folds 1–3 is MLAAD in "other" languages, which run 2 never
+  trains on. That costs run 2's pooled v3 score a little and says nothing about F1/F2
+  (review minor 2).
 
 ## 2 · Objective
 
@@ -188,7 +215,21 @@ The reasons:
 2. **CPU:** one exclusive Slurm job holds the node (owner rule): `-J eval-hyeonseop --exclusive
    --gres=gpu:8`. It runs 8 tasks as srun steps. Each task gets its GPU, its physical cores and
    their siblings, and 14–16 render workers. Launcher: `scripts/train_run2.sbatch` (speedup track).
-3. **No DDP for run 2.**
+3. **Measured since the draft** (speedup `9be8b4b`, one H200, saved batches, no render load):
+
+   | path | s/step | peak memory |
+   |---|---|---|
+   | run-1 path | 0.983 | 39 GiB |
+   | batched tokens | 0.944 | 39 GiB |
+   | **+ no layer checkpointing** | **0.785** | 98.5 GiB of 141 |
+
+   - The GPU is ~97 % busy in isolation, so run 1's 53 % was CPU contention and syncs.
+   - 0.785 s/step = 20.4 samples/s, which matches the render supply on the HT siblings (20–22/s).
+   - Config for run 2: `grad_checkpointing: false`, `render_on_ht_siblings: true`,
+     `render_workers` 14–16, **one physical core reserved for the trainer** (review M4: the
+     workers otherwise share the trainer's threads).
+   - Verified in the first 10 min of the run: s/step and `data_wait_s`.
+4. **No DDP for run 2.**
    - DDP does not raise the node's total throughput: every GPU still needs its own ~14–22
      samples/s of rendering, and that is the binding limit.
    - It only concentrates the throughput into one model.
@@ -216,6 +257,11 @@ So ~20,000 fine-tune steps on the new data is enough to show the data effect.
 
   Run 1 ended at LR factor 0.05, so B re-warms from a low point. Half the peak limits
   forgetting. T4 uses `configs/train_run2_scratch.yaml` (LR 2e-4, run 1's recipe).
+- **Fallback time** (review minor 11): if en-synth2 is not ingestible by 12:30, build v4
+  without it (`ONLY=proc,emilia-ko,ko-synth2,emilia-en`).
+  - Adding en-synth2 later means re-pinning *against v4*.
+  - Its clones would then not share folds with their Emilia-en prompt speakers (M1 again). The
+    breakdown's tag keeps that measurable.
 
 ## 4 · The eight tasks (ablations)
 
@@ -227,10 +273,10 @@ One exclusive job; task *i* on GPU *i*. The strategy-v4 draw is used unless stat
 | T1 | fold 1 | run 1 fold 1 | v4 | F2: XTTS miss, musan false alarms; maskgct unseen |
 | T2 | fold 2 | run 1 fold 2 | v4 | seedvc (VC) unseen; completes the 4-fold mean |
 | T3 | fold 3 | run 1 fold 3 | v4 | cosyvoice + chatterbox unseen; 4-fold mean |
-| T4 | fold 1 | **scratch** | v4, LR 2e-4 / warmup 1000 (run 1 recipe) | is B-init as good as scratch at equal steps? (fold 1: the fold that kept improving with steps) |
-| T5 | fold 0 | run 1 fold 0 | **v3 corpus**, run 2's draw (`configs/processing_run2_v3ctl.yaml`: same shares and weights, scheme stamp v3) | control: how much of T0's change is the new data vs the re-weighted draw and more steps |
+| T4 | fold 1 | **scratch** | v4, LR 2e-4 / warmup 1000 (run 1 recipe) | is B-init as good as scratch at equal **wall-clock**? B has 54k steps of run 1 behind it, so equal steps favours B. The run-3 question is the wall-clock budget (fold 1: the fold that kept improving with steps) |
+| T5 | fold 0 | run 1 fold 0 | **v3 corpus**, run 2's draw (`configs/processing_run2_v3ctl.yaml`: same shares and weights, scheme stamp v3) | control: new data vs (ko/en shares + more steps). On fold-0 training the domain weights are inert (M5), so T5 does not test them |
 | T6 | all-data | run 1 all_data_seed0 | v4 | **submission candidate** |
-| T7 | all-data | run 1 all_data_seed2 | v4, seed 1 | second candidate; seed spread |
+| T7 | all-data | run 1 all_data_seed2 | v4, `--seed 2` (→ `all_data_seed2/`) | second candidate (a different init and draw order from T6, so not a clean seed-spread measure) |
 
 **Why this set:**
 - Folds 0 and 1 are where run 1 failed.
@@ -239,11 +285,33 @@ One exclusive job; task *i* on GPU *i*. The strategy-v4 draw is used unless stat
   are needed to pick the FILE mode (§2).
 - T6/T7 start from run 1's two best all-data models on PROBE (0.853, 0.846).
 
+**Launcher** (`scripts/train_run2.sbatch`, speedup track, review B1):
+- **every task writes to its own root** `RUNS_ROOT/<run>/T<i>/`. `train.py` writes
+  `<out>/fold{k}/`, so T0/T5 and T1/T4 would otherwise overwrite each other.
+- Common flags (as run 1):
+
+  | flag | value |
+  |---|---|
+  | `--stages` | `joint` |
+  | `--select` | `ema` |
+  | `--draws` | `32000` (10 passes → 20k steps) |
+  | `--eval-n` | `6000` |
+  | `--weights` | `audio=…/beats,speech=…/xlsr-300m` |
+  | env | per-task `CUDA_CACHE_PATH` |
+
+- Model config `configs/c_run2.yaml` = `c_first_run.yaml` + `batched_tokens: true`. That is a
+  flag-only change; run-1 `scored.pt` must still load strictly.
+
 **Scoring every task:**
 - **v4 VAL:** `train.py`'s end-of-run eval, 6,000 specs.
-- **v3 VAL — exactly run 1's specs:** `eval_checkpoint.py` with the v3 manifest and
-  `processing_first_run.yaml`, on the last pass checkpoint. This is valid because v4 pins v3's
-  folds. It is the like-for-like comparison with run 1.
+- **v3 VAL — exactly run 1's specs:**
+  - Run `eval_checkpoint.py --ckpt <T>/fold<k>/scored.pt --fold k --manifest-dir …/strategy-v3
+    --processing configs/processing_first_run.yaml --eval-n 6000 --out-dir <T>/v3val`.
+  - It writes `val_specs.json` + `val_predictions.parquet` for `run_breakdown.py` (added in
+    `6d9e9ab`, review M2).
+  - Verified: its specs equal run 1's `val_specs.json` (6,000/6,000, reviewer rebuild on fold 1),
+    and run 1's `scored.pt` reproduces run 1's predictions within 6e-5.
+  - Valid because v4 pins v3's folds. It is the like-for-like comparison with run 1.
 - `scripts/diag/run_breakdown.py` on both, for the per-corpus and per-family rates at the pooled
   threshold. **The headline numbers are F1/F2's slices, not the pooled score** (mistake 16).
 - PROBE, all-data tasks only, under `processing_first_run.yaml`.
@@ -259,7 +327,10 @@ One exclusive job; task *i* on GPU *i*. The strategy-v4 draw is used unless stat
 1. **04:50** — Korean synthesis ends. Check each `ko-synth2/<family>/metadata.csv` and its QC
    rejects.
 2. **by 12:00** — en-synth2 ends. The en-data track reports hours, QC, WaveFake cap.
-3. `scripts/extend_manifest.py --dry-run`, then the manifest into a **new** dir `strategy-v4`.
+3. `scripts/extend_manifest.py --dry-run`, then the manifest into a **new** dir `strategy-v4`
+   **with `--scheme strategy-v4`**. The default stamp is v3, and a wrong stamp only fails A10
+   after 7 h of training. `build_strategy_v4.sh` passes it; check
+   `manifest.scheme_version.unique()` before launch.
 4. `scripts/build_folds_pinned.py --base-dir …/strategy-v3 --manifest-dir …/strategy-v4`
    (commit `6e7860f`). **Rehearsed** on v3 + proc + emilia-ko + ko-synth2 + emilia-en (506,926 rows):
    - VG1 ok;
@@ -298,3 +369,30 @@ One exclusive job; task *i* on GPU *i*. The strategy-v4 draw is used unless stat
 | B-init carries the shortcut | T4 (scratch) and T5 (control) show it; run 3 can switch |
 | a fold task exits 1 ("not quotable") | not a crash; read `ledger_row.json` (mistake 15) |
 | PROBE read under the wrong config | always `processing_first_run.yaml` (§1.2) |
+
+## 7 · Review log
+
+An independent review of `f03cdd2` (critic agent, read-only, CPU re-checks) returned
+**REVISE**.
+
+It verified as correct:
+- the pinned-fold logic and rehearsal;
+- the S1 inheritance;
+- the reproduction of run 1's VAL specs (6,000/6,000);
+- that the domain prefixes hit their rows;
+- the config diffs;
+- the PROBE claim;
+- 20+ numbers.
+
+| finding | disposition |
+|---|---|
+| **B1** tasks sharing a fold overwrite `<out>/fold{k}`; launcher unspecified | fixed in spec (§4 Launcher): per-task roots; the speedup track builds `train_run2.sbatch` |
+| **M1** prompt speaker ≠ clone fold for pinned speakers | claim corrected (§1.2); tagged in `run_breakdown.py`; run 1 shows no bias on those reals |
+| **M2** no like-for-like tool | `eval_checkpoint.py --out-dir`, accepts `scored.pt` (`6d9e9ab`), verified |
+| **M3** speed flags not in the committed configs | assigned to the speedup track (loop section of both run-2 configs + a "differ only in scheme" test) |
+| **M4** render workers share the trainer's threads | reserve a core per trainer (speedup track); measured at launch |
+| **M5** fold 0 cannot test the draw fix | stated (§1.1, T5 row); read through the all-data models and musan |
+| minor 1, 2, 4, 5, 8, 10, 11, 3 | stated in §1.2, §4, §3, §5 |
+| minor 6 | the tautological PROBE check is replaced; a new family merging into a base atom now aborts (+ test) |
+| minor 7 (report omits inherited proc hours) | accepted, cosmetic |
+| minor 9 (DDP premise vs the new benchmark) | §3 updated with the measurements; the conclusion stands |
