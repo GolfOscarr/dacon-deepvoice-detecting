@@ -100,3 +100,23 @@ def test_the_step_log_is_written(corpus, model_cfg, tmp_path):
 def test_bad_loop_knobs_are_refused(bad):
     with pytest.raises(ValueError):
         LoopConfig(**bad)
+
+
+def test_pooled_batches_across_many_windows_keep_the_inline_order(monkeypatch):
+    """The pool runs a window ahead; the batches it yields must still be the
+    inline batches, in order, from any start -- across window boundaries."""
+    import training.loop as loop
+
+    class _Pool:
+        def imap(self, fn, items, chunksize=1):
+            return map(fn, items)
+
+    monkeypatch.setattr(loop, "_worker_render_batch", list)
+    monkeypatch.setattr(loop, "_render_batch",
+                        lambda specs, idx, index, cfg: [specs[i] for i in idx])
+    specs = list(range(1000))
+    batches = [[(7 * b + k) % 1000 for k in range(3)] for b in range(150)]
+    for first in (0, 5, 31, 32, 33, 149):
+        inline = list(loop._iter_batches(specs, batches, first, None, None, None))
+        pooled = list(loop._iter_batches(specs, batches, first, None, None, _Pool()))
+        assert pooled == inline and len(inline) == 150 - first

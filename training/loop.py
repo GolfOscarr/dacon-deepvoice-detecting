@@ -31,6 +31,7 @@ the split keep resolving:
 from __future__ import annotations
 
 import hashlib
+import itertools
 import math
 import os
 import time
@@ -110,6 +111,9 @@ class LoopConfig:
     #: another job; measured with -c 8: 7 workers 14.6-15.2 samples/s, 14
     #: workers on the siblings 20.2, 16 workers 21.8. Renders are pure
     #: functions of their spec, so where they run changes no sample.
+    #: ⚠️ In a real one-task train.py run it bought nothing (14 workers: 0.92
+    #: s/step, 7 workers: 0.86-0.88): the render pool was not the limit there.
+    #: Kept for an 8-task node where it might be; unmeasured at 8 tasks.
     render_on_ht_siblings: bool = False
     #: "constant" (the historical behaviour) or "cosine": linear warmup over
     #: `warmup_steps`, then cosine decay to `min_lr_ratio` of the base rate at
@@ -252,27 +256,46 @@ def _worker_render(spec: SampleSpec):
     return render(spec, _WORKER["index"], _WORKER["cfg"])
 
 
+def _worker_render_batch(specs: Sequence[SampleSpec]) -> dict[str, Any]:
+    return collate([_worker_render(spec) for spec in specs])
+
+
 def _iter_batches(specs: Sequence[SampleSpec], batches: Sequence[Sequence[int]],
                   first: int, index: ManifestIndex, cfg: RenderConfig,
                   pool) -> Iterator[tuple[int, dict[str, Any]]]:
     """``(batch_index, collated batch)`` from ``first`` on, inline or pooled.
 
-    Pooled: every sample of the pass is submitted in batch order, ``imap``
-    returns them in that order, and they are regrouped into the same batches
-    the inline path builds. Submission runs ahead in windows so the render
-    queue cannot outgrow memory when the GPU is the slower side.
+    Pooled: every batch of the pass is submitted in order, one task per batch,
+    and ``imap`` returns them in that order -- the same batches the inline path
+    builds. A worker renders and collates its whole batch: collating a 60 s
+    stereo batch is ~70 ms of padding and copying, which in the main process
+    was a ~0.08 s/step "data wait" no number of workers could remove.
+    Submission runs ahead in windows so the render queue cannot outgrow
+    memory when the GPU is the slower side.
+
+    The next window is submitted when the current one starts being consumed,
+    not when it is used up: submitting only then left the pool idle for the
+    tail of every window whenever it rendered faster than the loop consumed,
+    and started each window cold. At most two windows are in flight.
     """
     if pool is None:
         for b in range(first, len(batches)):
             yield b, _render_batch(specs, batches[b], index, cfg)
         return
-    window = 64
-    for lo in range(first, len(batches), window):
+    window = 32
+
+    def submit(lo: int):
         chunk = range(lo, min(lo + window, len(batches)))
-        flat = [specs[i] for b in chunk for i in batches[b]]
-        rendered = pool.imap(_worker_render, flat, chunksize=1)
+        jobs = [[specs[i] for i in batches[b]] for b in chunk]
+        return chunk, pool.imap(_worker_render_batch, jobs, chunksize=1)
+
+    starts = iter(range(first, len(batches), window))
+    queued = [submit(lo) for lo in itertools.islice(starts, 1)]
+    while queued:
+        chunk, rendered = queued.pop(0)
+        queued += [submit(lo) for lo in itertools.islice(starts, 1)]
         for b in chunk:
-            yield b, collate([next(rendered) for _ in batches[b]])
+            yield b, next(rendered)
 
 
 def lr_factor(step: int, total: int, cfg: LoopConfig) -> float:
