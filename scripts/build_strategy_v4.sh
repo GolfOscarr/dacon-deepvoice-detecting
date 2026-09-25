@@ -4,7 +4,7 @@
 # base and is never written. Rerunnable: a fresh --out each time (v4 is rebuilt whole).
 #
 #   bash scripts/build_strategy_v4.sh            # all round-2 corpora present
-#   ONLY=proc,ctrsvdd bash scripts/build_strategy_v4.sh
+#   ONLY=proc,emilia-ko bash scripts/build_strategy_v4.sh   # a subset
 set -euo pipefail
 V=/data/project/private/dacon-venvs/dacon311/bin/python
 M=/data/project/private/dacon-corpus/manifests
