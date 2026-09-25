@@ -275,8 +275,8 @@ def _emilia_ko(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
 def _proc(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
     """S1: processed audio, label-preserving (DACON #417333 A1). A processed file
     keeps its SOURCE row's pool, generator family, speaker atom and language, so
-    it shares a fold with its source; its `source_name` / `domain_key` name the
-    processing family, so the draw weighs it as its own domain."""
+    it shares a fold with its source. Its draw domain names the processing
+    family: `domain_key` on a fake row, `source_name` on a real one."""
     d = _metadata(root / "interim" / "proc" / "metadata.csv")
     if d.empty:
         return pd.DataFrame(columns=["path"])
@@ -297,7 +297,11 @@ def _proc(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
         "path": "interim/proc/" + d["file"].astype(str),
         "pool": pool,
         "artifact_family": np.where(fake, s["artifact_family"].to_numpy(), None),
-        "source_name": [f"{f}/{b}" for f, b in zip(fam, base_src)],
+        # a fake row's source atom IS its family (check_rules); its own draw
+        # domain comes from domain_key. A real row's source atom names the
+        # processing family, which is its DOSS domain.
+        "source_name": np.where(fake, s["artifact_family"].to_numpy(),
+                                [f"{f}/{b}" for f, b in zip(fam, base_src)]),
         "speaker_ref_id": s["speaker_ref_id"].to_numpy(),
         "domain_key": np.where(fake, [f"{f}|{b}" for f, b in zip(fam, base_dom)], None),
         "prompt_speaker": None, "lang": s["lang"].to_numpy()})

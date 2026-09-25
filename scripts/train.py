@@ -107,6 +107,14 @@ def parse_weights(weights: str | None, frontends) -> dict[str, str]:
     return out
 
 
+def init_from(model: DeepVoiceNet, path: str) -> None:
+    """Load a finished model's weights (scored.pt: config + state_dict) strictly.
+    The architecture must match; the optimizer and the draw start fresh."""
+    blob = torch.load(path, map_location="cpu", weights_only=False)
+    model.load_state_dict(blob["state_dict"], strict=True)
+    print(f"  initialised from {path}", flush=True)
+
+
 def build_model(model_cfg_path: str, weights: str | None) -> DeepVoiceNet:
     cfg = load_model_config(model_cfg_path)
     by_name = parse_weights(weights, cfg.frontends)
@@ -190,6 +198,8 @@ def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
                           else run_cfg.loop.checkpoint_every))
 
     model = build_model(args.model, args.weights)
+    if args.init_weights:
+        init_from(model, args.init_weights)
     check_chain(model, ds)                      # one shipped chain, once (05 C2)
     t0 = time.time()
     results = run_schedule(model, ds, train_cfg=train_cfg, loop_cfg=loop_cfg,
@@ -270,6 +280,8 @@ def train_all_data(*, manifest, folds_tbl, args, run_cfg, train_cfg) -> str:
         checkpoint_every=(args.checkpoint_every if args.checkpoint_every is not None
                           else run_cfg.loop.checkpoint_every))
     model = build_model(args.model, args.weights)
+    if args.init_weights:
+        init_from(model, args.init_weights)
     check_chain(model, ds)
     t0 = time.time()
     results = run_schedule(model, ds, train_cfg=train_cfg, loop_cfg=loop_cfg,
@@ -311,6 +323,9 @@ def main() -> int:
                    help="train on TRAIN+VAL of every fold (PROBE sealed), no validation; "
                         "writes <out>/all_data_seed<seed>/ (docs/training/07 §3)")
     p.add_argument("--seed", type=int, help="override TrainConfig.seed (draw and batch order)")
+    p.add_argument("--init-weights",
+                   help="a scored.pt whose weights initialise the model (run 2 from run 1's "
+                        "soup); a fresh optimizer, schedule and draw -- unlike --resume")
     p.add_argument("--resume", help="a training checkpoint (e.g. <out>/fold1/joint-pass0.pt) "
                         "to continue the first --stages stage from; the run's other "
                         "arguments must match the ones it was started with")

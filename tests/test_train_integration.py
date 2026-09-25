@@ -145,3 +145,15 @@ def test_all_data_mode_trains_on_every_fold_and_saves_the_weights(corpus, tmp_pa
     assert not (run / "val_predictions.parquet").exists()
     assert len((run / "train_log.jsonl").read_text().splitlines()) == 2
     assert "all data, seed 3" in r.stdout
+
+
+def test_init_weights_starts_a_run_from_a_finished_model(corpus, tmp_path):
+    """docs/training/09: run 2 may start from run 1's soup. --init-weights loads a
+    scored.pt strictly; the optimizer and the draw start fresh."""
+    first = tmp_path / "first"
+    r = _train(corpus, first)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-3000:]
+    r2 = _train(corpus, tmp_path / "second", "--all-data", "--draws", "48",
+                "--init-weights", str(first / "fold0" / "scored.pt"))
+    assert r2.returncode == 0, r2.stdout[-2000:] + r2.stderr[-3000:]
+    assert "initialised from" in r2.stdout

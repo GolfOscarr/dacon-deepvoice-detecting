@@ -22,6 +22,10 @@
 set -euo pipefail
 : "${DACON_VENV:=/data/project/private/dacon-venvs/dacon311}"
 : "${MANIFEST_DIR:=/data/project/private/dacon-corpus/manifests/strategy-v3}"
+# run 2: PROCESSING=configs/processing_run2.yaml MANIFEST_DIR=.../strategy-v4
+: "${PROCESSING:=configs/processing_first_run.yaml}"
+: "${MODEL_CFG:=configs/c_first_run.yaml}"
+: "${TRAIN_CFG:=configs/train_first_run.yaml}"
 : "${WEIGHTS:=audio=/data/project/private/dacon-weights/beats,speech=/data/project/private/dacon-weights/xlsr-300m}"
 REPO="${DACON_REPO:-$SLURM_SUBMIT_DIR}"
 RUN="${1:?usage: sbatch scripts/train_first_run.sbatch <run name> [train.py args]}"
@@ -54,9 +58,9 @@ mkdir -p "$CUDA_CACHE_PATH"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 exec "$DACON_VENV/bin/python" scripts/train.py \
   --manifest-dir "$MANIFEST_DIR" \
-  --processing configs/processing_first_run.yaml \
-  --model configs/c_first_run.yaml \
-  --train configs/train_first_run.yaml \
+  --processing "$PROCESSING" \
+  --model "$MODEL_CFG" \
+  --train "$TRAIN_CFG" \
   --weights "$WEIGHTS" \
   --stages joint \
   --out "$RUNS_ROOT/$RUN" \
