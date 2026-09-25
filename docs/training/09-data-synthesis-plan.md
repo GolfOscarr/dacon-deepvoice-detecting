@@ -245,3 +245,16 @@ Fold tasks then spend ~20 min on their end-of-run evaluation (6,000 specs).
 **Stopping the fold runs buys ~2 h and loses their end-of-run fold scores**, so run 1
 finishes. Either way run 2 ends by 09-27 morning, which leaves room for a run 3 before
 09-29 10:00.
+
+## 6 · Owner decision, 2026-09-25 22:20: English and Korean only
+
+"English and Korean is the primary language. No need to process Chinese and Japanese or
+other language for now."
+
+- **S4 (Chinese fakes) is stopped**, and its GPU goes to S2 (Korean clones, up to 7 GPUs).
+- **S5 (CtrSVDD, Chinese singing) is not ingested.**
+- **Data already on disk is kept.** `interim/zh-synth/` and `interim/ctrsvdd/` stay as
+  they are, for later.
+- **`configs/processing_run2.yaml` draws ko 0.55 / en 0.45**, and every other language gets
+  share 0. That includes MLAAD's multilingual tail and the Chinese real voice.
+- **`scripts/build_strategy_v4.sh` ingests `proc, emilia-ko, ko-synth2`** by default.

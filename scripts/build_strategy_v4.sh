@@ -12,7 +12,9 @@ OUT=${OUT:-$M/strategy-v4}
 CFG=configs/processing_run2.yaml
 cd "$(dirname "$0")/.."
 [ -e "$OUT/manifest.parquet" ] && { echo "FATAL: $OUT exists; move it aside first"; exit 1; }
-only=(); [ -n "${ONLY:-}" ] && only=(--only "$ONLY")
+# owner decision 2026-09-25: English and Korean only -> no zh-synth, no ctrsvdd
+ONLY=${ONLY:-proc,emilia-ko,ko-synth2}
+only=(--only "$ONLY")
 echo "== manifest"; $V scripts/extend_manifest.py --v2 $M/strategy-v3 --out "$OUT" \
   --scheme strategy-v4 --workers 48 "${only[@]}" | tail -40
 echo "== folds";    $V scripts/build_folds.py --processing-config $CFG --manifest-dir "$OUT" | tail -12

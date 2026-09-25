@@ -1,8 +1,8 @@
 # RUN 2 (docs/training/09): processing_first_run.yaml on strategy-v4 (the round-2
 # corpora: processed audio, conversational/new Korean clones, Chinese clones,
-# CtrSVDD singing). Chinese and Japanese exist on both voice sides again
-# (zh-synth, CtrSVDD zh/ja), so they get shares; the sampler still zeroes any
-# language a view has on one side only.
+# CtrSVDD singing). OWNER DECISION 2026-09-25: English and Korean are the only
+# languages for now -- every other language (zh, ja, MLAAD's long tail) gets share 0,
+# and zh-synth / CtrSVDD are not ingested into strategy-v4.
 #
 # THE FIRST REAL RUN (docs/training/07): processing_v1.yaml plus the language
 # balance (D-d), strategy-v3, and the loop knobs of §3. Everything else is v1's.
@@ -32,7 +32,7 @@ draw:
   # DOSS cap so every language holds the same share on both sides. `ja` exists on
   # the fake side only (JSUT) and is removed; `other` is MLAAD's long tail, fake
   # side only, kept small for its generator diversity.
-  lang_shares: {ko: 0.40, en: 0.30, zh: 0.20, ja: 0.05, other: 0.05}
+  lang_shares: {ko: 0.55, en: 0.45, zh: 0.0, ja: 0.0, other: 0.0}
   # DRAW-1. The competition's own range; drawn first.
   duration_range: [4.0, 60.0]
   # D-3 / D-21. ONE take per sample, shared by every role and row kind,
