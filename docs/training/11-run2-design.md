@@ -59,7 +59,7 @@ and `scripts/strategy/draw_balance.py` n = 6,000.
   - The consequence on the test: its real audio never repeats, so "no repetition ⇒ fake"
     would raise false alarms.
 - **The fix is draw weights, not less Emilia.**
-  - Down-weighting Emilia balances the numbers, but it drops Emilia to 7–8 % of real voice,
+  - Down-weighting Emilia balances the numbers, but it drops Emilia to 6–8 % of real voice per language,
     which undoes F1/F3's fix.
   - Instead: round-2 clones up (they are the same tiny-bucket speakers, and F2 wants more of
     them), real processed rows up, fake processed rows down.
@@ -74,7 +74,7 @@ and `scripts/strategy/draw_balance.py` n = 6,000.
 ### 1.2 Folds — pinned to v3 (a correctness requirement, not a preference)
 
 `training.folds.build_folds` is a global greedy pass. It ignores any existing assignment
-(`folds.py:629` docstring), and new groups change its order and tallies. Rebuilding folds on v4
+(`training/folds.py:630`, the `build_folds` docstring), and new groups change its order and tallies. Rebuilding folds on v4
 can therefore move a v3 group to another fold, or into or out of PROBE. That would break three
 things:
 
@@ -114,7 +114,7 @@ assigned.** This is implemented by `scripts/build_folds_pinned.py` (§5). It che
 
 **Consequences to keep in mind:**
 
-- **PROBE has no ko/en real voice** (measured: 0 h ko-real, 0 h en-real in v3 PROBE).
+- **PROBE has no ko/en real voice** (measured: en real 0 rows; ko real 4 CV-ko files, ≈ 0.0 h).
   - Under `processing_run2.yaml` (zh 0) PROBE's voice side is empty.
   - **PROBE ranking must use `configs/processing_first_run.yaml`**, which is how run 1 was
     ranked. It stays a zh-heavy, harsh ranking tool, not an estimate.
@@ -172,8 +172,8 @@ The reasons:
 **Where the time goes** (run 1, measured):
 
 - A step is 1.17 s at batch 16: 13.7 samples/s per GPU.
-- The GPUs are ~53 % busy. The main process is launch- and sync-bound: ~35 host↔device syncs
-  per forward in the per-row BEATs fbank loop.
+- The GPUs are ~53 % busy (nvidia-smi sampling). The speedup track reads the per-row BEATs
+  fbank loop as the cause: ~35 host↔device syncs per forward (code reading; GPU profile PENDING).
 - Data wait is 4–7 s per 60 s.
 - The **render pool** (7 spawn workers) delivers 14.6–15.2 samples/s (speedup track, CPU
   measurement). It is about to become the ceiling:
@@ -198,7 +198,13 @@ The reasons:
      rank-0 checkpoint/EMA, per-rank render pools) plus a large-batch LR change, and it is
      untested. **ESTIMATE:** half a day with tests.
 
-**Step budget.**
+**Step budget.** Run 1's learning curves (doc 10 F7) set the scale:
+- fold 1 saturates by ~36,000 steps from scratch;
+- fold 0 is flat after 6,000.
+
+So ~20,000 fine-tune steps on the new data is enough to show the data effect.
+
+**Timing.**
 - Run 2 launches ≈ 13:00 and should finish by ≈ 20:00: 7 h.
 - At 1.0–1.2 s/step that is ~20,000 steps (**ESTIMATE**, fixed once the speedup numbers
   land). That is 10 passes × 32,000 draws at batch 16, a checkpoint per pass for learning curves.
