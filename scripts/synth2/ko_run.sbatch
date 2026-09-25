@@ -8,12 +8,16 @@
 # One GPU job = one shard of one Korean round-2 family + its QC follower (Whisper large-v3
 # on the same GPU), then a final QC pass and metadata.csv rewrite. Resumable.
 # usage: sbatch scripts/synth2/ko_run.sbatch <family> [ko_synth_<family>.py args, e.g. --shard 0/2 --limit 5]
+# English: SYNTH2_LANG=en sbatch -o /data/project/private/dacon-corpus/interim/en-synth2/_logs/slurm-%j.out \
+#          scripts/synth2/ko_run.sbatch <family> ...   (output and logs under interim/en-synth2/)
 set -u
 FAMILY=$1; shift
 REPO=/home/hyeonseop.shin/workspace/dacon-deepvoice-detecting
 S2=$REPO/scripts/synth2
 V=/data/project/private/dacon-venvs
-LOGS=/data/project/private/dacon-corpus/interim/ko-synth2/_logs
+export SYNTH2_LANG=${SYNTH2_LANG:-ko}
+LOGS=/data/project/private/dacon-corpus/interim/$SYNTH2_LANG-synth2/_logs
+mkdir -p "$LOGS"
 export CUDA_CACHE_PATH=/tmp/cuda-cache-$SLURM_JOB_ID
 export OMP_NUM_THREADS=4
 export PYTHONUNBUFFERED=1

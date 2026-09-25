@@ -11,6 +11,7 @@ Prompt: one real utterance (3-10 s, Emilia/Zeroth/FLEURS); text: 1-2 other trans
 Per-file seeded draws: exaggeration U(0.35, 0.7), cfg_weight U(0.3, 0.6), temperature U(0.7, 0.9).
 
   python scripts/synth2/ko_synth_chatterbox.py --n-files 6000 --shard 0/2 --max-hours 4.5
+English: SYNTH2_LANG=en (language_id="en", output interim/en-synth2/chatterbox/).
 """
 from __future__ import annotations
 
@@ -55,7 +56,7 @@ def main() -> None:
         rng = random.Random(j.seed)
         torch.manual_seed(j.seed)
         try:
-            wav = tts.generate(j.text, language_id="ko", audio_prompt_path=str(j.prompt_utts[0].abs_path),
+            wav = tts.generate(j.text, language_id=kc.LANG, audio_prompt_path=str(j.prompt_utts[0].abs_path),
                                exaggeration=rng.uniform(0.35, 0.7), cfg_weight=rng.uniform(0.3, 0.6),
                                temperature=rng.uniform(0.7, 0.9))
         except Exception as e:  # noqa: BLE001

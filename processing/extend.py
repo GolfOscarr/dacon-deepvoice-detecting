@@ -259,17 +259,33 @@ def _zh_synth(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
     return _synth_families(root, "zh-synth", "zh")
 
 
-def _emilia_ko(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
-    """S3: real conversational Korean. `speaker_ref_id` is Emilia's source key."""
-    d = _metadata(root / "interim" / "emilia-ko" / "metadata.csv")
+def _emilia(root: Path, lang: str) -> pd.DataFrame:
+    """Real in-the-wild speech. `speaker_ref_id` is Emilia's source key."""
+    corpus = f"emilia-{lang}"
+    d = _metadata(root / "interim" / corpus / "metadata.csv")
     if d.empty:
         return pd.DataFrame(columns=["path"])
     spk = d["speaker_ref_id"].astype(str)
     return pd.DataFrame({
-        "file_id": "emilia-ko:" + d["file"].astype(str),
-        "path": "interim/emilia-ko/" + d["file"].astype(str),
+        "file_id": f"{corpus}:" + d["file"].astype(str),
+        "path": f"interim/{corpus}/" + d["file"].astype(str),
         "artifact_family": None, "source_name": spk, "speaker_ref_id": spk,
-        "domain_key": None, "prompt_speaker": None, "lang": "ko"})
+        "domain_key": None, "prompt_speaker": None, "lang": lang})
+
+
+def _emilia_ko(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    """S3: real conversational Korean."""
+    return _emilia(root, "ko")
+
+
+def _emilia_en(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    """Many-speaker in-the-wild English real (run-1 diagnosis F1/F2)."""
+    return _emilia(root, "en")
+
+
+def _en_synth2(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    """English clones of Emilia-EN / LibriTTS-R speakers by the round-2 cloners."""
+    return _synth_families(root, "en-synth2", "en")
 
 
 def _proc(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
@@ -339,6 +355,8 @@ NEW_CORPORA = (
     NewCorpus("proc", "*", _proc),
     NewCorpus("emilia-ko", "A", _emilia_ko),
     NewCorpus("ko-synth2", "B", _ko_synth2),
+    NewCorpus("emilia-en", "A", _emilia_en),
+    NewCorpus("en-synth2", "B", _en_synth2),
     NewCorpus("zh-synth", "B", _zh_synth),
     NewCorpus("ctrsvdd", "*", _ctrsvdd),
 )

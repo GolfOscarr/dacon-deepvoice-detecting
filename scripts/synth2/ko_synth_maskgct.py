@@ -14,6 +14,7 @@ Prompt: one real utterance (3-10 s) + its transcript; text: 1-2 other transcript
 length = the pipeline's rule (prompt length x target/prompt phone count) x seeded U(0.9, 1.1).
 
   python scripts/synth2/ko_synth_maskgct.py --n-files 6000 --shard 0/2 --max-hours 4.5
+English: SYNTH2_LANG=en (language "en": the pipeline's zh/en G2P path, espeak en-us).
 """
 from __future__ import annotations
 
@@ -90,11 +91,11 @@ def main() -> None:
             with torch.no_grad():
                 s16, _ = kc.load_audio(p.abs_path, 16000)
                 s24, _ = kc.load_audio(p.abs_path, 24000)
-                pp = mu.g2p_(p.text, "ko")[1]
-                tp = mu.g2p_(j.text, "ko")[1]
+                pp = mu.g2p_(p.text, kc.LANG)[1]
+                tp = mu.g2p_(j.text, kc.LANG)[1]
                 tlen = len(s16) / 16000 * len(tp) / max(len(pp), 1) * rng.uniform(0.9, 1.1)
                 tlen = min(max(tlen, 2.5), 20.0)
-                comb, _ = pipe.text2semantic(s16, p.text, "ko", j.text, "ko", tlen)
+                comb, _ = pipe.text2semantic(s16, p.text, kc.LANG, j.text, kc.LANG, tlen)
                 ac = pipe.extract_acoustic_code(torch.tensor(s24).unsqueeze(0).to(dev))
                 _, wav = pipe.semantic2acoustic(comb, ac)
         except Exception as e:  # noqa: BLE001

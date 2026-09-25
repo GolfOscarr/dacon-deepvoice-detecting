@@ -19,6 +19,10 @@ conservative atom).
 kept = 3 <= duration <= 30, finite, RMS >= -50 dBFS, transcript contains Hangul.
 
   python scripts/synth2/ko_emilia_index.py [--hours-per-part 40] [--workers 16]
+
+--lang en builds interim/emilia-en/ from _raw/{Emilia,Emilia-YODAS}/EN/*.tar the same way (no
+FLEURS part): speaker_ref_id "emilia-en/<part>/<source key>", and the language check is "the
+Emilia language tag is en and the transcript is Latin-script" (drop reason not_english).
 """
 from __future__ import annotations
 
@@ -44,6 +48,25 @@ FLEURS_LIC = "CC-BY-4.0"
 COLS = ["file", "part", "speaker_ref_id", "text", "duration_s", "sample_rate", "licence", "kept",
         "drop_reason", "source_tar", "dnsmos", "orig_format", "diar_speaker"]
 HANGUL = re.compile(r"[가-힣]")
+LANG = "ko"
+LATIN = re.compile(r"[A-Za-z]")
+
+
+def lang_ok(text: str) -> bool:
+    if LANG == "ko":
+        return bool(HANGUL.search(text))
+    # English: Latin letters, and >= 95 % of the non-space characters are ASCII
+    ns = [c for c in text if not c.isspace()]
+    return bool(LATIN.search(text)) and sum(c.isascii() for c in ns) >= 0.95 * len(ns)
+
+
+def set_lang(lang: str) -> None:
+    global LANG, ROOT, RAW, PARTS
+    LANG = lang
+    ROOT = Path(f"/data/project/private/dacon-corpus/interim/emilia-{lang}")
+    RAW = ROOT / "_raw"
+    L = lang.upper()
+    PARTS = {"emilia": (f"Emilia/{L}", "CC-BY-NC-4.0"), "yodas": (f"Emilia-YODAS/{L}", "CC-BY-4.0")}
 
 
 def check(path: Path, text: str) -> tuple[float, int, bool, str]:
@@ -62,8 +85,8 @@ def check(path: Path, text: str) -> tuple[float, int, bool, str]:
         why.append("silent")
     if not 3.0 <= dur <= 30.0:
         why.append("duration")
-    if not HANGUL.search(text):
-        why.append("not_korean")
+    if not lang_ok(text):
+        why.append("not_korean" if LANG == "ko" else "not_english")
     return dur, sr, not why, "|".join(why)
 
 
@@ -119,7 +142,7 @@ def extract(args) -> list[dict]:
         text = j["text"].strip()
         dur, sr, ok, why = check(mp3, text) if mp3.exists() else (0.0, 0, False, "missing")
         rows.append({"file": f"{part}/{stem}/{key}.mp3", "part": part,
-                     "speaker_ref_id": f"emilia-ko/{part}/{j['src']}", "text": text,
+                     "speaker_ref_id": f"emilia-{LANG}/{part}/{j['src']}", "text": text,
                      "diar_speaker": j["speaker"],
                      "duration_s": f"{dur:.3f}", "sample_rate": sr, "licence": lic, "kept": str(ok),
                      "drop_reason": why, "source_tar": f"{PARTS[part][0]}/{tar.name}",
@@ -138,16 +161,19 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--seed", type=int, default=2026)
     ap.add_argument("--fleurs-only", action="store_true")
+    ap.add_argument("--lang", default="ko", choices=["ko", "en"])
     a = ap.parse_args()
+    set_lang(a.lang)
 
     with ProcessPoolExecutor(a.workers) as ex:
-        rows = list(ex.map(fleurs_check, fleurs_rows(), chunksize=64))
+        rows = list(ex.map(fleurs_check, fleurs_rows(), chunksize=64)) if a.lang == "ko" else []
         print(f"fleurs: {len(rows)} rows, {sum(r['kept'] == 'True' for r in rows)} kept", flush=True)
         if not a.fleurs_only:
             for part, (sub, lic) in PARTS.items():
                 tars = sorted((RAW / sub).glob("*.tar"))
                 cand = [j for js in ex.map(scan_tar, tars) for j in js
-                        if 3.0 <= float(j["duration"]) <= 30.0 and HANGUL.search(j["text"])]
+                        if 3.0 <= float(j["duration"]) <= 30.0 and lang_ok(j["text"])
+                        and j.get("language", a.lang) == a.lang]
                 rng = random.Random(f"{a.seed}:{part}")
                 by_src = defaultdict(list)
                 for j in sorted(cand, key=lambda j: j["id"]):

@@ -20,6 +20,12 @@ Files per family (synthesis and QC run concurrently without rewriting each other
 ``<family>/metadata.csv``  = synth ⋈ qc, rewritten atomically by ko_qc.py; round 1's columns +
                            qc_cer, kept, drop_reason (the ingester keeps kept == True).
 Only stdlib + numpy + soundfile here, so every family venv can import it.
+
+English (SYNTH2_LANG=en, docs/training/10 §2 item 1): the same contract into interim/en-synth2/,
+with the pool = interim/emilia-en/metadata.csv (emilia|yodas) as the main speakers and
+LibriTTS-R (every strategy-v3 row is slice train_val; index in en-synth2/_index/libritts_index.csv,
+built by `ko_common.py libritts-index`) in Zeroth's role. English texts: Latin letters + basic
+punctuation (digits dropped for the same reason as Korean).
 """
 from __future__ import annotations
 
@@ -36,11 +42,15 @@ from pathlib import Path
 
 import numpy as np
 
+LANG = os.environ.get("SYNTH2_LANG", "ko")
+assert LANG in ("ko", "en"), LANG
 CORPUS_ROOT = Path(os.environ.get("DACON_CORPUS_ROOT", "/data/project/private/dacon-corpus"))
 INTERIM = CORPUS_ROOT / "interim"
-OUT_ROOT = Path(os.environ.get("KO_SYNTH2_ROOT", INTERIM / "ko-synth2"))
+OUT_ROOT = Path(os.environ.get("KO_SYNTH2_ROOT", INTERIM / f"{LANG}-synth2"))
 IDX = INTERIM / "ko-synth2" / "_index"
-EMILIA_META = INTERIM / "emilia-ko" / "metadata.csv"
+EMILIA_META = INTERIM / f"emilia-{LANG}" / "metadata.csv"
+LIBRITTS_INDEX = INTERIM / "en-synth2" / "_index" / "libritts_index.csv"
+SECONDARY = "zeroth" if LANG == "ko" else "libritts"   # the non-Emilia prompt speakers
 ZEROTH_INDEX = INTERIM / "ko-synth" / "_index" / "zeroth_index.csv"
 ZEROTH_ALLOW = IDX / "zeroth_train_val_speakers.txt"
 FOLDS = CORPUS_ROOT / "manifests" / "strategy-v3" / "folds.parquet"
@@ -54,7 +64,8 @@ QC_COLUMNS = ["file", "qc_cer", "asr_text", "duration_s", "rms_dbfs", "clip_frac
               "kept", "drop_reason"]
 FINAL_COLUMNS = META_COLUMNS + ["qc_cer", "kept", "drop_reason"]
 MIN_DURATION_S = 3.0
-TEXT_OK = re.compile(r"^[가-힣\s.,?!~'\"…·-]+$")
+TEXT_OK = (re.compile(r"^[가-힣\s.,?!~'\"…·-]+$") if LANG == "ko"
+           else re.compile(r"^[A-Za-z\s.,?!'\";:-]+$"))
 
 
 @dataclass
@@ -122,15 +133,22 @@ def zeroth_allow() -> set[str]:
 
 def load_pool() -> list[Utt]:
     utts: list[Utt] = []
-    allow = zeroth_allow()
-    for r in read_csv(ZEROTH_INDEX):
-        if r["speaker"] in allow:
+    if LANG == "ko":
+        allow = zeroth_allow()
+        for r in read_csv(ZEROTH_INDEX):
+            if r["speaker"] in allow:
+                utts.append(Utt(r["utt_id"], r["speaker"], r["rel_path"], r["text"].strip(),
+                                float(r["duration_s"]), "zeroth"))
+    else:
+        if not LIBRITTS_INDEX.exists():
+            raise SystemExit(f"{LIBRITTS_INDEX} missing: run `ko_common.py libritts-index`")
+        for r in read_csv(LIBRITTS_INDEX):
             utts.append(Utt(r["utt_id"], r["speaker"], r["rel_path"], r["text"].strip(),
-                            float(r["duration_s"]), "zeroth"))
+                            float(r["duration_s"]), "libritts"))
     for r in read_csv(EMILIA_META):
         if str(r.get("kept", "")).lower() not in ("true", "1"):
             continue
-        utts.append(Utt(Path(r["file"]).stem, r["speaker_ref_id"], "emilia-ko/" + r["file"],
+        utts.append(Utt(Path(r["file"]).stem, r["speaker_ref_id"], f"emilia-{LANG}/" + r["file"],
                         r["text"].strip(), float(r["duration_s"]), r["part"]))
     return utts
 
@@ -186,7 +204,7 @@ def make_jobs(family: str, n_files: int, seed: int, utts: list[Utt], *,
 
     em = speakers_of({"emilia", "yodas"})
     fl = speakers_of({"fleurs"})
-    ze = speakers_of({"zeroth"})
+    ze = speakers_of({SECONDARY})
     main = em if em else fl
     text_pool = [u for u in utts if text_ok(u.text) and u.duration_s <= 15.0]
     if em:  # conversational texts preferred once Emilia exists: 70 % Emilia, rest FLEURS/Zeroth
@@ -378,6 +396,30 @@ if __name__ == "__main__":
         IDX.mkdir(parents=True, exist_ok=True)
         ZEROTH_ALLOW.write_text("\n".join(ok) + "\n")
         print(f"{len(ok)} train_val Zeroth speakers ({len(bad)} excluded as probe/other)")
+    elif sys.argv[1:] == ["libritts-index"]:
+        # English secondary speakers: LibriTTS-R rows of strategy-v3 (all slice train_val),
+        # 3-15 s, transcript = the chapter trans.tsv's normalized text
+        import pandas as pd
+        import soundfile as sf
+        from concurrent.futures import ThreadPoolExecutor
+        d = pd.read_parquet(FOLDS, columns=["file_id", "slice", "speaker_ref_id"])
+        d = d[d.file_id.str.startswith("libritts-r:") & (d.slice == "train_val")]
+        rel = "libritts-r/" + d.file_id.str.slice(len("libritts-r:"))
+        texts: dict[str, str] = {}
+        for tsv in sorted({(INTERIM / r).parent for r in rel}):
+            for f in tsv.glob("*.trans.tsv"):
+                for line in f.read_text(encoding="utf-8").splitlines():
+                    c = line.split("\t")
+                    if len(c) >= 3:
+                        texts[c[0]] = c[2].strip()
+        durs = list(ThreadPoolExecutor(32).map(lambda r: sf.info(str(INTERIM / r)).duration, rel))
+        rows = [{"utt_id": Path(r).stem, "speaker": s, "rel_path": r, "text": texts.get(Path(r).stem, ""),
+                 "duration_s": f"{du:.3f}"} for r, s, du in zip(rel, d.speaker_ref_id, durs)
+                if 3.0 <= du <= 15.0 and texts.get(Path(r).stem)]
+        LIBRITTS_INDEX.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(rows).to_csv(LIBRITTS_INDEX, index=False)
+        print(f"{len(rows)} LibriTTS-R utterances of {len({r['speaker'] for r in rows})} speakers "
+              f"({len(d)} train_val rows) -> {LIBRITTS_INDEX}")
     elif sys.argv[1:] == ["pool"]:
         u = load_pool()
         print(pool_summary(u))

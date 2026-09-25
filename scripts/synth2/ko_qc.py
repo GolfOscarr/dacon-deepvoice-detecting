@@ -3,6 +3,9 @@
 Whisper large-v3 (MIT) Korean CER <= 0.35 against the input text (seedvc: the source
 transcript, which is the `text` column), duration 3-20 s, RMS >= -45 dBFS, clipped <= 0.1 %,
 silence <= 50 %. CER on Hangul/alnum after dropping punctuation and spaces.
+English (SYNTH2_LANG=en): Whisper large-v3 with language="en", WER <= 0.30 on words after
+Whisper's English normaliser (numbers, spelling, fillers) on both sides; the value goes in the
+same `qc_cer` column so the metadata schema is the Korean one.
 
 venv: /data/project/private/dacon-venvs/synth2-qc; HF_HOME=/data/project/private/dacon-weights/synth2/hf.
 
@@ -30,6 +33,8 @@ import ko_common as kc  # noqa: E402
 
 WHISPER = "openai/whisper-large-v3"
 MAX_CER, MIN_S, MAX_S, MIN_DBFS, MAX_CLIP, MAX_SIL = 0.35, 3.0, 20.0, -45.0, 0.001, 0.5
+if kc.LANG == "en":
+    MAX_CER = 0.30   # a WER
 
 
 def norm_ko(s: str) -> str:
@@ -61,9 +66,15 @@ class ASR:
     def __call__(self, audios: list[np.ndarray]) -> list[str]:
         feats = self.proc.feature_extractor(audios, sampling_rate=16000, return_tensors="pt").input_features
         with self.torch.inference_mode():
-            ids = self.model.generate(feats.to(self.dev, self.dt), language="ko", task="transcribe",
+            ids = self.model.generate(feats.to(self.dev, self.dt), language=kc.LANG, task="transcribe",
                                       num_beams=1, do_sample=False)
         return [t.strip() for t in self.proc.batch_decode(ids, skip_special_tokens=True)]
+
+    def error_rate(self, ref: str, hyp: str) -> float:
+        if kc.LANG == "ko":
+            return cer(norm_ko(ref), norm_ko(hyp))
+        n = self.proc.tokenizer.normalize
+        return cer(n(ref).split(), n(hyp).split())
 
 
 def load16k(path: Path):
@@ -120,7 +131,7 @@ def qc_pass(asr: ASR, family: str, shard: str, bs: int = 16) -> int:
             n = len(a) // hop
             fr = np.sqrt((a[: n * hop].reshape(n, hop) ** 2).mean(axis=1)) if n else np.zeros(1)
             sil = float(np.mean(fr < 10 ** (-50 / 20)))
-            c = cer(norm_ko(r["text"]), norm_ko(hyp))
+            c = asr.error_rate(r["text"], hyp)
             why = [k for k, bad in (("cer", c > MAX_CER), ("duration", not MIN_S <= dur <= MAX_S),
                                     ("rms", dbfs < MIN_DBFS), ("clipped", clip > MAX_CLIP),
                                     ("silence", sil > MAX_SIL)) if bad]
