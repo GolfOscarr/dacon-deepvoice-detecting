@@ -192,3 +192,48 @@ model.
   against the single runs.
 - **The remaining synthesis.** CosyVoice and Bark can resume if a second run is wanted
   (`scripts/synth/run_family.sbatch`).
+
+## 7 · Run 1 results (2026-09-25 23:30 KST)
+
+**Fold runs.** EMA weights at 54,000 steps, eval_n 6,000, generator-disjoint VAL.
+
+| fold | score | EER file | voice | music | held-out fake voice |
+|---|---|---|---|---|---|
+| 0 | 0.928 | 0.101 | 0.057 | 0.061 | the LJ-voice block (WaveFake vocoders) |
+| 1 | 0.916 | 0.101 | **0.179** | 0.024 | **Korean XTTS clones** (+ JSUT, dropped from draws) |
+| 2 | 0.990 | 0.011 | 0.023 | 0.002 | MLAAD families |
+| 3 | 0.966 | 0.044 | 0.012 | 0.043 | other families |
+
+The mean is 0.950, and presence AUC is ≈ 1.0 on every fold. Every fold task exited 1 as "not
+quotable". That comes from the single-fold runs, plus fold 0's VG4.
+
+- **Fold 0's VG4 fails.** The voice EER on matched pairs (the same LJ utterance, real vs
+  vocoded) is 0.209 against 0.057 pooled, a gap of 0.153 with a gate at 0.10. Pooled voice
+  numbers overstate same-speaker discrimination.
+- **Fold 1.** An unseen Korean zero-shot cloner (XTTS) reads EER 0.177 on its own, the worst
+  family of any fold and the closest to the test's threat.
+
+These two are the numbers to beat in run 2, ahead of the pooled score.
+
+**PROBE.** The four all-data models and their soup were scored on one frozen draw of 3,000.
+PROBE's voice side is mostly Chinese, which training drops.
+
+| model | score | EER file | voice | music |
+|---|---|---|---|---|
+| all_data_seed0 | **0.853** | 0.163 | 0.276 | 0.090 |
+| all_data_seed2 | 0.846 | 0.173 | 0.298 | 0.083 |
+| all_data_seed3 | 0.830 | 0.187 | 0.322 | 0.103 |
+| all_data_seed1 | 0.827 | 0.189 | 0.326 | 0.110 |
+| uniform soup of 4 | 0.826 | 0.198 | 0.318 | 0.101 |
+
+The soup does not help. After 54,000 steps on different draw orders, the four runs' LoRA and
+head weights are not in one basin. **The first submission is `all_data_seed0` alone.**
+
+**The first submission.** `/data/project/private/dacon-submissions/first-v3-seed0.zip` is
+1.68 GB (sha256 `f4eba8fbc8f8afa5…`).
+
+- **Server-mirror check.** It was verified in the server-mirror venv: offline load, 8 files,
+  no fallback rows.
+- **Timing.** 200 files × 60 s took 38 s wall on one H200, model load included, with 3 GB RSS.
+  The whole worst-case test set is ≈ 3.5 min on an H200, or ≈ 20–30 min on the L4 at a
+  5–8× slowdown, against a 60-min limit.
