@@ -89,6 +89,13 @@ def main() -> int:
 
     report = predict_files(model, files, ship_cfg, batch_size=args.batch_size,
                            device=args.device)
+    stack_path = model_dir / "file_stack.json"
+    if not args.probe and weights.exists() and stack_path.exists():
+        # docs/training/10 F6: a per-file logistic over the five outputs' logits
+        from processing import file_stack
+        report.probs["FILE_FAKE_PROB"] = [
+            float(x) for x in file_stack.apply(report.probs, file_stack.load(stack_path))]
+        print(f"FILE_FAKE_PROB from {stack_path.name}", flush=True)
     out = write_submission(report, Path(args.out), require_variation=require_variation)
     print(f"wrote {out}: {report.n} rows, {report.n_fallback} fallback row(s)", flush=True)
     return 0

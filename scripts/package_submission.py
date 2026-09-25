@@ -59,6 +59,9 @@ def main() -> int:
                    help="a scored.pt; repeat to ship the uniform soup")
     p.add_argument("--weights", required=True, help="name=DIR[,name=DIR] per frontend")
     p.add_argument("--no-zip", action="store_true")
+    p.add_argument("--file-stack", default=None,
+                   help="a processing.file_stack JSON (scripts/diag/fit_file_stack.py); "
+                        "shipped as model/file_stack.json, applied by script.py")
     args = p.parse_args()
 
     out = pathlib.Path(args.out).resolve()
@@ -77,6 +80,12 @@ def main() -> int:
         model.load_state_dict(checkpoint_soup([str(s) for s in scored]), strict=True)
     save_checkpoint(model, model_dir / "scored.pt")
     (model_dir / "processing.json").write_text(chains.pop(), encoding="utf-8")
+    if args.file_stack:
+        from processing import file_stack
+        stack = file_stack.load(pathlib.Path(args.file_stack))
+        if tuple(stack["features"]) != file_stack.FEATURES:
+            raise SystemExit(f"--file-stack features {stack['features']} are stale")
+        shutil.copy2(args.file_stack, model_dir / "file_stack.json")
     (model_dir / "members.json").write_text(json.dumps([str(s) for s in scored], indent=2),
                                             encoding="utf-8")
 
