@@ -78,3 +78,9 @@ def test_bridge_aborts():
 def test_unknown_cloner_aborts():
     with pytest.raises(PinError, match="not in family_fold"):
         _run([_row("c9", "B", "ko", fam="ko-synth2/newtts", spk="ko-synth2/newtts/Q")])
+
+
+def test_new_family_merged_into_base_atom_aborts():
+    # a new family row that shares a speaker key with a base atom would inherit its fold
+    with pytest.raises(PinError, match="must not inherit"):
+        _run([_row("c5", "B", "ko", fam="ko-synth2/maskgct", spk="s0")])

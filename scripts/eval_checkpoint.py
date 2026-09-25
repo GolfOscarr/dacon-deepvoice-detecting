@@ -51,13 +51,17 @@ def main() -> int:
     p.add_argument("--eval-seed", type=int, default=1234)
     p.add_argument("--raw", action="store_true", help="score the raw weights, not the EMA")
     p.add_argument("--device", default="cuda")
+    p.add_argument("--out-dir", default=None,
+                   help="also write <out-dir>/fold<k>/val_specs.json + val_predictions.parquet "
+                        "(the files scripts/diag/run_breakdown.py reads), e.g. to score a run-2 "
+                        "model on run 1's exact VAL specs (docs/training/11 §4)")
     p.add_argument("--gpu-fraction", type=float, default=0.15,
                    help="cap on this process's share of the GPU: it runs BESIDE a training "
                         "task, and an eval that took the memory killed fold 1 of first-v3 "
                         "(cuFFT alloc failure in the trainer). Launch with srun -n 1.")
     args = p.parse_args()
+    import torch
     if args.device.startswith("cuda"):
-        import torch
         torch.cuda.set_per_process_memory_fraction(args.gpu_fraction)
 
     run_cfg = load_processing_config(args.processing)
@@ -67,10 +71,16 @@ def main() -> int:
     index = ManifestIndex.from_frame(view)
 
     model = build_model(args.model, args.weights)
-    blob = load_train_checkpoint(args.ckpt)
-    model.load_state_dict(blob["state_dict"], strict=True)
-    which = "raw"
-    if not args.raw and blob.get("ema") is not None:
+    blob = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+    if "global_step" not in blob:
+        # a finished model (scored.pt: config + the selected weights), as train.py writes
+        model.load_state_dict(blob["state_dict"], strict=True)
+        blob, which = {"global_step": -1, "ema": None}, "scored.pt"
+    else:
+        blob = load_train_checkpoint(args.ckpt)
+        model.load_state_dict(blob["state_dict"], strict=True)
+        which = "raw"
+    if which != "scored.pt" and not args.raw and blob.get("ema") is not None:
         ema = EMA(model, run_cfg.loop.ema_decay or 0.999)
         ema.load_state_dict(blob["ema"])
         model.load_state_dict(ema.state_dict_for(model), strict=True)
@@ -89,6 +99,15 @@ def main() -> int:
            **{k: float(v) for k, v in dataclasses.asdict(m).items()
               if isinstance(v, (int, float))}}
     print(json.dumps(row, indent=1))
+    if args.out_dir:
+        od = pathlib.Path(args.out_dir) / f"fold{args.fold}"
+        od.mkdir(parents=True, exist_ok=True)
+        (od / "val_specs.json").write_text(json.dumps([s.to_dict() for s in specs]),
+                                           encoding="utf-8")
+        report.predictions.to_parquet(od / "val_predictions.parquet", index=False)
+        (od / "eval_row.json").write_text(json.dumps(row, indent=1), encoding="utf-8")
+        print(f"wrote {od}")
+        return 0
     out = pathlib.Path(args.ckpt).parent / "midrun_eval.jsonl"
     with open(out, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row) + "\n")

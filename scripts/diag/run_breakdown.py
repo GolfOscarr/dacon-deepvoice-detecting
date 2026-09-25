@@ -41,7 +41,10 @@ def eer_threshold(y: np.ndarray, s: np.ndarray) -> float:
     return float(thr[np.argmin(np.abs(fpr - (1 - tpr)))])
 
 
-def features(specs: list[dict], man: pd.DataFrame) -> pd.DataFrame:
+def features(specs: list[dict], man: pd.DataFrame,
+             cloned_in_train: frozenset = frozenset()) -> pd.DataFrame:
+    """`cloned_in_train`: speakers whose clones are TRAIN (fake) in this fold. A VAL real
+    clip of such a speaker measures "the voice I was taught as fake", not F1 (doc 11 M1)."""
     rows = []
     for s in specs:
         r = {"sample_id": s["sample_id"], "structure": s["structure"],
@@ -57,6 +60,9 @@ def features(specs: list[dict], man: pd.DataFrame) -> pd.DataFrame:
                 m = man.loc[comps[0]["file_id"]] if comps[0]["file_id"] in man.index else None
                 for k in ("corpus", "lang", "artifact_family", "source_name"):
                     r[f"{role}_{k}"] = None if m is None else m[k]
+                if role == "voice":
+                    r["voice_spk_cloned_in_train"] = bool(
+                        m is not None and str(m["speaker_ref_id"]) in cloned_in_train)
         rows.append(r)
     return pd.DataFrame(rows)
 
@@ -88,6 +94,11 @@ def main() -> None:
     ap.add_argument("--min-n", type=int, default=30)
     a = ap.parse_args()
     man = pd.read_parquet(a.manifest).set_index("file_id")
+    folds_path = Path(a.manifest).parent / "folds.parquet"
+    fold_of = (pd.read_parquet(folds_path).set_index("file_id")["fold"]
+               if folds_path.exists() else None)
+    clones = (man[man["prompt_speaker"].notna()] if "prompt_speaker" in man.columns
+              else man.iloc[:0])
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     frames, summary = [], {}
@@ -95,7 +106,14 @@ def main() -> None:
         preds = pd.read_parquet(fold_dir / "val_predictions.parquet")
         specs = json.loads((fold_dir / "val_specs.json").read_text())
         preds["sample_id"] = preds["file_id"].str[1:].astype(int)
-        df = preds.merge(features(specs, man), on="sample_id", how="left", validate="1:1")
+        k = int(fold_dir.name[4:])
+        cloned = frozenset()
+        if fold_of is not None and len(clones):
+            f = fold_of.reindex(clones.index)
+            cloned = frozenset(clones.loc[(f.notna() & (f != k)).to_numpy(),
+                                          "prompt_speaker"].astype(str))
+        df = preds.merge(features(specs, man, cloned), on="sample_id", how="left",
+                         validate="1:1")
         df["fold_name"] = fold_dir.name
         frames.append(df)
         ms = dacon_score(df).as_dict()
@@ -108,7 +126,7 @@ def main() -> None:
     tabs = []
     for fold, g in all_df.groupby("fold_name"):
         for head, keys in (("voice", ["voice_corpus", "voice_lang", "voice_artifact_family",
-                                      "cell", "structure"]),
+                                      "cell", "structure", "voice_spk_cloned_in_train"]),
                            ("music", ["music_corpus", "music_artifact_family", "cell"]),
                            ("file", ["cell", "voice_lang"])):
             t = slice_rates(g, head, keys, a.min_n)

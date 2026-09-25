@@ -58,6 +58,15 @@ def extend_folds_pinned(manifest: pd.DataFrame, base: pd.DataFrame,
         raise PinError(f"{len(bridged)} atom(s) join base rows of different folds/slices, "
                        f"e.g. {g}: {sorted(b.loc[b.group == g, 'key'].unique())}")
     inherit = b.drop_duplicates("group").set_index("group")[["slice", "fold"]]
+    # a NEW artifact family must be placed by family_fold, never inherit a base fold
+    base_fams = set(base["artifact_family"].dropna().astype(str))
+    fam = manifest["artifact_family"]
+    is_newfam = (~is_base & fam.notna().to_numpy()
+                 & ~fam.astype(str).isin(base_fams).to_numpy())
+    merged = sorted({g for g in grp[is_newfam] if g in inherit.index})
+    if merged:
+        raise PinError(f"{len(merged)} new-family atom(s) merged into a base atom, e.g. "
+                       f"{merged[0]}; a new family must not inherit a base fold")
 
     # 2. new atoms
     m = manifest.assign(group=grp)
@@ -156,9 +165,10 @@ def extend_folds_pinned(manifest: pd.DataFrame, base: pd.DataFrame,
     if not ob["fold"].astype("Int64").equals(base["fold"].astype("Int64")):
         raise PinError("a base row's fold changed")
     new_probe = sorted(set(o.index[o["slice"] == "probe"]) - set(base.index))
-    placed = set(fold_of_group)
-    if any(g in placed for g in atoms.loc[new_probe]):
-        raise PinError("a newly placed atom landed in PROBE")
+    bad = [f for f in new_probe
+           if inherit["slice"].get(atoms[f]) != "probe"]
+    if bad:
+        raise PinError(f"new row(s) in PROBE outside a base PROBE atom, e.g. {bad[:3]}")
     report = {
         "rows": int(len(out)), "base_rows": int(is_base.sum()),
         "new_rows": int((~is_base).sum()),
