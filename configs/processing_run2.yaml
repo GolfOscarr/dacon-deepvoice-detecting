@@ -48,6 +48,22 @@ draw:
     "proc-encodec|wavefake|": 0.25
     "proc-enhance|wavefake|": 0.25
     "ljspeech/": 25.0
+    # label symmetry of the draw (docs/training/11 §1.1), tuned on _rehearsal-v4b fold 1
+    # (draw_balance.py n=6000): voice-slot repeats real .249 / fake .288, processed .194 / .235
+    "proc-codec-lm/": 14.0
+    "proc-dac/": 14.0
+    "proc-encodec/": 14.0
+    "proc-dsp/": 14.0
+    "proc-enhance/": 14.0
+    "proc-codec-lm|": 0.35
+    "proc-dac|": 0.35
+    "proc-encodec|": 0.35
+    "proc-dsp|": 0.35
+    "proc-enhance|": 0.35
+    "ko-synth2|": 1.5
+    "en-synth2|": 1.1
+    "emilia-ko/": 2.0
+    "emilia-en/": 2.0
   # DRAW-1. The competition's own range; drawn first.
   duration_range: [4.0, 60.0]
   # D-3 / D-21. ONE take per sample, shared by every role and row kind,

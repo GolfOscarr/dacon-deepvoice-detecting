@@ -71,8 +71,38 @@ and `scripts/strategy/draw_balance.py` n = 6,000.
   - Rehearsal: `ko-synth2|` ×3, `proc-*/` (real) ×8, `proc-*|` (fake) ×0.6 give repeats
     0.195 / 0.235 and processed 0.21 / 0.28. **The audit passes** (I1c voice_fake no longer
     fails).
-- **Final weights are tuned after en-synth2 lands.** Its clones add fake-side repetition, so
-  `ko-synth2|` / `en-synth2|` come down.
+- **Tuned on `_rehearsal-v4b`** (v3 + all five round-2 corpora, en-synth2 partial at ~04:45,
+  2026-09-26), 13 candidates, `draw_balance.py` n = 6,000.
+  - With en-synth2 in, the clone weights had to come *down* and Emilia *up* (both are tiny-bucket
+    corpora, one per label). Processed real went up, processed fake down.
+  - **Committed weights (candidate K):**
+
+    | prefix | weight |
+    |---|---|
+    | real `proc-*/` | ×14 |
+    | fake `proc-*|` | ×0.35 |
+    | `ko-synth2|` | ×1.5 |
+    | `en-synth2|` | ×1.1 |
+    | `emilia-ko/`, `emilia-en/` | ×2.0 |
+
+    Kept on top: `wavefake|` ×0.25, `ljspeech/` ×25.
+  - `audit_fold.py` at n = 40,000: **audit ok on fold 0, fold 1 and all-data**; I1c voice_fake
+    passes everywhere.
+
+    | view | repeats real / fake | processed real / fake | ko/en real | ko/en fake |
+    |---|---|---|---|---|
+    | fold 1 | .249 / .288 | .193 / .246 | .56/.44 | .53/.47 |
+    | all-data | — | .180 / .247 | .58/.42 | .53/.47 |
+    | fold 0 | — | .184 / .286 | .58/.42 | .53/.47 |
+
+    Fold 0's fake side lacks all of WaveFake/LJ (in its VAL), which lifts its processed-fake share.
+  - **The two levers are coupled.** Lowering processed-fake further (×0.22, real ×16) closed
+    all-data processed to .187/.232, but opened repeats to .281/.327, and fold 1 to .229/.314.
+    Per-number sampling noise at n = 6,000 is ≈ ±0.01. K was kept because the audit's
+    multivariate shortcut gate (I1c) passes with it on every view.
+  - Residual processed gap ≈ 0.05–0.07 (fold 0: 0.10): documented, not fixed.
+  - Re-check with the audits on the final v4 (step 6); the clone families' domain weights do not
+    grow with their hours (each family is one domain already past `domain_cap`).
   - Targets: |Δ repeats| ≤ 0.04; |Δ processed| ≤ 0.05; ko/en .55/.45 on both labels; audit ok.
   - Checked on fold 0 and on all-data.
 
