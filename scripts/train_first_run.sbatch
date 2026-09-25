@@ -10,7 +10,7 @@
 # Everything shared (manifest, configs, weights) is set below; extra arguments
 # pass through to every task. Output: runs/<run name>/{fold<k>,all_data_seed<s>}.
 
-#SBATCH --job-name=dacon-first
+#SBATCH --job-name=eval-hyeonseop
 #SBATCH --partition=debug
 #SBATCH --array=0-7
 #SBATCH --gres=gpu:1

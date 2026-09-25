@@ -2,9 +2,9 @@
 #SBATCH -p debug
 #SBATCH --gres=gpu:1
 #SBATCH -c 6
-#SBATCH -J ksynth
+#SBATCH -J eval-hyeonseop
 #SBATCH -o /data/project/private/dacon-corpus/interim/ko-synth/_logs/slurm-%x-%j.out
-# usage: sbatch -J ksynth-<family> run_family.sbatch <family> [script args...]
+# usage: sbatch run_family.sbatch <family> [script args...]
 # One Slurm job = one GPU = one shard of one family. Launch several with
 # different --shard i/n to spread a family over GPUs.
 set -u

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH -p debug
-#SBATCH -J music-sep
+#SBATCH -J eval-hyeonseop
 #SBATCH --gres=gpu:2
 #SBATCH -c 16
 #SBATCH --time=06:00:00
