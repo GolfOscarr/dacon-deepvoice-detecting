@@ -258,6 +258,16 @@ class Sampler:
         domain = domain.fillna("__real__")
         counts = domain.map(domain.value_counts())
         w = np.minimum(counts, self.cfg.domain_cap) / counts
+        if self.cfg.domain_weights is not None:
+            # docs/training/10 F1: the longest matching prefix sets the multiplier
+            mult = pd.Series(1.0, index=domain.index)
+            best = pd.Series(-1, index=domain.index)
+            for prefix, m in self.cfg.domain_weights:
+                hit = domain.str.startswith(prefix) & (best < len(prefix))
+                mult[hit], best[hit] = m, len(prefix)
+            w = w * mult
+            if w.sum() <= 0:
+                raise ValueError("draw.domain_weights gives every domain of a pool weight 0")
         return (w / w.sum()).to_numpy(dtype=float)
 
     # -- DRAW-6 / DRAW-7 ----------------------------------------------------- #

@@ -22,6 +22,8 @@ draw:
   # docs/training/07 D-d: per-language shares of each voice pool, equal on
   # the real and fake side. null = off (v1); the first run sets it.
   lang_shares: null
+  # docs/training/10 F1: DOSS-domain prefix -> weight multiplier. null = off.
+  domain_weights: null
   # DRAW-1. The competition's own range; drawn first.
   duration_range: [4.0, 60.0]
   # D-3 / D-21. ONE take per sample, shared by every role and row kind,

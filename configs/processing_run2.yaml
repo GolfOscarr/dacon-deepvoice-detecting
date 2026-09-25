@@ -33,6 +33,21 @@ draw:
   # the fake side only (JSUT) and is removed; `other` is MLAAD's long tail, fake
   # side only, kept small for its generator diversity.
   lang_shares: {ko: 0.55, en: 0.45, zh: 0.0, ja: 0.0, other: 0.0}
+  # docs/training/10 F1: one speaker (LJ) was 39 % of the English FAKE voice
+  # components drawn and 1.2 % of the English REAL ones -- WaveFake's 8 vocoder
+  # domains each hit the DOSS cap, real LJSpeech is one publisher domain -- so "LJ
+  # voice => fake" was learnable. WaveFake (and its S1-processed copies) x 0.25,
+  # real LJSpeech x 25. Measured on v3 + proc + emilia-ko/en + ko-synth2 + a 5-family
+  # en-synth2 stand-in, 20,000 specs (the en-data track, 2026-09-26): LJ voice drawn
+  # real 0.012 -> 0.176, fake 0.391 -> 0.158; WaveFake 0.383 -> 0.154 of English fakes.
+  domain_weights:
+    "wavefake|": 0.25
+    "proc-codec-lm|wavefake|": 0.25
+    "proc-dac|wavefake|": 0.25
+    "proc-dsp|wavefake|": 0.25
+    "proc-encodec|wavefake|": 0.25
+    "proc-enhance|wavefake|": 0.25
+    "ljspeech/": 25.0
   # DRAW-1. The competition's own range; drawn first.
   duration_range: [4.0, 60.0]
   # D-3 / D-21. ONE take per sample, shared by every role and row kind,
