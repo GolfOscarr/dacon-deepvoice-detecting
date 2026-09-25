@@ -537,12 +537,14 @@ class BEATsFrontend(Frontend):
         b, s = wav.shape
         if lengths is None:
             lengths = torch.full((b,), s, dtype=torch.long, device=wav.device)
-        widths = [int(self._frames_for(int(n))) for n in lengths.tolist()]
+        host_lengths = [int(n) for n in lengths.tolist()]
+        widths = [int(self._frames_for(n)) for n in host_lengths]
         t_max = max(widths)
 
         if self.cfg.window_patches is not None:
             if self.cfg.batched_tokens:
-                return self._encode_windowed_batched(wav, lengths, widths, t_max)
+                return self._encode_windowed_batched(wav, lengths, host_lengths, widths,
+                                                     t_max)
             return self._encode_windowed(wav, lengths, widths, t_max)
         out = wav.new_zeros(b, self.N_MELS // self.PATCH, t_max, self.output_dim)
         for i in range(b):
@@ -668,7 +670,8 @@ class BEATsFrontend(Frontend):
             fbank = torch.max(torch.matmul(power, banks.T), eps).log()
         return (fbank - self.FBANK_MEAN) / (2 * self.FBANK_STD)
 
-    def _encode_windowed_batched(self, wav: Tensor, lengths: Tensor, widths: list[int],
+    def _encode_windowed_batched(self, wav: Tensor, lengths: Tensor,
+                                 host_lengths: list[int], widths: list[int],
                                  t_max: int) -> Tensor:
         """`_encode_windowed` without the Python loops over rows and windows.
 
@@ -683,8 +686,8 @@ class BEATsFrontend(Frontend):
         b = wav.shape[0]
         f = self.N_MELS // self.PATCH
         w = int(self.cfg.window_patches)
-        n_mel = [max(1, int(self._mel_frames(max(int(n), self._FRAME_LENGTH))))
-                 for n in lengths.tolist()]
+        n_mel = [max(1, int(self._mel_frames(max(n, self._FRAME_LENGTH))))
+                 for n in host_lengths]
         usable = t_max * self.PATCH
         fbank = self._fbank_batch(wav, max(n_mel))                   # (B, M, 128)
         # 🔴 Per-row sizes come from `lengths` on the device, never from

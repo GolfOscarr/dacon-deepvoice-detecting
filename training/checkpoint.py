@@ -72,9 +72,10 @@ class EMA:
         # the per-tensor loop was a measurable share of a launch-bound step.
         # The same `mul_` then `add_(alpha=)` arithmetic, element for element.
         shadows = list(self._shadow.values())
-        torch._foreach_mul_(shadows, self.decay)
-        torch._foreach_add_(shadows, [state[k].detach().to(torch.float32)
-                                      for k in self._shadow], alpha=1.0 - self.decay)
+        if shadows:                     # the foreach ops refuse an empty list
+            torch._foreach_mul_(shadows, self.decay)
+            torch._foreach_add_(shadows, [state[k].detach().to(torch.float32)
+                                          for k in self._shadow], alpha=1.0 - self.decay)
         for k in self._frozen:
             self._frozen[k] = state[k].clone()
         self.steps += 1
