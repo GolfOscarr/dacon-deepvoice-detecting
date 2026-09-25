@@ -57,15 +57,22 @@ def main() -> int:
     if "lang" in view.columns:
         by_id = view.set_index("file_id")
         counts = {"A": Counter(), "B": Counter()}
+        proc = {"A": Counter(), "B": Counter()}
         for spec in sampler.epoch_specs(min(args.n, 4000), seed=args.seed + 1):
             for c in spec.components:
                 pool = by_id.at[c.file_id, "pool"]
                 if c.role == "voice" and c.snr_db is None and pool in counts:
                     counts[pool][by_id.at[c.file_id, "lang"] or "?"] += 1
+                    proc[pool][str(by_id.at[c.file_id, "corpus"]) == "proc"] += 1
         for pool, cnt in counts.items():
             tot = sum(cnt.values()) or 1
             shares = ", ".join(f"{k} {v / tot:.3f}" for k, v in cnt.most_common(8))
             print(f"drawn voice lang, pool {pool} ({'fake' if pool == 'B' else 'real'}): {shares}")
+        # docs/training/09 S1: processing must not predict the label
+        for pool, cnt in proc.items():
+            tot = sum(cnt.values()) or 1
+            print(f"drawn voice share processed (corpus proc), pool {pool}: "
+                  f"{cnt[True] / tot:.3f}")
     return 0 if report.ok else 1
 
 

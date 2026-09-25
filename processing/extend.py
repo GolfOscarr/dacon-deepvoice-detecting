@@ -215,19 +215,138 @@ def _common_voice_ko(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
         "domain_key": None, "prompt_speaker": None})
 
 
+# --------------------------------------------------------------------------- #
+# round 2 (docs/training/09): readers for the synthesis tracks' contracts
+
+
+def _metadata(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    return _kept(pd.read_csv(path))
+
+
+def _synth_families(root: Path, corpus: str, lang: str) -> pd.DataFrame:
+    """`interim/<corpus>/<family>/metadata.csv` in round 1's ko-synth contract (+ kept)."""
+    frames = []
+    for meta in sorted((root / "interim" / corpus).glob("*/metadata.csv")):
+        d = _metadata(meta)
+        if d.empty:
+            continue
+        fam = meta.parent.name
+        d["path"] = f"interim/{corpus}/{fam}/" + d["file"].astype(str)
+        d["family"] = f"{corpus}/{fam}"
+        prompt = d.get("prompt_speaker", pd.Series("", index=d.index)).fillna("").astype(str)
+        d["prompt_speaker"] = prompt.where(prompt != "", None)
+        d["speaker_ref_id"] = np.where(prompt != "", f"{corpus}/{fam}/" + prompt,
+                                       f"{corpus}/{fam}")
+        frames.append(d)
+    if not frames:
+        return pd.DataFrame(columns=["path"])
+    d = pd.concat(frames, ignore_index=True)
+    return pd.DataFrame({
+        "file_id": corpus + ":" + d["path"].str.replace(f"interim/{corpus}/", "", regex=False),
+        "path": d["path"], "artifact_family": d["family"], "source_name": d["family"],
+        "speaker_ref_id": d["speaker_ref_id"],
+        "domain_key": corpus + "|" + d["family"].str.split("/").str[-1],
+        "prompt_speaker": d["prompt_speaker"], "lang": lang})
+
+
+def _ko_synth2(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    return _synth_families(root, "ko-synth2", "ko")
+
+
+def _zh_synth(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    return _synth_families(root, "zh-synth", "zh")
+
+
+def _emilia_ko(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    """S3: real conversational Korean. `speaker_ref_id` is Emilia's source key."""
+    d = _metadata(root / "interim" / "emilia-ko" / "metadata.csv")
+    if d.empty:
+        return pd.DataFrame(columns=["path"])
+    spk = d["speaker_ref_id"].astype(str)
+    return pd.DataFrame({
+        "file_id": "emilia-ko:" + d["file"].astype(str),
+        "path": "interim/emilia-ko/" + d["file"].astype(str),
+        "artifact_family": None, "source_name": spk, "speaker_ref_id": spk,
+        "domain_key": None, "prompt_speaker": None, "lang": "ko"})
+
+
+def _proc(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    """S1: processed audio, label-preserving (DACON #417333 A1). A processed file
+    keeps its SOURCE row's pool, generator family, speaker atom and language, so
+    it shares a fold with its source; its `source_name` / `domain_key` name the
+    processing family, so the draw weighs it as its own domain."""
+    d = _metadata(root / "interim" / "proc" / "metadata.csv")
+    if d.empty:
+        return pd.DataFrame(columns=["path"])
+    src = v2.set_index("file_id")
+    sid = d["source_file_id"].astype(str)
+    missing = sorted(set(sid) - set(src.index))
+    if missing:
+        raise ValueError(f"proc: {len(missing)} source_file_id(s) not in the base manifest, "
+                         f"e.g. {missing[:3]}")
+    s = src.loc[sid]
+    fam = d["family"].astype(str).to_numpy()
+    pool = s["pool"].to_numpy()
+    fake = np.isin(pool, ["B", "D"])
+    base_src = s["source_name"].astype(str).to_numpy()
+    base_dom = s["domain_key"].where(s["domain_key"].notna(), s["source_name"]).astype(str)
+    return pd.DataFrame({
+        "file_id": "proc:" + d["file"].astype(str),
+        "path": "interim/proc/" + d["file"].astype(str),
+        "pool": pool,
+        "artifact_family": np.where(fake, s["artifact_family"].to_numpy(), None),
+        "source_name": [f"{f}/{b}" for f, b in zip(fam, base_src)],
+        "speaker_ref_id": s["speaker_ref_id"].to_numpy(),
+        "domain_key": np.where(fake, [f"{f}|{b}" for f, b in zip(fam, base_dom)], None),
+        "prompt_speaker": None, "lang": s["lang"].to_numpy()})
+
+
+def _ctrsvdd(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    """S5: singing. Bona fide -> pool A, deepfake -> pool B; one singer's real and
+    fake takes share a speaker atom, so they share a fold."""
+    d = _metadata(root / "interim" / "ctrsvdd" / "metadata.csv")
+    if d.empty:
+        return pd.DataFrame(columns=["path"])
+    fake = d["label"].astype(str).eq("deepfake").to_numpy()
+    attack = d.get("attack", pd.Series("", index=d.index)).fillna("").astype(str)
+    spk = "ctrsvdd/" + d["speaker"].astype(str)
+    fam = "ctrsvdd/" + attack
+    return pd.DataFrame({
+        "file_id": "ctrsvdd:" + d["file"].astype(str),
+        "path": d["file"].astype(str),
+        "pool": np.where(fake, "B", "A"),
+        "artifact_family": np.where(fake, fam, None),
+        "source_name": np.where(fake, fam, spk),
+        "speaker_ref_id": spk.to_numpy(),
+        "domain_key": np.where(fake, "ctrsvdd|" + attack, None),
+        "prompt_speaker": None,
+        "lang": d.get("lang", pd.Series(None, index=d.index)).to_numpy()})
+
+
 NEW_CORPORA = (
     NewCorpus("ko-synth", "B", _ko_synth),
     NewCorpus("sonics-sep", "D", _sonics_sep),
     NewCorpus("realmusic-sep", "C", _realmusic_sep),
     NewCorpus("libritts-r", "A", _libritts_r),
     NewCorpus("common-voice-ko", "A", _common_voice_ko),
+    # round 2 (docs/training/09); "*" = the reader gives a per-row `pool`
+    NewCorpus("proc", "*", _proc),
+    NewCorpus("emilia-ko", "A", _emilia_ko),
+    NewCorpus("ko-synth2", "B", _ko_synth2),
+    NewCorpus("zh-synth", "B", _zh_synth),
+    NewCorpus("ctrsvdd", "*", _ctrsvdd),
 )
 
 
 def _frame(rows: pd.DataFrame, probe: pd.DataFrame, nc: NewCorpus) -> pd.DataFrame:
-    labels = POOL_LABELS[nc.pool]
-    fake = nc.pool in ("B", "D")
     n = len(rows)
+    pools = (rows["pool"].to_numpy() if "pool" in rows.columns
+             else np.array([nc.pool] * n, dtype=object))
+    if nc.pool == "*" and "pool" not in rows.columns:
+        raise ValueError(f"{nc.name}: the reader must give a per-row pool")
+    fake = np.isin(pools, ["B", "D"])
     m = pd.DataFrame({
         "file_id": rows["file_id"].to_numpy(), "path": rows["path"].to_numpy(),
         "sha256": probe["sha256"].to_numpy(), "row_kind": "component", "pool": nc.pool,
@@ -236,19 +355,20 @@ def _frame(rows: pd.DataFrame, probe: pd.DataFrame, nc: NewCorpus) -> pd.DataFra
         "orig_sr": probe["orig_sr"].to_numpy(), "orig_channels": probe["orig_channels"].to_numpy(),
         "container": rows["path"].str.rsplit(".", n=1).str[-1].str.lower().to_numpy(),
     })
-    for col, val in zip(("label_voice_present", "label_music_present",
-                         "label_voice_fake", "label_music_fake"), labels):
-        m[col] = pd.array([val] * n, dtype="Int64")
-    m["artifact_family"] = rows["artifact_family"].to_numpy() if fake else None
+    m["pool"] = pools
+    for i, col in enumerate(("label_voice_present", "label_music_present",
+                             "label_voice_fake", "label_music_fake")):
+        m[col] = pd.array([POOL_LABELS[p][i] for p in pools], dtype="Int64")
+    m["artifact_family"] = np.where(fake, rows["artifact_family"].to_numpy(), None)
     m["source_name"] = rows["source_name"].to_numpy()
     m["speaker_ref_id"] = rows["speaker_ref_id"].to_numpy()
     m["pair_id"] = None
     m["dup_group"] = None
-    m["domain_key"] = rows["domain_key"].to_numpy() if fake else None
+    m["domain_key"] = np.where(fake, rows["domain_key"].to_numpy(), None)
     m["slice"] = "train"
     m["fold"] = pd.array([pd.NA] * n, dtype="Int64")
     m["validity_mask_ref"] = None
-    m["label_confidence"] = "exact" if fake else "reported"
+    m["label_confidence"] = np.where(fake, "exact", "reported")
     m["aug_strength"] = 1.0
     m["corpus"] = nc.name
     m["noise_has_speech"] = False
@@ -256,22 +376,25 @@ def _frame(rows: pd.DataFrame, probe: pd.DataFrame, nc: NewCorpus) -> pd.DataFra
     m["stage"] = rows["path"].str.split("/", n=1).str[0].to_numpy()
     m["reassigned_from"] = None
     m["prompt_speaker"] = rows["prompt_speaker"].to_numpy()
+    m["lang"] = rows["lang"].to_numpy() if "lang" in rows.columns else None
     return m
 
 
 def extend_manifest(v2: pd.DataFrame, corpus_root: Path, *, component_floor_s: float,
                     only: tuple[str, ...] | None = None,
-                    workers: int = 32) -> tuple[pd.DataFrame, dict[str, Any]]:
+                    workers: int = 32, scheme_version: str = SCHEME_VERSION) -> tuple[pd.DataFrame, dict[str, Any]]:
     """``(v3 manifest, report)``. v2's rows are copied unchanged but for
     `scheme_version`, `lang` and an empty `prompt_speaker`."""
-    report: dict[str, Any] = {"scheme_version": SCHEME_VERSION, "v2_rows": int(len(v2)),
+    report: dict[str, Any] = {"scheme_version": scheme_version, "base_rows": int(len(v2)),
                               "new": {}}
     base = v2.copy()
-    base["prompt_speaker"] = None
+    if "prompt_speaker" not in base.columns:
+        base["prompt_speaker"] = None
+    have = set(base["corpus"].astype(str))
     parts = [base]
     seen_sha = set(v2["sha256"].astype(str))
     for nc in NEW_CORPORA:
-        if only is not None and nc.name not in only:
+        if (only is not None and nc.name not in only) or nc.name in have:
             continue
         rows = nc.reader(corpus_root, v2)
         if rows.empty:
@@ -294,8 +417,9 @@ def extend_manifest(v2: pd.DataFrame, corpus_root: Path, *, component_floor_s: f
             "speakers": int(new["speaker_ref_id"].nunique())}
         parts.append(new)
     m = pd.concat(parts, ignore_index=True)
-    m["scheme_version"] = SCHEME_VERSION
-    m["lang"] = lang_of(m)
+    m["scheme_version"] = scheme_version
+    known = m["lang"] if "lang" in m.columns else pd.Series(None, index=m.index)
+    m["lang"] = known.where(known.notna(), lang_of(m)).where(m["pool"].isin(["A", "B"]), None)
     m["cell"] = m["cell"].astype("Int64")
     m["fold"] = m["fold"].astype("Int64")
     m = m[list(REQUIRED_COLUMNS) + list(EXTRA_COLUMNS) + list(NEW_COLUMNS)]
