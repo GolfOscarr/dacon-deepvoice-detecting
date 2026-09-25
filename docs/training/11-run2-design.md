@@ -212,9 +212,8 @@ The reasons:
 1. **GPU:** batched BEATs fbank/patch/window path, flag-gated, CPU-verified to ~1e-7 against the
    row loop. Also a foreach EMA (bitwise) and loss parts kept on the device (−11 syncs/step).
    GPU numbers are **PENDING** (speedup track, ~02:30–10:00).
-2. **CPU:** one exclusive Slurm job holds the node (owner rule): `-J eval-hyeonseop --exclusive
-   --gres=gpu:8`. It runs 8 tasks as srun steps. Each task gets its GPU, its physical cores and
-   their siblings, and 14–16 render workers. Launcher: `scripts/train_run2.sbatch` (speedup track).
+2. **CPU:** the HT-sibling plan was dropped after measurement (below). 7 render workers per
+   task, with collate in the workers.
 3. **Measured since the draft** (speedup `9be8b4b`, one H200, saved batches, no render load):
 
    | path | s/step | peak memory |
@@ -225,10 +224,25 @@ The reasons:
 
    - The GPU is ~97 % busy in isolation, so run 1's 53 % was CPU contention and syncs.
    - 0.785 s/step = 20.4 samples/s, which matches the render supply on the HT siblings (20–22/s).
-   - Config for run 2: `grad_checkpointing: false`, `render_on_ht_siblings: true`,
-     `render_workers` 14–16, **one physical core reserved for the trainer** (review M4: the
-     workers otherwise share the trainer's threads).
-   - Verified in the first 10 min of the run: s/step and `data_wait_s`.
+   - **Final, in real `train.py`** (speedup, one task, fold 0, v3, steps 150–400):
+
+     | setup | s/step | samples/s |
+     |---|---|---|
+     | run-1 path | 1.14 | 14.0 |
+     | batched tokens + ckpt on + worker collate | 1.05 | 15.2 |
+     | **batched tokens, ckpt OFF** | **0.86–1.0** | 16–18.6 |
+
+     Peak with ckpt off: 98.5 GiB; 102.7 GiB on a synthetic 16 × 60 s worst case.
+   - **Measured dead ends:**
+     - batch 32 (15.5 samples/s);
+     - `torch.compile` per layer;
+     - **render workers on the HT siblings** (0.92–0.97 s/step, no better than 7 workers:
+       they slow the main process).
+   - **Run-2 config** (`83e08ea`): `configs/c_run2.yaml` (`batched_tokens: true`),
+     `grad_checkpointing: false`, `render_workers: 7`, batch 16. The HT flag stays off.
+   - So **no exclusive node job**: `scripts/train_run2.sbatch` is an 8-task array like run 1's.
+   - **UNVERIFIED:** CPU contention with 8 tasks at once (measured with one). Check s/step and
+     `data_wait_s` in the first 10 min.
 4. **No DDP for run 2.**
    - DDP does not raise the node's total throughput: every GPU still needs its own ~14–22
      samples/s of rendering, and that is the binding limit.
