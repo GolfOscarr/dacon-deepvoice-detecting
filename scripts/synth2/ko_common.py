@@ -240,21 +240,25 @@ def make_jobs(family: str, n_files: int, seed: int, utts: list[Utt], *,
     return jobs
 
 
-def parse_shard(s: str) -> tuple[int, int]:
+def parse_shard(s: str) -> tuple[int, int, int]:
+    """``i/n`` or ``i/n@lo``: jobs with idx % n == i (and idx >= lo). ``@lo`` adds a shard
+    disjoint from running ``i/n`` shards over a longer job list (--n-files beyond theirs):
+    make_jobs draws sequentially, so the first N jobs of a longer list are the same jobs."""
+    s, _, lo = s.partition("@")
     i, n = (int(x) for x in s.split("/"))
     assert 0 <= i < n
-    return i, n
+    return i, n, int(lo or 0)
 
 
 def shard_jobs(jobs: list[Job], shard: str) -> list[Job]:
-    i, n = parse_shard(shard)
-    return [j for j in jobs if j.idx % n == i]
+    i, n, lo = parse_shard(shard)
+    return [j for j in jobs if j.idx % n == i and j.idx >= lo]
 
 
 def in_shard(fname: str, shard: str) -> bool:
-    i, n = parse_shard(shard)
+    i, n, lo = parse_shard(shard)
     m = re.search(r"_(\d{6})\.wav$", fname)
-    return bool(m) and int(m.group(1)) % n == i
+    return bool(m) and int(m.group(1)) % n == i and int(m.group(1)) >= lo
 
 
 # --------------------------------------------------------------------------- output
