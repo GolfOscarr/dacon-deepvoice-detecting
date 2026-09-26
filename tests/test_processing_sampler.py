@@ -649,7 +649,7 @@ def test_an_unregistered_augment_is_refused_at_construction():
     {"container": {"wav_64": 1.0}},
     {"container": {"wav": 0.6, "flac": 0.6}},
     {"channels": {"mono": 0.5, "left": 0.5}},
-    {"telephone": {"none": 0.5, "gsm": 0.5}},
+    {"telephone": {"none": 0.5, "g729": 0.5}},
     {"telephone_hz": 0},
 ])
 def test_malformed_normalize_menus_are_rejected(bad):

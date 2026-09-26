@@ -49,7 +49,7 @@ from training.registries import augment_chain
 from training.spec import SampleSpec
 
 __all__ = [
-    "CODEC_CONTAINERS", "NORMALIZE_KEYS",
+    "CODEC_CONTAINERS", "NORMALIZE_KEYS", "PHONE_CODECS",
     "DecodeError", "ManifestIndex", "RenderConfig", "RenderedSample",
     "frame_intervals_for", "load_audio", "render", "resample_poly_to",
 ]
@@ -58,8 +58,37 @@ __all__ = [
 #: OPUS, AMR-NB, GSM and G.722 are named in A-S3/A-S4 but are not wired,
 #: because each needs its encoder delay verified the way MP3's is below and the
 #: local ffmpeg does not carry every encoder. The 8 kHz telephone leg is
-#: implemented (see `_normalize`); the narrowband *codecs* are not.
+#: implemented (see `_normalize`), and so are the phone codecs in
+#: `PHONE_CODECS` -- as a leg of the telephone draw, not as containers.
 CODEC_CONTAINERS = ("wav", "flac", "mp3")
+
+#: docs/training/15 N4 -- the phone-channel codecs, ``name -> (codec rate,
+#: bitrates in kbps or () for a fixed-rate codec)``. Applied by
+#: `_phone_roundtrip` (the ``phone_codec`` / ``phone_bitrate`` keys).
+#:
+#: Critical: each one's delay is MEASURED, for the reason
+#: `_codec_roundtrip` gives -- an uncancelled delay shifts the audio against
+#: ``frame_intervals``. Measured by cross-correlation on 4-12 s of YODAS
+#: speech (2026-09-27, ffmpeg 4.4.2 / libsndfile 1.2.2), and pinned by
+#: tests/test_codec_roundtrip.py to within 1 ms:
+#:
+#: * ``gsm`` -- GSM 06.10 full rate, 13 kbps, 8 kHz, through libsndfile's own
+#:   coder (WAV/GSM610, no subprocess). Lag **0**; the decode is padded at
+#:   the END to the 320-sample block, which is trimmed.
+#: * ``opus`` -- libopus via ffmpeg, ``-application voip``, 16 kHz in, Ogg out,
+#:   decoded by libsndfile at 16 kHz. The encoder's lookahead (312 samples at
+#:   48 kHz) is cancelled by the Ogg ``pre-skip`` header, which libsndfile
+#:   honours: lag **0** at 12-24 kbps and **-1** sample (0.06 ms, the phase of
+#:   the narrowband mode) at 8 kbps; the length comes back exact.
+#:
+#: Caveat: AMR-NB and AMR-WB (15 N4) are NOT here: the ffmpeg on this machine
+#: has their decoders (``amrnb``, ``amrwb``) but no encoder
+#: (``libopencore_amrnb`` / ``libvo_amrwbenc`` are not compiled in), and a
+#: codec whose delay cannot be measured may not be wired.
+PHONE_CODECS: dict[str, tuple[int, tuple[int, ...]]] = {
+    "gsm": (8000, ()),
+    "opus": (16000, (6, 8, 10, 12, 16, 20, 24, 32)),
+}
 
 #: The keys ``SampleSpec.normalize`` may carry. Unknown keys are an error, not a
 #: warning -- ``models.config``'s rule, for the same reason: a typo'd knob that
@@ -73,6 +102,7 @@ CODEC_CONTAINERS = ("wav", "flac", "mp3")
 #: typo'd-knob failure this frozenset exists to prevent.
 NORMALIZE_KEYS = frozenset({
     "container", "bitrate", "channels", "telephone_hz", "companding",
+    "phone_codec", "phone_bitrate",
 })
 
 
@@ -467,6 +497,66 @@ def _codec_roundtrip(wav: np.ndarray, sample_rate: int, container: str,
     return np.ascontiguousarray(out.T, dtype=np.float32)
 
 
+#: The trailing padding a phone codec may add, per codec, in samples at its
+#: rate: two GSM610 blocks (the measured maximum was 579 at 8 kHz), none for
+#: Ogg Opus (its end is trimmed by the granule position). More than this is
+#: a delay no longer being cancelled, and raises -- `_PAD_TOL`'s rule.
+_PHONE_PAD_TOL = {"gsm": 640, "opus": 1}
+
+
+def _phone_roundtrip(wav: np.ndarray, rate: int, codec: str,
+                     bitrate: int | None) -> np.ndarray:
+    """docs/training/15 N4 -- one phone codec, encoded and decoded at ``rate``.
+
+    A phone channel is mono: the channels are averaged, coded once, and the
+    result copied back to every channel (a phone recording saved as stereo
+    is dual mono). The length is preserved exactly; the measured delays are
+    in `PHONE_CODECS`, and the length is checked, not trusted.
+    """
+    if codec not in PHONE_CODECS:
+        raise ValueError(f"phone_codec must be one of {sorted(PHONE_CODECS)}, got {codec!r}")
+    codec_rate, rates = PHONE_CODECS[codec]
+    if rate != codec_rate:
+        raise ValueError(f"phone_codec {codec!r} runs at {codec_rate} Hz, got {rate} Hz")
+    if rates and int(bitrate or 0) not in rates:
+        raise ValueError(f"phone_codec {codec!r}: phone_bitrate must be one of {rates} "
+                         f"kbps, got {bitrate!r}")
+    if not rates and bitrate is not None:
+        raise ValueError(f"phone_codec {codec!r} is fixed-rate; phone_bitrate must be unset")
+    channels, n = wav.shape
+    mono = np.clip(wav.mean(axis=0), -1.0, 1.0).astype(np.float32)
+    if codec == "gsm":
+        buf = io.BytesIO()
+        sf.write(buf, mono, rate, format="WAV", subtype="GSM610")
+        buf.seek(0)
+        out, sr = sf.read(buf, dtype="float32")
+    else:
+        buf = io.BytesIO()
+        sf.write(buf, mono, rate, format="WAV", subtype="FLOAT")
+        # Critical: +bitexact, or the Ogg muxer draws a random stream serial
+        # and the bytes (not the audio) differ run to run.
+        enc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+             "-i", "pipe:0", "-c:a", "libopus", "-b:a", f"{int(bitrate)}k",
+             "-application", "voip", "-fflags", "+bitexact", "-flags:a", "+bitexact",
+             "-f", "ogg", "pipe:1"],
+            input=buf.getvalue(), capture_output=True, check=False)
+        if enc.returncode != 0 or not enc.stdout:
+            raise DecodeError(f"ffmpeg could not encode to opus: "
+                              f"{enc.stderr.decode('utf-8', 'replace')[-400:]}")
+        out, sr = sf.read(io.BytesIO(enc.stdout), dtype="float32")
+    if int(sr) != rate:                                       # pragma: no cover
+        raise DecodeError(f"{codec} round-trip returned {sr} Hz, expected {rate}")
+    extra = out.shape[0] - n
+    if extra < 0 or extra >= _PHONE_PAD_TOL[codec]:
+        raise DecodeError(
+            f"{codec} round-trip returned {out.shape[0]} samples for {n} ({extra:+d}): "
+            f"beyond its trailing-padding tolerance, so the codec delay is no longer "
+            f"being cancelled -- the audio has moved relative to frame_intervals")
+    out = np.ascontiguousarray(out[:n], dtype=np.float32)[None, :]
+    return np.repeat(out, channels, axis=0)
+
+
 def _normalize(wav: np.ndarray, draw: Mapping[str, Any], sample_rate: int,
                resampler: Callable[[np.ndarray, int, int], np.ndarray]) -> np.ndarray:
     """A-S1 / A-S3 / A-S4 -- what the organizers did to the test set.
@@ -487,12 +577,21 @@ def _normalize(wav: np.ndarray, draw: Mapping[str, Any], sample_rate: int,
                          f"allowed: {sorted(NORMALIZE_KEYS)}")
 
     telephone_hz = draw.get("telephone_hz")
+    phone_codec = draw.get("phone_codec")
+    if draw.get("phone_bitrate") is not None and not phone_codec:
+        raise ValueError("phone_bitrate needs phone_codec")
     if telephone_hz:
         # A-S4: 16k -> 8k -> 16k. The test set explicitly contains 전화채널 audio.
         n = wav.shape[-1]
         wav = resampler(wav, sample_rate, int(telephone_hz))
         companding = draw.get("companding")
-        if companding == "ulaw":
+        if phone_codec:
+            if companding is not None:
+                raise ValueError("companding and phone_codec are two telephone legs; "
+                                 "a draw takes one")
+            wav = _phone_roundtrip(wav, int(telephone_hz), phone_codec,
+                                   draw.get("phone_bitrate"))
+        elif companding == "ulaw":
             wav = _mu_law(wav)
         elif companding == "alaw":
             wav = _a_law(wav)
@@ -504,6 +603,9 @@ def _normalize(wav: np.ndarray, draw: Mapping[str, Any], sample_rate: int,
     elif draw.get("companding"):
         raise ValueError("companding needs telephone_hz -- the 8 kHz leg is what "
                          "makes it the A-S4 chain and not a lone quantiser")
+    elif phone_codec:
+        # a wideband phone codec (opus) codes at the render rate, no 8 kHz leg
+        wav = _phone_roundtrip(wav, sample_rate, phone_codec, draw.get("phone_bitrate"))
 
     channels = draw.get("channels")
     if channels == "mono":

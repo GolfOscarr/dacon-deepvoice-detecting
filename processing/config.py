@@ -33,7 +33,7 @@ from training.config import RESAMPLERS, _cell_mix_from, _loop_from_dict
 from training.folds import FoldConfig
 from training.loop import LoopConfig
 from training.registries import AUGMENT
-from training.render import CODEC_CONTAINERS
+from training.render import CODEC_CONTAINERS, PHONE_CODECS
 from training.sampler import CellMix, check_mix, composed_fractions
 
 __all__ = ["AUGMENTS_V1", "NORMALIZE_MENU_V1", "RESAMPLERS", "SECTIONS", "AugmentSpec",
@@ -136,7 +136,9 @@ class NormalizeMenu:
 
     ``container`` options are ``wav``, ``flac`` and ``mp3_<kbps>``;
     ``telephone`` options are ``none``, ``ulaw``, ``alaw`` (8 kHz + companding)
-    and ``plain`` (the 8 kHz leg alone). The draw's keys are a subset of
+    and ``plain`` (the 8 kHz leg alone), and -- docs/training/15 N4 -- the phone
+    codecs of ``training.render.PHONE_CODECS``: ``gsm`` (the 8 kHz leg + GSM-FR)
+    and ``opus_<kbps>`` (VoIP Opus at 16 kHz). The draw's keys are a subset of
     ``training.render.NORMALIZE_KEYS``.
     """
 
@@ -154,7 +156,20 @@ class NormalizeMenu:
                 raise ValueError(
                     f"normalize_menu.container: {key!r} is not wav | flac | mp3_<kbps>")
         _distribution("channels", self.channels, {"mono", "stereo"})
-        _distribution("telephone", self.telephone, {"none", "ulaw", "alaw", "plain"})
+        _distribution("telephone", self.telephone, None)
+        for key in self.telephone:
+            if key in ("none", "ulaw", "alaw", "plain"):
+                continue
+            codec, _, rate = key.partition("_")
+            known = PHONE_CODECS.get(codec)
+            if known is None or bool(known[1]) != bool(rate) \
+                    or (rate and not (rate.isdigit() and int(rate) in known[1])):
+                raise ValueError(
+                    f"normalize_menu.telephone: {key!r} is not none | ulaw | alaw | plain | "
+                    f"gsm | opus_<kbps in {PHONE_CODECS['opus'][1]}>")
+            if codec == "gsm" and self.telephone_hz != PHONE_CODECS["gsm"][0]:
+                raise ValueError(f"normalize_menu.telephone: gsm needs telephone_hz "
+                                 f"{PHONE_CODECS['gsm'][0]}, got {self.telephone_hz}")
         if self.telephone_hz <= 0:
             raise ValueError(f"telephone_hz must be > 0, got {self.telephone_hz}")
 

@@ -744,6 +744,110 @@ def rir(wav: Tensor, rng: np.random.Generator, *,
     return out.to(wav.dtype).to(wav.device)
 
 
+#: docs/training/15 N4 -- the augments below assume the render rate, as `rir`
+#: does (the registry's probe runs at 16 kHz too).
+_AUG_SR = 16_000
+
+
+@AUGMENT.register("packet_loss")
+def packet_loss(wav: Tensor, rng: np.random.Generator, *,
+                rate: float | None = None, rate_range: tuple[float, float] = (0.01, 0.05),
+                frame_ms: float = 20.0, repeat_prob: float = 0.5) -> Tensor:
+    """docs/training/15 N4 -- VoIP packet loss: each ``frame_ms`` frame is lost
+    with probability ``rate`` and concealed IN PLACE, by zero fill or by
+    repeating the previous (already concealed) frame -- one concealment per
+    sample, repeat with ``repeat_prob``. A lost first frame is zero-filled.
+
+    Caveat: the class-3 edit the time-invariance contract names is a
+    concealment that stretches or splices; this one only replaces a frame's
+    samples where they stand, so every sample keeps its time and the frame
+    targets stay true (the registry's probe measures lag 0). The loss pattern
+    is drawn from ``rng`` -- the spec's render stream -- so it is fixed per
+    spec. ``rate`` drawn at spec time wins.
+    """
+    if rate is None:
+        rate = float(rng.uniform(*rate_range))
+    repeat = bool(rng.random() < repeat_prob)
+    frame = max(1, int(round(frame_ms * _AUG_SR / 1000.0)))
+    n = wav.shape[-1]
+    n_frames = -(-n // frame)
+    lost = np.flatnonzero(rng.random(n_frames) < rate)
+    if not len(lost):
+        return wav
+    out = wav.clone()
+    for i in lost.tolist():
+        a, b = i * frame, min(n, (i + 1) * frame)
+        if repeat and i > 0:
+            out[..., a:b] = out[..., a - frame:a - frame + (b - a)]
+        else:
+            out[..., a:b] = 0.0
+    return out
+
+
+@AUGMENT.register("compression")
+def compression(wav: Tensor, rng: np.random.Generator, *,
+                threshold_db: float | None = None,
+                threshold_db_range: tuple[float, float] = (-12.0, 0.0),
+                ratio: float | None = None, ratio_range: tuple[float, float] = (2.0, 8.0),
+                release_ms: float | None = None,
+                release_ms_range: tuple[float, float] = (50.0, 300.0),
+                attack_ms: float = 5.0,
+                target_dbfs: float | None = None,
+                target_dbfs_range: tuple[float, float] = (-26.0, -14.0)) -> Tensor:
+    """docs/training/15 N4 -- dynamic-range compression then loudness
+    normalisation, the post-process a phone, a platform or an editor applies
+    (REAL under A1: it happens to genuine recordings).
+
+    A feed-forward compressor, channels linked: the level is the RMS of 1 ms
+    blocks, the static curve takes ``(level - threshold) * (1 - 1 / ratio)``
+    off above ``threshold`` (``threshold_db`` is relative to the file's own
+    RMS, so the curve bites the same way whatever the gain before it), and the
+    gain is smoothed with a ``attack_ms`` / ``release_ms`` one-pole ballistic.
+    Then the file is scaled to ``target_dbfs`` RMS, capped so the peak stays
+    at or below -0.1 dBFS (a normaliser does not clip).
+
+    Critical: the gain multiplies the undelayed signal, interpolated from the
+    block centres -- a level-dependent gain, never a shift (probe: lag 0).
+    Scalars drawn at spec time win; otherwise they are drawn here.
+    """
+    if threshold_db is None:
+        threshold_db = float(rng.uniform(*threshold_db_range))
+    if ratio is None:
+        ratio = float(rng.uniform(*ratio_range))
+    if release_ms is None:
+        release_ms = float(rng.uniform(*release_ms_range))
+    if target_dbfs is None:
+        target_dbfs = float(rng.uniform(*target_dbfs_range))
+    x = wav.detach().cpu().double().numpy()
+    n = x.shape[-1]
+    block = _AUG_SR // 1000
+    n_blocks = -(-n // block)
+    power = np.zeros(n_blocks * block)
+    power[:n] = (x ** 2).mean(axis=0)
+    level = 10.0 * np.log10(power.reshape(n_blocks, block).mean(axis=1) + 1e-12)
+    thr = 10.0 * np.log10(float((x ** 2).mean()) + 1e-12) + threshold_db
+    want = -np.maximum(level - thr, 0.0) * (1.0 - 1.0 / max(float(ratio), 1.0))
+    a_att = math.exp(-1.0 / max(attack_ms, 1e-3))          # per 1 ms block
+    a_rel = math.exp(-1.0 / max(release_ms, 1e-3))
+    gain_db = np.empty(n_blocks)
+    g = 0.0
+    for i, w in enumerate(want.tolist()):
+        coef = a_att if w < g else a_rel                   # falling gain = attack
+        g = coef * g + (1.0 - coef) * w
+        gain_db[i] = g
+    centres = np.arange(n_blocks) * block + (block - 1) / 2.0
+    gain = 10.0 ** (np.interp(np.arange(n), centres, gain_db) / 20.0)
+    y = x * gain
+    rms = math.sqrt(float((y ** 2).mean()))
+    peak = float(np.abs(y).max()) if y.size else 0.0
+    if rms > 1e-9:
+        scale = 10.0 ** (target_dbfs / 20.0) / rms
+        if peak * scale > 10.0 ** (-0.1 / 20.0):
+            scale = 10.0 ** (-0.1 / 20.0) / peak
+        y = y * scale
+    return torch.from_numpy(y).to(wav.dtype).to(wav.device)
+
+
 # --------------------------------------------------------------------------- #
 # Filters -- offline, sidecar, never audio
 #

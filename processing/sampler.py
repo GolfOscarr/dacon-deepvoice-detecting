@@ -61,6 +61,7 @@ import pandas as pd
 from processing.config import DrawConfig
 from training.manifest import POOL_IS_FAKE, ROLE_POOLS
 from training.registries import AUGMENT
+from training.render import PHONE_CODECS
 from training.spec import CELL_TABLE, ComponentDraw, SampleSpec, spec_rng
 
 __all__ = ["Sampler", "bucket_keys"]
@@ -314,7 +315,16 @@ class Sampler:
             out["bitrate"] = int(rate)
         out["channels"] = pick(menu.channels)
         telephone = pick(menu.telephone)
-        if telephone != "none":
+        codec, _, rate = telephone.partition("_")
+        if codec in PHONE_CODECS:
+            # docs/training/15 N4: a codec at the telephone rate (gsm) rides
+            # the 8 kHz leg; a wideband one (opus) codes at the render rate
+            if PHONE_CODECS[codec][0] == int(menu.telephone_hz):
+                out["telephone_hz"] = int(menu.telephone_hz)
+            out["phone_codec"] = codec
+            if rate:
+                out["phone_bitrate"] = int(rate)
+        elif telephone != "none":
             out["telephone_hz"] = int(menu.telephone_hz)
             if telephone != "plain":
                 out["companding"] = telephone
