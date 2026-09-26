@@ -21,6 +21,8 @@ import os
 import sys
 from pathlib import Path
 
+import numpy as np
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
@@ -96,6 +98,19 @@ def main() -> int:
         report.probs["FILE_FAKE_PROB"] = [
             float(x) for x in file_stack.apply(report.probs, file_stack.load(stack_path))]
         print(f"FILE_FAKE_PROB from {stack_path.name}", flush=True)
+    diag_path = model_dir / "diag_constant.json"
+    if not args.probe and weights.exists() and diag_path.exists():
+        # a DIAGNOSTIC submission (docs/training/11): the named columns are set to 0.5, so
+        # their EER/AUC is exactly 0.5 and the leaderboard score isolates the others
+        const = json.loads(diag_path.read_text(encoding="utf-8"))["columns"]
+        live = [c for c in report.probs if c not in const]
+        spread = min(float(np.std(report.probs[c])) for c in live)
+        if not spread > 1e-6:
+            raise RuntimeError("a live prediction column is constant: the model did not run")
+        for c in const:
+            report.probs[c] = [0.5] * report.n
+        require_variation = False
+        print(f"DIAGNOSTIC: columns {const} set to 0.5", flush=True)
     out = write_submission(report, Path(args.out), require_variation=require_variation)
     print(f"wrote {out}: {report.n} rows, {report.n_fallback} fallback row(s)", flush=True)
     return 0
