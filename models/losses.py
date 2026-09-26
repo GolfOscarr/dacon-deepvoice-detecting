@@ -29,7 +29,7 @@ from models.config import LossConfig, ModelConfig
 from models.heads import frame_max
 
 __all__ = ["TRAIN_CONSUMED_ELSEWHERE", "TARGET_FOR_COLUMN", "multitask_loss",
-           "pairwise_ranking_loss", "parts_to_floats"]
+           "oc_softmax_loss", "pairwise_ranking_loss", "parts_to_floats"]
 
 #: TrainConfig fields the loss deliberately does not read, with who owns them.
 #: ⚠️ This exists because the ModelConfig-only version of the ignored-field guard
@@ -131,6 +131,24 @@ def pairwise_ranking_loss(scores: Tensor, labels: Tensor, mask: Tensor | None = 
     return F.softplus(-(pos[:, None] - neg[None, :])).mean()
 
 
+def oc_softmax_loss(embedding: Tensor, center: Tensor, labels: Tensor, alpha: float,
+                    m_real: float, m_fake: float) -> Tensor:
+    """Per-sample OC-Softmax (Zhang, Jiang & Duan 2021), shape (B,).
+
+    ``s = cos(w, x)`` with both L2-normalised; real (label 0) pays
+    ``softplus(alpha * (m_real - s))``, fake pays ``softplus(alpha * (s - m_fake))``.
+    Real is the compact class: an unseen fake only has to be "not real"
+    (docs/training/13 O1). Computed in fp32 whatever the autocast dtype -- at
+    alpha=20 a bf16 cosine is off by up to ~0.08 in the exponent.
+    """
+    x = F.normalize(embedding.float(), dim=-1)
+    w = F.normalize(center.float(), dim=-1)
+    s = x @ w
+    fake = labels.float() > 0.5
+    margin = torch.where(fake, s - m_fake, m_real - s)
+    return F.softplus(alpha * margin)
+
+
 def multitask_loss(
     outputs: dict,
     targets: dict[str, Tensor],
@@ -150,7 +168,8 @@ def multitask_loss(
     not loss terms**: ``<branch>/p_c`` is the fraction of the batch carrying that
     branch's component and ``<branch>/w_eff`` the `w_c / p_c` of docs/training/02
     §4. Averaging them over a pass, as `training.loop._mean_parts` does, is the
-    intended reading.
+    intended reading. ``<branch>/oc`` (heads with ``oc: true`` only) is the raw
+    OC-Softmax loss; ``oc_weight`` times it is inside ``total``, not ``<branch>``.
 
     ``tensor_parts=True`` leaves every part a detached 0-d tensor on the loss's
     device, for `parts_to_floats` to convert later: each ``float(...)`` here is
@@ -167,6 +186,7 @@ def multitask_loss(
     for branch, br_cfg in cfg.branches.items():
         target_key = TARGET_FOR_COLUMN[br_cfg.column]
         y = targets[target_key].float()
+        y_hard = y                      # the OC term takes no label smoothing
         if loss_cfg.label_smoothing:
             eps = loss_cfg.label_smoothing
             y = y * (1 - eps) + 0.5 * eps
@@ -230,6 +250,20 @@ def multitask_loss(
             p_c = 1.0 if sample_mask is None else float(sample_mask.float().mean())
             parts[f"{branch}/p_c"] = p_c
             parts[f"{branch}/w_eff"] = weight / p_c if p_c else 0.0
+        # O1: only for a head built with `oc`, so a flag-off model adds no op to
+        # the graph and its total is bitwise run 2's. At oc_weight 0 the term is
+        # still added (x 0) so `oc_center` stays in the graph -- DDP deadlocks on
+        # unused params. Same mask as the BCE term; logged raw (unweighted).
+        if br_cfg.head.oc:
+            if "embedding" not in out or "oc_center" not in out:
+                raise KeyError(
+                    f"multitask_loss: branch {branch!r} has head.oc but its output "
+                    "carries no embedding / oc_center")
+            oc = _masked_mean(oc_softmax_loss(
+                out["embedding"], out["oc_center"], y_hard, loss_cfg.oc_alpha,
+                loss_cfg.oc_m_real, loss_cfg.oc_m_fake), sample_mask)
+            contribution = contribution + loss_cfg.oc_weight * oc
+            parts[f"{branch}/oc"] = oc.detach() if tensor_parts else float(oc.detach())
         total = contribution if total is None else total + contribution
 
     if teacher_emb is not None:

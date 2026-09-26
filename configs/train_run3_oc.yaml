@@ -1,0 +1,46 @@
+# RUN 3 R1 (b) (docs/training/13 §3 O1): train_run2.yaml + the one-class (OC-Softmax) loss.
+# Pair with c_run2_oc.yaml (head.oc on voice + file). oc_weight: see the loss block.
+# RUN 2 fine-tune (docs/training/11 §3): run 1's train_first_run.yaml, initialised from run 1
+# (--init-weights). Half the peak LR to limit forgetting; 10 passes of the launcher's --draws.
+# Training-only. Never shipped, never stored in the checkpoint.
+stage: joint
+teachers:                       # frozen, training-only; never enter the inference path
+  speech_teacher: {name: xlsr_2b, weights: null, freeze: true, output_dim: 1920, fps: 50.0,
+                   adapter: {kind: none}, freq_pool: {kind: none}}
+  audio_teacher:  {name: sslam,   weights: null, freeze: true, output_dim: 768,  fps: 50.0,
+                   adapter: {kind: none}, freq_pool: {kind: none}}
+epochs: 10
+# 16: with layer checkpointing (loop.grad_checkpointing) a 60 s clip costs
+# ~2.8 GiB in training (8 x 60 s = 22 GiB measured), vs ~12.5 GiB without.
+batch_size: 16
+lr: 1.0e-4
+weight_decay: 1.0e-5
+precision: bf16
+seed: 0
+loss:
+  # ✅ Metric-proportional: the score weights File .45 / Music .27 / Voice .18 /
+  # presence .05 each. Equal weights were INHERITED from PC-Mix, whose metric
+  # weighted its components equally and ours does not. Set by argument, not sweep
+  # (docs/training/02 §4); 09 B11 closed.
+  weights: {voice: 0.18, music: 0.27, file: 0.45, v_pres: 0.05, m_pres: 0.05}
+  # 🔴 Stays 0. TFPARN's own ablation moves EER 12.91 -> 12.92; every gain it buys
+  # is minDCF/Cllr/actDCF, which a ranking metric cannot read. Stage S4 is dropped
+  # (docs/training/03 §1). Raise ONLY for the one-off confirmatory ablation.
+  ranking_weight: 0.0
+  distill_weight: 1.0
+  # The clip-vs-frame_max blend is SEDHeadConfig.clip_weight, in the *model*
+  # config, and the loss reads that same field so the two cannot diverge.
+  # O1 (docs/training/13 §3). OC-Softmax on the voice + file heads' attention-pooled
+  # embedding, same masks as their BCE, no label smoothing. alpha / margins are the
+  # paper's (Zhang, Jiang & Duan 2021).
+  # oc_weight 0.02 -- chosen so OC's weighted magnitude matches the weighted BCE at
+  # init. Measured on CPU (train mode) on 16 run-2 T1 fold-1 VAL specs (< 10 s) from
+  # run2-v4/T1/fold1/scored.pt:
+  #   voice: weighted BCE 0.18 x 0.442 = 0.080; raw OC 9.40 (random centre), 5.02 with
+  #          the centre at the real-mean embedding (cos real .79 / fake .57)
+  #   file:  weighted BCE 0.45 x 0.381 = 0.171; raw OC 6.87 (random centre), 5.59
+  # so 0.02 x OC = 0.10-0.19 per head vs 0.08-0.17 BCE; 0.1 would make OC 5-10x the BCE.
+  oc_weight: 0.02
+  oc_alpha: 20.0
+  oc_m_real: 0.9
+  oc_m_fake: 0.2

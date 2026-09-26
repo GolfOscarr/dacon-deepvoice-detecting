@@ -3,7 +3,8 @@
 
     python scripts/package_submission.py --out submissions/first \
         --scored runs/first/all_data_seed0/scored.pt [--scored ... more to soup] \
-        --weights audio=/data/project/private/dacon-weights/beats,speech=/data/project/private/dacon-weights/xlsr-300m
+        --weights audio=/data/project/private/dacon-weights/beats,speech=/data/project/private/dacon-weights/xlsr-300m \
+        [--file-mode max3]
 
 Layout written (and zipped to <out>.zip):
 
@@ -19,11 +20,16 @@ which refuses checkpoints of different architectures; their processing.json
 files must be identical. requirements.txt is empty on purpose: every package
 the code needs is preinstalled on the server, and pinning a different version
 is an install error.
+
+``--file-mode`` overrides ``file_head.mode`` in the shipped checkpoint's config
+(docs/training/13 O5): inference-only, no weight changes. members.json records
+the trained and the shipped mode.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import pathlib
 import shutil
@@ -34,7 +40,8 @@ import torch
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from models.model import load_checkpoint, save_checkpoint  # noqa: E402
+from models.config import FILE_HEAD_MODES, validate_model_config  # noqa: E402
+from models.model import DeepVoiceNet, load_checkpoint, save_checkpoint  # noqa: E402
 from training.checkpoint import checkpoint_soup  # noqa: E402
 
 CODE = ("models", "processing", "training", "metrics")
@@ -51,6 +58,18 @@ def _weights_arg(s: str) -> dict[str, pathlib.Path]:
     return out
 
 
+def with_file_mode(model: DeepVoiceNet, mode: str) -> DeepVoiceNet:
+    """The same module with ``cfg.file_head.mode`` replaced (the config is frozen).
+
+    Only `submission_probs` reads the mode, so no parameter or buffer changes.
+    """
+    cfg = dataclasses.replace(
+        model.cfg, file_head=dataclasses.replace(model.cfg.file_head, mode=mode))
+    validate_model_config(cfg)
+    model.cfg = cfg
+    return model
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -62,7 +81,14 @@ def main() -> int:
     p.add_argument("--file-stack", default=None,
                    help="a processing.file_stack JSON (scripts/diag/fit_file_stack.py); "
                         "shipped as model/file_stack.json, applied by script.py")
+    p.add_argument("--file-mode", choices=FILE_HEAD_MODES, default=None,
+                   help="override file_head.mode in the shipped config (default: keep the "
+                        "checkpoint's own); docs/training/13 O5")
     args = p.parse_args()
+    if args.file_stack and args.file_mode not in (None, "learned"):
+        raise SystemExit("--file-stack replaces FILE_FAKE_PROB and was fitted on the learned "
+                         "FILE head; it cannot be combined with --file-mode "
+                         f"{args.file_mode}")
 
     out = pathlib.Path(args.out).resolve()
     if out.exists():
@@ -78,6 +104,9 @@ def main() -> int:
     model = load_checkpoint(scored[0], weights={k: str(v) for k, v in weights.items()})
     if len(scored) > 1:
         model.load_state_dict(checkpoint_soup([str(s) for s in scored]), strict=True)
+    trained_mode = model.cfg.file_head.mode
+    if args.file_mode is not None:
+        model = with_file_mode(model, args.file_mode)
     save_checkpoint(model, model_dir / "scored.pt")
     (model_dir / "processing.json").write_text(chains.pop(), encoding="utf-8")
     if args.file_stack:
@@ -86,8 +115,10 @@ def main() -> int:
         if tuple(stack["features"]) != file_stack.FEATURES:
             raise SystemExit(f"--file-stack features {stack['features']} are stale")
         shutil.copy2(args.file_stack, model_dir / "file_stack.json")
-    (model_dir / "members.json").write_text(json.dumps([str(s) for s in scored], indent=2),
-                                            encoding="utf-8")
+    (model_dir / "members.json").write_text(json.dumps(
+        {"scored": [str(s) for s in scored],
+         "file_mode": {"trained": trained_mode, "shipped": model.cfg.file_head.mode}},
+        indent=2), encoding="utf-8")
 
     for name, fe in model.cfg.frontends.items():
         if fe.name == "stub":
@@ -123,6 +154,14 @@ def main() -> int:
     for k in branches:
         if not torch.equal(a[k]["clip_logits"], b[k]["clip_logits"]):
             raise SystemExit(f"the shipped copy scores branch {k!r} differently")
+    # and submits the same columns: both sides carry the (overridden) file mode
+    if again.cfg.file_head.mode != model.cfg.file_head.mode:
+        raise SystemExit(f"the shipped copy's file mode is {again.cfg.file_head.mode!r}, "
+                         f"not {model.cfg.file_head.mode!r}")
+    pa, pb = model.submission_probs(a), again.submission_probs(b)
+    for col in pa:
+        if not torch.equal(pa[col], pb[col]):
+            raise SystemExit(f"the shipped copy submits {col} differently")
     size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
     print(f"wrote {out} ({size / 1e9:.2f} GB, {len(scored)} checkpoint(s))")
     if not args.no_zip:

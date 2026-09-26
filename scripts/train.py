@@ -107,11 +107,28 @@ def parse_weights(weights: str | None, frontends) -> dict[str, str]:
     return out
 
 
+#: Parameters a run-2 checkpoint may lack: new heads' state that starts fresh.
+#: `.oc_center` is the O1 one-class centre (docs/training/13 O1).
+INIT_MAY_MISS = (".oc_center",)
+
+
 def init_from(model: DeepVoiceNet, path: str) -> None:
     """Load a finished model's weights (scored.pt: config + state_dict) strictly.
-    The architecture must match; the optimizer and the draw start fresh."""
+    The architecture must match; the optimizer and the draw start fresh.
+
+    The one exception is a missing key ending in `INIT_MAY_MISS`, which keeps
+    its fresh init and is logged. Any other missing key, and every unexpected
+    key, still fails."""
     blob = torch.load(path, map_location="cpu", weights_only=False)
-    model.load_state_dict(blob["state_dict"], strict=True)
+    res = model.load_state_dict(blob["state_dict"], strict=False)
+    fresh = [k for k in res.missing_keys if k.endswith(INIT_MAY_MISS)]
+    missing = [k for k in res.missing_keys if k not in fresh]
+    if missing or res.unexpected_keys:
+        raise RuntimeError(
+            f"init_from {path}: state dict does not match the model -- missing "
+            f"{missing}, unexpected {res.unexpected_keys}")
+    if fresh:
+        print(f"  left at their fresh init (not in {path}): {fresh}", flush=True)
     print(f"  initialised from {path}", flush=True)
 
 

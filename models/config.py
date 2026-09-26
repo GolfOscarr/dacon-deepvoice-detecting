@@ -89,6 +89,9 @@ class ConfigError(ValueError):
 #: by 1.12 at the model boundary, which is why `promote_channels` refuses one.
 CHANNEL_POLICIES = ("downmix", "left", "mid_side")
 
+#: Every FILE construction `DeepVoiceNet.submission_probs` implements (G3, 13 O5).
+FILE_HEAD_MODES = ("learned", "noisy_or", "max", "max3")
+
 
 @dataclass(frozen=True)
 class AudioConfig:
@@ -201,6 +204,11 @@ class SEDHeadConfig:
     #: than inheriting this default. Do not "simplify" them back.
     clip_weight: float = 1.0        # blend of clip vs frame_max, applied in LOGIT space
     attention: str = "linear"       # linear | scaled_tanh | tanh
+    #: O1 (docs/training/13 §3): the head owns an OC-Softmax centre and returns
+    #: its attention-pooled hidden as ``embedding``, for `LossConfig.oc_weight`.
+    #: Training-only regularisation; the submitted logit does not read it.
+    #: Off by default so every existing config builds the same module.
+    oc: bool = False
 
 
 @dataclass(frozen=True)
@@ -242,7 +250,7 @@ class AggregationConfig:
 @dataclass(frozen=True)
 class FileHeadConfig:
     """How FILE_FAKE_PROB is formed (G3 -- no prior art; build all three)."""
-    mode: str = "learned"            # learned | noisy_or | max
+    mode: str = "learned"            # learned | noisy_or | max | max3
 
 
 @dataclass(frozen=True)
@@ -331,8 +339,21 @@ class LossConfig:
     ranking_weight: float = 0.0
     distill_weight: float = 1.0
     label_smoothing: float = 0.0
+    #: O1 one-class (OC-Softmax, Zhang, Jiang & Duan 2021) on every branch whose
+    #: head has `oc: true`. 0 = off, and the loss is then bitwise the run-2 loss.
+    #: Real (label 0) is pulled to cos >= oc_m_real, fake pushed below oc_m_fake.
+    oc_weight: float = 0.0
+    oc_alpha: float = 20.0
+    oc_m_real: float = 0.9
+    oc_m_fake: float = 0.2
 
     def __post_init__(self):
+        if self.oc_weight < 0 or self.oc_alpha <= 0 or not (
+                -1.0 <= self.oc_m_fake < self.oc_m_real <= 1.0):
+            raise ConfigError(
+                "loss: need oc_weight >= 0, oc_alpha > 0 and -1 <= oc_m_fake < "
+                f"oc_m_real <= 1; got {self.oc_weight}, {self.oc_alpha}, "
+                f"{self.oc_m_fake}, {self.oc_m_real}")
         # 🔴 Checked here rather than in `load_train_config` so that the rule
         # holds for every LossConfig, however it was built -- a YAML load, a
         # `dataclasses.replace`, a checkpoint round-trip or a test. A partial
@@ -564,7 +585,7 @@ def validate_model_config(cfg: ModelConfig) -> None:
         raise ConfigError("aggregation.k must be >= 1")
     if not 0.0 < cfg.aggregation.quantile <= 1.0:
         raise ConfigError("aggregation.quantile must be in (0, 1]")
-    if cfg.file_head.mode not in ("learned", "noisy_or", "max"):
+    if cfg.file_head.mode not in FILE_HEAD_MODES:
         raise ConfigError(f"file_head.mode invalid: {cfg.file_head.mode!r}")
     if cfg.output.dtype not in ("float64", "float32"):
         raise ConfigError(f"output.dtype invalid: {cfg.output.dtype!r}")

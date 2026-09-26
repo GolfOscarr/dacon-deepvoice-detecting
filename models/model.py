@@ -154,7 +154,7 @@ class DeepVoiceNet(nn.Module):
         """The five submission columns, as float64 probabilities.
 
         Honours ``file_head.mode``. G3 records the FILE construction as an open
-        question with no prior art, so all three must actually differ -- an
+        question with no prior art, so all four must actually differ -- an
         earlier version validated the field and then always produced `learned`,
         which would have made a three-way comparison return one answer.
         """
@@ -175,6 +175,11 @@ class DeepVoiceNet(nn.Module):
                 probs["FILE_FAKE_PROB"] = (1.0 - (1.0 - v) * (1.0 - m)).clamp(eps, 1.0 - eps)
             elif mode == "max":
                 probs["FILE_FAKE_PROB"] = torch.maximum(v, m).clamp(eps, 1.0 - eps)
+            elif mode == "max3":
+                # 13 O5 / E9: the learned FILE head, overruled by either component
+                # head when that one is surer. Elementwise, so still per file.
+                probs["FILE_FAKE_PROB"] = torch.maximum(
+                    probs["FILE_FAKE_PROB"], torch.maximum(v, m)).clamp(eps, 1.0 - eps)
             else:
                 raise ValueError(f"unknown file_head.mode {mode!r}")
         return probs
