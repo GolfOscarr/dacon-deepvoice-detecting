@@ -7,7 +7,7 @@
 # EVERY task writes to its own root <RUNS_ROOT>/<run>/T<i>/: train.py writes <out>/fold<k>/,
 # and T0/T5 (fold 0) and T1/T4 (fold 1) would otherwise overwrite each other (review B1).
 # Edit the TASKS table below to change the plan; a line is
-#   <folds-or-all:seed> | <manifest: v4|v3> | <processing cfg> | <train cfg> | <init scored.pt or ->
+#   <folds-or-all:seed> | <manifest: v4|v3> | <processing cfg> | <train cfg> | <init scored.pt or -> [| <model cfg>]
 
 #SBATCH --job-name=eval-hyeonseop
 #SBATCH --partition=debug
@@ -50,10 +50,12 @@ if [ -n "${TASK_TABLE:-}" ]; then
   mapfile -t TASKS < <(grep -v -E '^\s*(#|$)' "$TASK_TABLE")
 fi
 [ "$TASK" -lt "${#TASKS[@]}" ] || { echo "FATAL: task $TASK not in table (${#TASKS[@]} rows)"; exit 1; }
-IFS='|' read -r who man proc train init <<< "${TASKS[$TASK]}"
+IFS='|' read -r who man proc train init model <<< "${TASKS[$TASK]}"
 trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; echo "${s%"${s##*[![:space:]]}"}"; }
 who=$(trim "$who"); man=$(trim "$man"); proc=$(trim "$proc"); train=$(trim "$train")
 init=$(trim "${init%%#*}")
+model=$(trim "${model:-}"); model=$(trim "${model%%#*}")
+[ -n "$model" ] && MODEL_CFG="$model"   # optional 6th column: a per-task model config
 case "$man" in v4) MDIR="$MANIFEST_DIR" ;; v3) MDIR="$V3_DIR" ;; *) echo "FATAL: manifest $man"; exit 1 ;; esac
 if [[ "$who" == all:* ]]; then role=(--all-data --seed "${who#all:}" --select ema)
 else role=(--folds "$who" --select ema); fi
@@ -69,7 +71,7 @@ done
 : "${RUNS_ROOT:=/data/project/private/dacon-runs}"
 OUT="$RUNS_ROOT/$RUN/T$TASK"
 echo "node=$(hostname) job=${SLURM_ARRAY_JOB_ID:-?}_${TASK} gpu=${CUDA_VISIBLE_DEVICES:-?}"
-echo "T$TASK role=${role[*]} manifest=$MDIR processing=$proc train=$train init=${init} out=$OUT"
+echo "T$TASK role=${role[*]} manifest=$MDIR processing=$proc train=$train model=$MODEL_CFG init=${init} out=$OUT"
 nvidia-smi --query-gpu=name,memory.free --format=csv,noheader
 
 cd "$REPO"
