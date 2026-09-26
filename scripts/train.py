@@ -34,10 +34,16 @@ because two runs that scored different weights are two runs.
 `gates.ok and tripwires.ok`, and a fold that fails either still contributes its
 metrics to the mean -- so the row has to say which folds were clean.
 
-⚠️ One GPU per invocation, by design. Folds are independent, so N folds is a job
-array rather than a distributed run; the sampler's bitwise-resume guarantee is
-keyed on `(sample_id, epoch, seed)` and sharding it across ranks would have to be
-re-established from scratch.
+⚠️ One GPU per invocation by default. Folds are independent, so N folds is a job
+array rather than a distributed run.
+
+*Data parallel* (docs/training/14): under `torchrun --nproc_per_node N` the SAME
+invocation trains one fold or `--all-data` on N GPUs. Every rank builds the same
+draw and pass plan at the global batch (`--batch-size` per rank x N x
+`loop.grad_accum`) and trains its slice, so the bitwise-resume guarantee carries
+over. After training every rank meets at a barrier, ranks > 0 exit 0, and rank 0
+leaves the process group and selects, saves, evaluates and writes the ledger
+exactly as a one-GPU run does. Only rank 0's exit code carries `quotable`.
 """
 
 from __future__ import annotations
@@ -45,6 +51,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import pathlib
 import sys
 import time
@@ -61,6 +68,8 @@ from processing.render import ManifestIndex                           # noqa: E4
 from processing.sampler import Sampler                                # noqa: E402
 from training.checkpoint import checkpoint_soup                       # noqa: E402
 from training.dataset import SpecDataset, frozen_eval_specs           # noqa: E402
+from training.distributed import (barrier, current, init_from_env,     # noqa: E402
+                                  teardown)
 from training.folds import apply_folds                                # noqa: E402
 from training.loop import check_chain, run_schedule                   # noqa: E402
 from training.manifest import load_manifest                           # noqa: E402
@@ -184,6 +193,22 @@ def select_weights(model: DeepVoiceNet, results, how: str) -> str:
     return f"soup ({len(paths)} checkpoints from {scope}, uniform average)"
 
 
+def _leave_group() -> bool:
+    """After training: meet, leave the process group, and say whether this
+    process carries on (rank 0, or a one-process run).
+
+    Every rank leaves -- rank 0 too -- so rank 0's evaluation, which can take far
+    longer than any collective timeout, runs as a plain single process with
+    nobody waiting on it (docs/training/14 D4).
+    """
+    d = current()
+    if not d.enabled:
+        return True
+    barrier(d)
+    teardown(d)
+    return d.main
+
+
 def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
     # 06 P8: every sampler is built on the fold VIEW (05 A7); the raw manifest
     # carries no fold and `processing.sampler.Sampler` refuses it.
@@ -221,6 +246,8 @@ def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
     t0 = time.time()
     results = run_schedule(model, ds, train_cfg=train_cfg, loop_cfg=loop_cfg,
                            stages=args.stages, resume_from=args.resume)
+    if not _leave_group():
+        return None                     # rank > 0: rank 0 scores and writes
     print(f"  trained {sum(r.steps for r in results)} step(s) across "
           f"{len(results)} stage(s) in {time.time() - t0:.0f}s", flush=True)
     for r in results:
@@ -303,6 +330,8 @@ def train_all_data(*, manifest, folds_tbl, args, run_cfg, train_cfg) -> str:
     t0 = time.time()
     results = run_schedule(model, ds, train_cfg=train_cfg, loop_cfg=loop_cfg,
                            stages=args.stages, resume_from=args.resume)
+    if not _leave_group():
+        return None                     # rank > 0: rank 0 selects and writes
     print(f"  trained {sum(r.steps for r in results)} step(s) in {time.time() - t0:.0f}s",
           flush=True)
     how = "soup-all" if (args.select == "soup" and args.soup_all_stages) else args.select
@@ -378,6 +407,15 @@ def main() -> int:
     p.add_argument("--dry-run", action="store_true", help="print the plan and exit")
     args = p.parse_args()
 
+    # Under torchrun: join the group first, pin this rank's GPU, and keep the
+    # other ranks' stdout out of the Slurm log (their errors still reach stderr).
+    d = init_from_env(device=args.device)
+    if d.enabled:
+        if args.device.startswith("cuda"):
+            args.device = f"cuda:{d.local_rank}"
+        if not d.main:
+            sys.stdout = open(os.devnull, "w")
+
     corpus = pathlib.Path(args.manifest_dir)
     manifest = load_manifest(corpus / "manifest.parquet")
     folds_tbl = pd.read_parquet(corpus / "folds.parquet")
@@ -404,6 +442,13 @@ def main() -> int:
     missing = [f for f in wanted if f not in available]
     if missing:
         raise SystemExit(f"fold(s) {missing} not in folds.parquet (has {available})")
+    if d.enabled and len(args.stages) != 1:
+        # one DDP wrapper per stage call; the runs here use `--stages joint`
+        raise SystemExit(f"under DDP one invocation trains one stage; got {args.stages}")
+    if d.enabled and not args.all_data and len(wanted) != 1:
+        # after the first fold every rank has left the process group
+        raise SystemExit(f"under DDP one invocation trains one fold or --all-data; "
+                         f"got folds {wanted}")
 
     print(f"corpus   {corpus}  ({len(manifest)} rows, folds {available}, "
           f"scheme {run_cfg.folds.scheme_version})")
@@ -414,7 +459,12 @@ def main() -> int:
     if args.max_steps:
         print(f"⚠️  max_steps={args.max_steps}: every stage is truncated and the run is "
               f"NOT QUOTABLE")
+    if d.enabled:
+        print(f"ddp      world {d.world} x batch {train_cfg.batch_size} x accum "
+              f"{run_cfg.loop.grad_accum} = global batch "
+              f"{d.world * train_cfg.batch_size * run_cfg.loop.grad_accum}")
     if args.dry_run:
+        teardown(d)
         return 0
 
     if args.all_data:
@@ -424,8 +474,11 @@ def main() -> int:
 
     results, caveats, selections = [], [], set()
     for fold in wanted:
-        fr, cav, sel = train_fold(fold, manifest=manifest, folds_tbl=folds_tbl,
-                                  args=args, run_cfg=run_cfg, train_cfg=train_cfg)
+        ret = train_fold(fold, manifest=manifest, folds_tbl=folds_tbl,
+                         args=args, run_cfg=run_cfg, train_cfg=train_cfg)
+        if ret is None:                  # a DDP rank > 0 after training
+            return 0
+        fr, cav, sel = ret
         results.append(fr)
         caveats += cav
         selections.add(sel)

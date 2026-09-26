@@ -393,3 +393,63 @@ DDP does not care what the model is, but these three points touch it:
   owner's go. `ruff check` + `pytest` green before each commit.
 - English + Korean data only; the draw config and audits are unchanged by DDP (D1 slices the
   same plan).
+
+## 8 · Implementation status (2026-09-26 ~23:00 KST)
+
+D0–D8 are implemented on `feat/ddp-1b`, in the worktree `/home/hyeonseop.shin/workspace/dacon-ddp-1b`.
+D9 is done for the 300M@12 model. The 1B probe is **not** done: `xlsr_1b` is not wired in
+`models/frontends.py:build_frontend` yet (the owner's model work).
+
+| piece | where | as planned? |
+|---|---|---|
+| D0 | `training/distributed.py` (`Dist`, `init_from_env`, `current`, collectives) | yes |
+| D1 | `training/loop.py::rank_micro_batches`; the plan built at the global batch | yes; a short global batch is refused |
+| D2 | DDP wrap inside `train_stage`; `model` stays unwrapped | yes; reseed only under DDP and not on resume |
+| D3 | `models/losses.py::GlobalNorm`, passed as `multitask_loss(..., norm=)` | yes (no config flag); counts all-reduced once per step from `batch["targets"]` |
+| D4 | `_checkpoint` (gathers `rng_by_rank`, rank 0 writes, barrier), `_combine_rows`, `scripts/train.py::_leave_group` | yes; ranks > 0 exit from `main()` |
+| D5 | `LoopConfig.grad_accum`, `forward_backward` (`no_sync` on all but the last micro-batch) | yes; masked heads are not divided by accum |
+| D6 | `LoopConfig.frontend_hold_steps`: frontend `grad = None` during the hold, then its own warm-up | yes; `trainable_parameters` now collects **any** other top-level module (the fusion trap), de-duplicated |
+| D7 | `scripts/train_ddp.sbatch` | yes. **The node exposes 64 usable CPUs** (`CPUEfctv`), not 96: use 8 per GPU (`--cpus-per-task=16` for 2 GPUs, 64 for 8) |
+| D8 | `tests/test_ddp.py` (18 tests, CPU/gloo) | T1–T9, plus the naive-mean mutation and both refusals (several folds, several stages) |
+
+**Refused under DDP:**
+- stages with several branch groups (`independent`);
+- more than one `--stages` entry or fold per invocation;
+- `ranking_weight > 0`;
+- distillation;
+- a resume at a different world, global batch or `grad_accum`.
+
+### Verification
+
+- **CPU (`tests/test_ddp.py`):**
+  - the DDP gradient equals the single-process gradient on the global batch, including a rank
+    and a micro-batch with no voice present (atol 1e-6);
+  - the naive per-slice mean differs by more than 1e-4 (the mutation);
+  - DDP resume in the middle of a pass is **bitwise**, with dropout and EMA on;
+  - a world-1 process group is bitwise the plain loop;
+  - `torchrun` over `scripts/train.py` exits 0 on both ranks, and rank 0 writes `scored.pt` and
+    the truncation checkpoint.
+- **Independent review:** the single-process path compared against `HEAD` gives the same
+  weights, EMA, resume and loss history bitwise.
+- **Existing suites:** `test_loop`, `test_losses`, `test_checkpoint`, `test_loop_pool`,
+  `test_stages` and `test_train_integration` pass.
+- **GPU smoke A** (job 221087; 2×H200; 300M@12 `c_run2.yaml`; fold 1; init run-2 T1; per-rank 8 →
+  global 16; 300 steps):
+  - voice `p_c` equals the single-GPU run 3-R1 T0 (same draw, batch 16) to 4 decimals at every
+    logged step, so the data is the same;
+  - the total loss agrees within 0.001 at every step;
+  - 0.52 s/step (T0 on 1 GPU, on the shared node: ~1.9–2.3 s/step);
+  - 51.8 GiB per rank;
+  - exit 0, with rank 0 evaluating after the teardown.
+- **GPU smoke B** (job 221097): resumed A at step 150, reached step 300 with the identical sampler
+  state, and the step-300 loss agrees to 6e-7. The weights are **not** bitwise: max |Δ| 3.2e-3.
+  - **Control** (job 221099): two *fresh* identical runs already differ at step 150 (max |Δ| 3.1e-4,
+    the same 319 trainable tensors). So GPU training is nondeterministic, and the gap is not a
+    resume defect; CPU resume is bitwise (T4).
+
+### What remains (owner)
+
+- wire `xlsr_1b`, the fusion and the partial init (§5);
+- then the 1B memory probe on 2 GPUs (per-rank 8/12/16, grad checkpointing off/on);
+- then the 8-GPU main run, with `sbatch --gres=gpu:8 --cpus-per-task=64 --mem=1600G
+  scripts/train_ddp.sbatch <run> all:0 --batch-size <B> ...`.

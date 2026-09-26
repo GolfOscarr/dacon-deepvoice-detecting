@@ -87,6 +87,8 @@ _ALT: dict[str, dict] = {
         "log_every": 10,
         "grad_checkpointing": True,
         "render_on_ht_siblings": True,
+        "grad_accum": 2,
+        "frontend_hold_steps": 100,
     },
 }
 

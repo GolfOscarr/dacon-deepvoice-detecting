@@ -21,6 +21,9 @@ defect (see models.outputs).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Mapping
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -28,7 +31,7 @@ from torch import Tensor
 from models.config import LossConfig, ModelConfig
 from models.heads import frame_max
 
-__all__ = ["TRAIN_CONSUMED_ELSEWHERE", "TARGET_FOR_COLUMN", "multitask_loss",
+__all__ = ["TRAIN_CONSUMED_ELSEWHERE", "TARGET_FOR_COLUMN", "GlobalNorm", "multitask_loss",
            "oc_softmax_loss", "pairwise_ranking_loss", "parts_to_floats"]
 
 #: TrainConfig fields the loss deliberately does not read, with who owns them.
@@ -100,6 +103,42 @@ def _masked_mean(per_sample: Tensor, mask: Tensor | None) -> Tensor:
     return (per_sample * mask).sum() / denom
 
 
+@dataclass(frozen=True)
+class GlobalNorm:
+    """How to normalise a loss computed on one slice of a larger batch
+    (docs/training/14 D3, D5).
+
+    Under DDP each rank sees ``B`` of the global batch, and with gradient
+    accumulation each forward sees ``B`` of the rank's ``B x accum``. DDP then
+    *averages* the ranks' gradients and accumulation *sums* the micro-batches'.
+    For the result to be the single-process gradient on the whole global batch:
+
+    * a masked head's term is ``sum(mask * loss) * world / N`` with ``N`` the
+      present count over the **whole global batch** (all ranks, all
+      micro-batches) -- the local count would weight a rare component by how it
+      happened to fall across ranks, and a rank with none still counts in the
+      average;
+    * an unmasked head's mean is divided by ``accum`` (and needs nothing for
+      ``world``: every slice has the same ``B``).
+
+    ``counts`` maps each ``masked_by`` target key to that global count (a 0-d
+    tensor); ``n_total`` is the global batch size, for the ``p_c`` diagnostic.
+    """
+
+    counts: Mapping[str, Tensor]
+    n_total: int
+    world: int = 1
+    accum: int = 1
+
+
+def _global_masked_mean(per_sample: Tensor, mask: Tensor, count: Tensor,
+                        world: int) -> Tensor:
+    if count == 0:
+        # Nowhere in the global batch: contribute nothing, keep the graph (A6).
+        return per_sample.sum() * 0.0
+    return (per_sample * mask.to(per_sample.dtype)).sum() * world / count
+
+
 def pairwise_ranking_loss(scores: Tensor, labels: Tensor, mask: Tensor | None = None) -> Tensor:
     """RankNet-style logistic loss over positive/negative pairs.
 
@@ -157,6 +196,7 @@ def multitask_loss(
     frame_masks: dict[str, Tensor] | None = None,
     teacher_emb: Tensor | None = None,
     tensor_parts: bool = False,
+    norm: GlobalNorm | None = None,
 ) -> tuple[Tensor, dict[str, float]]:
     """Total loss and a per-part breakdown for the experiment ledger.
 
@@ -175,13 +215,29 @@ def multitask_loss(
     device, for `parts_to_floats` to convert later: each ``float(...)`` here is
     a device sync, eleven per training step, and the loop only reads the parts
     every `log_every` steps. The converted values are the same floats.
+
+    ``norm`` (DDP / gradient accumulation, `GlobalNorm`): the returned total is
+    this slice's share of the global-batch loss, so that DDP's average plus the
+    accumulated sum is the single-process gradient. The **parts** are rescaled to
+    read like single-process values: their mean over every slice of a global
+    batch is that batch's loss. ``None`` is bitwise the historical path.
     """
+    if norm is not None and loss_cfg.ranking_weight:
+        raise ValueError(
+            "ranking_weight > 0 with a GlobalNorm: pairwise_ranking_loss only sees the "
+            "pairs inside one slice, so it is not the global-batch loss under DDP / "
+            "accumulation (docs/training/14 D3)")
+    if norm is not None and teacher_emb is not None:
+        raise ValueError("distillation under a GlobalNorm is not normalised globally; "
+                         "no DDP run distils (docs/training/14)")
     missing = [k for k in TARGET_FOR_COLUMN.values() if k not in targets]
     if missing:
         raise KeyError(f"multitask_loss: missing target(s) {missing}")
 
     total = None
+    log_total = None                    # only under `norm`: the rescaled total
     parts: dict[str, float] = {}
+    scale = 1 if norm is None else norm.accum     # parts -> single-process reading
 
     for branch, br_cfg in cfg.branches.items():
         target_key = TARGET_FOR_COLUMN[br_cfg.column]
@@ -207,7 +263,13 @@ def multitask_loss(
         per_sample = cw * clip_bce + (1.0 - cw) * frame_bce
 
         sample_mask = None if br_cfg.masked_by is None else targets[br_cfg.masked_by].bool()
-        head_loss = _masked_mean(per_sample, sample_mask)
+        if norm is None:
+            head_loss = _masked_mean(per_sample, sample_mask)
+        elif sample_mask is None:
+            head_loss = per_sample.mean() / norm.accum
+        else:
+            head_loss = _global_masked_mean(per_sample, sample_mask,
+                                            norm.counts[br_cfg.masked_by], norm.world)
 
         if loss_cfg.ranking_weight:
             # 🔴 Rank the *blended* logit -- the quantity inference actually ranks
@@ -232,7 +294,9 @@ def multitask_loss(
         # this reads them as required so the two cannot drift apart.
         weight = loss_cfg.weights[WEIGHT_KEY_FOR_COLUMN[br_cfg.column]]
         contribution = weight * head_loss
-        parts[branch] = head_loss.detach() if tensor_parts else float(head_loss.detach())
+        logged = head_loss.detach() * scale if norm is not None else head_loss.detach()
+        log_contribution = weight * logged
+        parts[branch] = logged if tensor_parts else float(logged)
         # 🔴 The standing diagnostic docs/training/02 §4 commits to. `_masked_mean`
         # divides by the present-count, so the per-sample weight a masked head
         # exerts on the shared trunk is `w_c / p_c`, not `w_c` -- and §4 says
@@ -240,7 +304,14 @@ def multitask_loss(
         # nowhere, which made T2 unreadable as specified. `p_c` is 1.0 for an
         # unmasked head, and `w_eff` is 0 when the batch carries the component
         # nowhere, because then the head contributes nothing at all.
-        if tensor_parts and sample_mask is not None:
+        if norm is not None and sample_mask is not None:
+            # the global batch's fraction, not this slice's
+            p_c64 = norm.counts[br_cfg.masked_by].double() / norm.n_total
+            parts[f"{branch}/p_c"] = p_c64 if tensor_parts else float(p_c64)
+            w64 = (torch.where(p_c64 > 0, torch.full_like(p_c64, weight) / p_c64,
+                               torch.zeros_like(p_c64)))
+            parts[f"{branch}/w_eff"] = w64 if tensor_parts else float(w64)
+        elif tensor_parts and sample_mask is not None:
             # float64 on the device: the same IEEE division as the float path.
             p_c64 = sample_mask.float().mean().double()
             parts[f"{branch}/p_c"] = p_c64
@@ -259,12 +330,23 @@ def multitask_loss(
                 raise KeyError(
                     f"multitask_loss: branch {branch!r} has head.oc but its output "
                     "carries no embedding / oc_center")
-            oc = _masked_mean(oc_softmax_loss(
+            oc_per = oc_softmax_loss(
                 out["embedding"], out["oc_center"], y_hard, loss_cfg.oc_alpha,
-                loss_cfg.oc_m_real, loss_cfg.oc_m_fake), sample_mask)
+                loss_cfg.oc_m_real, loss_cfg.oc_m_fake)
+            if norm is None:
+                oc = _masked_mean(oc_per, sample_mask)
+            elif sample_mask is None:
+                oc = oc_per.mean() / norm.accum
+            else:
+                oc = _global_masked_mean(oc_per, sample_mask,
+                                         norm.counts[br_cfg.masked_by], norm.world)
             contribution = contribution + loss_cfg.oc_weight * oc
-            parts[f"{branch}/oc"] = oc.detach() if tensor_parts else float(oc.detach())
+            oc_logged = oc.detach() * scale if norm is not None else oc.detach()
+            log_contribution = log_contribution + loss_cfg.oc_weight * oc_logged
+            parts[f"{branch}/oc"] = oc_logged if tensor_parts else float(oc_logged)
         total = contribution if total is None else total + contribution
+        log_total = (log_contribution if log_total is None
+                     else log_total + log_contribution)
 
     if teacher_emb is not None:
         aux = outputs.get("_aux", {})
@@ -280,7 +362,8 @@ def multitask_loss(
         parts["distill"] = distill.detach() if tensor_parts else float(distill.detach())
         total = total + loss_cfg.distill_weight * distill
 
-    parts["total"] = total.detach() if tensor_parts else float(total.detach())
+    shown = total.detach() if norm is None else log_total
+    parts["total"] = shown if tensor_parts else float(shown)
     return total, parts
 
 

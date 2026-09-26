@@ -36,6 +36,7 @@ import math
 import os
 import time
 import multiprocessing as mp
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
@@ -43,14 +44,17 @@ from typing import Any, Iterator, Mapping, Sequence
 import numpy as np
 import torch
 
-from models.config import TrainConfig
-from models.losses import multitask_loss, parts_to_floats
+from models.config import ModelConfig, TrainConfig
+from models.losses import GlobalNorm, multitask_loss, parts_to_floats
 from models.model import DeepVoiceNet
 from training.checkpoint import (EMA, SamplerState, TrainCheckpoint,
-                                 _set_rng_state, checkpoint_soup,
+                                 _rng_state, _set_rng_state, checkpoint_soup,
                                  load_train_checkpoint, save_train_checkpoint)
 from training.collate import bucket_batches, collate, spec_durations
 from training.dataset import SpecDataset
+from training.distributed import (SINGLE, Dist, all_gather_object, all_reduce_sum,
+                                  barrier)
+from training.distributed import current as current_dist
 from processing.render import ManifestIndex, RenderConfig, render
 from processing.ship import ShipConfig, ship
 from training.spec import SampleSpec
@@ -132,6 +136,17 @@ class LoopConfig:
     #: (`models.frontends.enable_layer_checkpointing`): the same numbers at a
     #: fraction of the activation memory (docs/training/07 §3).
     grad_checkpointing: bool = False
+    #: docs/training/14 D5. Each optimizer step accumulates this many
+    #: micro-batches of `TrainConfig.batch_size` per rank, so the global batch is
+    #: `batch_size x world x grad_accum`. The pass plan is built at that global
+    #: size, so a 2-GPU run with accum 4 and an 8-GPU run with accum 1 train on
+    #: the same batches. 1 = the historical loop.
+    grad_accum: int = 1
+    #: docs/training/14 D6. For the first N optimizer steps the frontend
+    #: parameters (LoRA, GeM) take no step at all and stay out of the clip norm;
+    #: from step N their LR follows its own warm-up and cosine over the rest of
+    #: the stage. For a cold encoder adapter behind warm or cold heads. 0 = off.
+    frontend_hold_steps: int = 0
 
     def __post_init__(self) -> None:
         if self.n_buckets < 1:
@@ -146,6 +161,11 @@ class LoopConfig:
             raise ValueError(f"warmup_steps must be >= 0, got {self.warmup_steps}")
         if not 0.0 <= self.min_lr_ratio <= 1.0:
             raise ValueError(f"min_lr_ratio must be in [0, 1], got {self.min_lr_ratio}")
+        if self.grad_accum < 1:
+            raise ValueError(f"grad_accum must be >= 1, got {self.grad_accum}")
+        if self.frontend_hold_steps < 0:
+            raise ValueError(
+                f"frontend_hold_steps must be >= 0, got {self.frontend_hold_steps}")
         if not self.frontend_lr_scale > 0:
             raise ValueError(
                 f"frontend_lr_scale must be > 0, got {self.frontend_lr_scale}")
@@ -348,6 +368,113 @@ def shipped(batch: Mapping[str, Any], cfg: ShipConfig, device: torch.device) -> 
     return ship(batch["wav"].to(device), cfg, batch["lengths"].to(device))
 
 
+def rank_micro_batches(batches: Sequence[Sequence[int]], *, rank: int, world: int,
+                       per_rank: int, accum: int) -> list[list[list[int]]]:
+    """Global batches -> this rank's micro-batches (docs/training/14 D1).
+
+    Every global batch holds exactly ``per_rank * world * accum`` indices
+    (`bucket_batches` drops the remainder), rank ``r`` takes the ``r``-th
+    contiguous block and splits it into ``accum`` micro-batches of ``per_rank``.
+    The union over ranks and micro-batches is the global batch, in order, so a
+    W-rank run trains on the batches a 1-rank run at batch ``W * B`` would.
+
+    A short global batch would give ranks different step counts and hang the
+    first collective, so it is refused rather than padded.
+    """
+    size = per_rank * world * accum
+    out = []
+    for b in batches:
+        if len(b) != size:
+            raise ValueError(
+                f"global batch of {len(b)} specs, expected {size} "
+                f"(= {per_rank} per rank x {world} ranks x {accum} accum)")
+        mine = list(b[rank * per_rank * accum:(rank + 1) * per_rank * accum])
+        out.append([mine[i * per_rank:(i + 1) * per_rank] for i in range(accum)])
+    return out
+
+
+def global_norm(micros: Sequence[Mapping[str, Any]], cfg: ModelConfig, d: Dist,
+                accum: int, device: torch.device) -> GlobalNorm | None:
+    """The `GlobalNorm` for one optimizer step, or None on the historical path.
+
+    The present count of every masked head over the WHOLE global batch -- this
+    rank's micro-batches summed, then summed across ranks -- taken once, before
+    the first forward (docs/training/14 D3, D5). One all-reduce per step.
+    """
+    if not d.enabled and accum == 1:
+        return None
+    keys = sorted({br.masked_by for br in cfg.branches.values() if br.masked_by})
+    if keys:
+        local = torch.stack([
+            sum(mb["targets"][k].to(device).float().sum() for mb in micros)
+            for k in keys])
+        glob = all_reduce_sum(local, d)
+        counts = {k: glob[i] for i, k in enumerate(keys)}
+    else:
+        counts = {}
+    n_total = sum(int(mb["lengths"].shape[0]) for mb in micros) * d.world
+    return GlobalNorm(counts=counts, n_total=n_total, world=d.world, accum=accum)
+
+
+def forward_backward(net: torch.nn.Module, micros: Sequence[Mapping[str, Any]], *,
+                     ship_cfg: ShipConfig, device: torch.device, precision: str,
+                     loss_cfg_model: ModelConfig, loss_cfg, scaler,
+                     d: Dist = SINGLE, accum: int = 1) -> list[dict[str, Any]]:
+    """Forward and backward every micro-batch of one optimizer step; the
+    gradients are left on the parameters (averaged across ranks by DDP).
+
+    ``net`` is the DDP wrapper under DDP, else the model. Only the last
+    micro-batch synchronises: the others run under `no_sync`, so the ranks
+    all-reduce once per step. With one rank and one micro-batch this is the
+    historical step, bitwise.
+    """
+    norm = global_norm(micros, loss_cfg_model, d, accum, device)
+    all_parts = []
+    for i, batch in enumerate(micros):
+        sync = (not d.enabled) or i == len(micros) - 1
+        with (nullcontext() if sync else net.no_sync()):
+            # float32 in, and it stays float32: the model casts under autocast.
+            # 06 P8: the shipped chain, once, here -- not `prepare_waveform`.
+            wav = shipped(batch, ship_cfg, device)
+            lengths = batch["lengths"].to(device)
+            targets = {k: v.to(device) for k, v in batch["targets"].items()}
+            with autocast_for(precision, device):
+                out = net(wav, lengths)
+                # Parts stay on the device until a log line needs them: one
+                # sync per `log_every` steps instead of eleven per step.
+                total, parts = multitask_loss(out, targets, loss_cfg_model, loss_cfg,
+                                              tensor_parts=True, norm=norm)
+            scaler.scale(total).backward()
+        all_parts.append(parts)
+    return all_parts
+
+
+def _combine_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Every rank's log row -> one: the mean of each number, the MAX of the
+    timings (the slowest rank sets the step), rank 0's value for the rest."""
+    if len(rows) == 1:
+        return dict(rows[0])
+    out = dict(rows[0])
+    for k, v in rows[0].items():
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or k in _SAME_ON_EVERY_RANK:
+            continue
+        vals = [float(r[k]) for r in rows if k in r]
+        out[k] = max(vals) if k in _MAX_OVER_RANKS else float(np.mean(vals))
+    return out
+
+
+#: Log fields every rank reports identically (kept as rank 0's, not averaged).
+_SAME_ON_EVERY_RANK = ("pass", "n_batches", "world", "global_batch", "grad_accum",
+                       "lr_factor_frontend")
+#: Log fields where the worst rank is the reading: the slowest rank sets the step
+#: and the fullest GPU sets the memory budget.
+_MAX_OVER_RANKS = ("data_wait_s", "compute_s", "max_mem_gib")
+
+
+def _dist_info(d: Dist, global_batch: int, accum: int) -> dict[str, int]:
+    return {"world": d.world, "global_batch": global_batch, "grad_accum": accum}
+
+
 def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
                 train_cfg: TrainConfig, loop_cfg: LoopConfig | None = None,
                 stage: str | None = None,
@@ -364,10 +491,24 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
     yet, so nothing is waiting on throughput; when there is, the change is a
     `DataLoader(dataset, batch_sampler=plan, collate_fn=collate)` **plus** a new
     resume test, in that order.
+
+    **Data parallel** (docs/training/14): under a live process group of world W
+    (`torchrun`), every rank builds the same pass plan at the global batch
+    ``batch_size * W * grad_accum`` and trains its own slice of every global batch
+    (`rank_micro_batches`); the model is wrapped in DDP, the masked heads are
+    normalised over the global batch (`GlobalNorm`), and rank 0 alone keeps the
+    EMA, writes checkpoints (with every rank's RNG state) and the log. ``model``
+    stays the unwrapped module, so everything that reads its state after this
+    returns is unchanged. With no process group and ``grad_accum`` 1 this is the
+    single-GPU loop, bitwise.
     """
     loop_cfg = loop_cfg or LoopConfig()
     stage = stage or train_cfg.stage
     plan = stage_plan(stage, model.cfg)
+    d = current_dist()
+    accum = loop_cfg.grad_accum
+    per_rank = train_cfg.batch_size
+    global_batch = per_rank * d.world * accum
     device = torch.device(loop_cfg.device)
     model.to(device)
     if loop_cfg.grad_checkpointing:
@@ -378,9 +519,34 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
         raise ValueError(
             "train_stage needs a training SpecDataset (SpecDataset.from_sampler): "
             "a frozen spec list is the evaluation set and refuses set_epoch")
+    if d.enabled and len(plan.branch_groups) != 1:
+        # A8: the trainable set changes between S1's branch passes, and a DDP
+        # wrapper registers its gradient hooks once, at wrap time.
+        raise ValueError(
+            f"stage {stage!r} trains {len(plan.branch_groups)} branch groups in turn; "
+            "under DDP only single-group stages (joint, codec_aware) are supported")
+    if (d.enabled or accum > 1) and train_cfg.loss.ranking_weight:
+        raise ValueError("ranking_weight > 0 is not DDP/accumulation-exact "
+                         "(docs/training/14 D3); set it to 0")
+
+    net: torch.nn.Module = model
+    if d.enabled:
+        from torch.nn.parallel import DistributedDataParallel
+        # find_unused_parameters stays False: a masked head with nothing present
+        # still returns `sum * 0.0` (A6), and O1 keeps `oc_center` in the graph
+        # (A7). A hang at the first backward means a NEW module some forward
+        # skips -- diagnose with TORCH_DISTRIBUTED_DEBUG=DETAIL.
+        net = DistributedDataParallel(
+            model,
+            device_ids=([device.index if device.index is not None
+                         else torch.cuda.current_device()]
+                        if device.type == "cuda" else None),
+            broadcast_buffers=False, find_unused_parameters=False)
 
     passes = _schedule(plan, train_cfg.epochs)
-    ema = EMA(model, loop_cfg.ema_decay) if loop_cfg.ema_decay else None
+    # The EMA lives on rank 0 only: the weights are identical on every rank
+    # after every step, and rank 0 is the one that checkpoints and scores.
+    ema = EMA(model, loop_cfg.ema_decay) if loop_cfg.ema_decay and d.main else None
     # fp16 only. bf16 has fp32's exponent range, so it needs no scaler, and an
     # enabled scaler under bf16 would add a stateful factor to a run that does
     # not need one -- one more thing a resume can silently drop. `precision`
@@ -399,10 +565,22 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
                 f"checkpoint is stage {blob['stage']!r}, this call is {stage!r}: "
                 "resuming across stages would restore an optimizer built over a "
                 "different parameter set")
+        # A checkpoint written before DDP (or by a 1-rank, no-accum run) carries
+        # no `dist` block: it is world 1, accum 1.
+        saved = (blob.get("extra") or {}).get("dist") or {"world": 1, "grad_accum": 1}
+        if (saved["world"], saved["grad_accum"]) != (d.world, accum) or (
+                "global_batch" in saved and saved["global_batch"] != global_batch):
+            raise ValueError(
+                f"checkpoint was written at world {saved['world']}, grad_accum "
+                f"{saved['grad_accum']}, global batch {saved.get('global_batch', '?')}; "
+                f"this run is world {d.world}, grad_accum {accum}, global batch "
+                f"{global_batch}. The rank slices and per-rank RNG streams would not "
+                "line up, so the resumed run would not be the run it claims to be")
         model.load_state_dict(blob["state_dict"], strict=True)
         if blob.get("ema") is not None and ema is not None:
             ema.load_state_dict(blob["ema"])
-        _set_rng_state(blob["rng"])
+        _set_rng_state(saved["rng_by_rank"][d.rank] if "rng_by_rank" in saved
+                       else blob["rng"])
         start = blob["sampler"]
         # Critical: a resume that redraws under a different key is a different run under
         # the same name. The draw is `(i, epoch, seed)` and `n`, so a mismatch in
@@ -416,7 +594,18 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
         optimizer_state = blob.get("optimizer")
         scaler_state = blob.get("scaler")
         result.steps = int(blob["global_step"])
+        # The blob sits on the device; keep only what is still to be consumed.
+        # Holding it would pin a second copy of the weights, the EMA and the
+        # optimizer on every rank for the whole stage (~5 GB at 1B).
+        del blob
+    elif d.enabled:
+        # Per-rank dropout masks (A10). After the model's init draws, so every
+        # rank built the same weights; skipped on resume, which restores each
+        # rank's own generator instead.
+        torch.manual_seed(train_cfg.seed + 1000 * d.rank)
 
+    info = _dist_info(d, global_batch, accum) if (d.enabled or accum > 1) else None
+    frontend_ids = {id(p) for p in model.frontends.parameters()}
     group_index = -1
     optimizer: torch.optim.Optimizer | None = None
     # spawn, not fork: the parent may already hold a CUDA context, which a
@@ -442,6 +631,8 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
             if scaler_state is not None:
                 scaler.load_state_dict(scaler_state)
                 scaler_state = None
+        is_frontend = [bool(gp["params"]) and id(gp["params"][0]) in frontend_ids
+                       for gp in optimizer.param_groups]
         loss_cfg_model = _stage_loss_config(model.cfg, group)
 
         # Critical: `pass_index` is the epoch key, so every pass draws its own corpus --
@@ -453,8 +644,10 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
         # audit (training/stages.py::pass_plan). Building it here and again in
         # `dataset.training_batches` is what made "audit the same order you
         # train in" false for every pass but pass 0 at seed 0.
+        # Under DDP / accumulation the plan is built at the GLOBAL batch, the same
+        # on every rank, and each rank then takes its slice (docs/training/14 D1).
         specs, batches = pass_plan(dataset.specs, plan,
-                                   batch_size=train_cfg.batch_size,
+                                   batch_size=global_batch,
                                    n_buckets=loop_cfg.n_buckets,
                                    seed=train_cfg.seed, pass_index=pass_index)
         result.pass_digests.append(spec_digest(specs))
@@ -464,20 +657,27 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
             # Resuming mid-pass: the plan must come from the checkpoint's seed,
             # not the schedule's, or the resumed pass steps through a different
             # batching than the one it was interrupted in.
-            batches = bucket_batches(spec_durations(specs), train_cfg.batch_size,
+            batches = bucket_batches(spec_durations(specs), global_batch,
                                      n_buckets=loop_cfg.n_buckets, seed=batch_seed)
         first_batch = start.batch_index if pass_index == start.pass_index else 0
+        if d.enabled or accum > 1:
+            steps_micro = rank_micro_batches(batches, rank=d.rank, world=d.world,
+                                             per_rank=per_rank, accum=accum)
+            micro_plan = [m for step in steps_micro for m in step]
+        else:
+            micro_plan = batches
 
         model.train()
         parts_acc: list[dict[str, float]] = []
         total_steps = len(passes) * len(batches)
         if loop_cfg.max_steps is not None:
             total_steps = min(total_steps, loop_cfg.max_steps)
-        stream = _iter_batches(specs, batches, first_batch, dataset.index, dataset.cfg,
-                               pool)
+        stream = _iter_batches(specs, micro_plan, first_batch * accum, dataset.index,
+                               dataset.cfg, pool)
         t_ready = time.perf_counter()
         wait_s = step_s = 0.0
-        for batch_index, batch in stream:
+        for batch_index in range(first_batch, len(batches)):
+            micros = [next(stream)[1] for _ in range(accum)]
             t_got = time.perf_counter()
             wait_s += t_got - t_ready
             state = SamplerState(pass_index, start.epoch_seed, start.n_specs,
@@ -485,27 +685,32 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
             if loop_cfg.max_steps is not None and result.steps >= loop_cfg.max_steps:
                 result.truncated = True
                 _checkpoint(result, model, optimizer, ema, stage, state, train_cfg,
-                            loop_cfg, scaler=scaler, tag="truncated")
+                            loop_cfg, scaler=scaler, tag="truncated", d=d, info=info)
                 _close(pool)
                 return result
 
             factor = lr_factor(result.steps, total_steps, loop_cfg)
-            for gp in optimizer.param_groups:
-                gp["lr"] = gp.get("base_lr", train_cfg.lr) * factor
-            # float32 in, and it stays float32: the model casts under autocast.
-            # 06 P8: the shipped chain, once, here -- not `prepare_waveform`.
-            wav = shipped(batch, dataset.ship, device)
-            lengths = batch["lengths"].to(device)
-            targets = {k: v.to(device) for k, v in batch["targets"].items()}
-
-            with autocast_for(train_cfg.precision, device):
-                out = model(wav, lengths)
-                # Parts stay on the device until a log line needs them: one
-                # sync per `log_every` steps instead of eleven per step.
-                total, parts = multitask_loss(out, targets, loss_cfg_model,
-                                              train_cfg.loss, tensor_parts=True)
+            hold = loop_cfg.frontend_hold_steps
+            held = result.steps < hold
+            front_factor = (0.0 if held else
+                            lr_factor(result.steps - hold, total_steps - hold, loop_cfg)
+                            if hold else factor)
+            for gp, fe in zip(optimizer.param_groups, is_frontend):
+                gp["lr"] = gp.get("base_lr", train_cfg.lr) * (front_factor if fe else factor)
             optimizer.zero_grad(set_to_none=True)
-            scaler.scale(total).backward()
+            micro_parts = forward_backward(
+                net, micros, ship_cfg=dataset.ship, device=device,
+                precision=train_cfg.precision, loss_cfg_model=loss_cfg_model,
+                loss_cfg=train_cfg.loss, scaler=scaler, d=d, accum=accum)
+            if held:
+                # D6: the frontend takes no step at all -- no update, no weight
+                # decay, no Adam moments -- and its gradients stay out of the clip
+                # norm, so they cannot shrink the heads' steps. AdamW skips a
+                # parameter whose gradient is None.
+                for gp, fe in zip(optimizer.param_groups, is_frontend):
+                    if fe:
+                        for p in gp["params"]:
+                            p.grad = None
             if loop_cfg.grad_clip:
                 # Critical: unscale first. Clipping a *scaled* gradient clips at a
                 # threshold that moves with the scaler's own state, so the clip
@@ -519,32 +724,42 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
             if ema is not None:
                 ema.update(model)
             result.steps += 1
-            parts_acc.append(parts)
+            parts_acc.extend(micro_parts)
             t_ready = time.perf_counter()
             step_s += t_ready - t_got
             if loop_cfg.log_every and result.steps % loop_cfg.log_every == 0:
-                parts_acc[-loop_cfg.log_every:] = parts_to_floats(
-                    parts_acc[-loop_cfg.log_every:])
-                recent = _mean_parts(parts_acc[-loop_cfg.log_every:], stage, pass_index,
-                                     group)
+                n = loop_cfg.log_every * accum
+                parts_acc[-n:] = parts_to_floats(parts_acc[-n:])
+                recent = _mean_parts(parts_acc[-n:], stage, pass_index, group)
                 recent = {**recent, "data_wait_s": wait_s, "compute_s": step_s}
+                if device.type == "cuda":
+                    recent["max_mem_gib"] = torch.cuda.max_memory_allocated(device) / 2**30
+                if info is not None:
+                    recent.update(info)
+                if info is not None or hold:
+                    recent["lr_factor_frontend"] = front_factor
                 wait_s = step_s = 0.0
-                _log_line(loop_cfg, result.steps, total_steps, factor, recent)
+                rows = all_gather_object(recent, d)
+                if d.main:
+                    _log_line(loop_cfg, result.steps, total_steps, factor,
+                              _combine_rows(rows))
 
             if loop_cfg.checkpoint_every and result.steps % loop_cfg.checkpoint_every == 0:
                 _checkpoint(result, model, optimizer, ema, stage,
                             SamplerState(pass_index, start.epoch_seed,
                                          start.n_specs, batch_seed, batch_index + 1),
                             train_cfg, loop_cfg, scaler=scaler,
-                            tag=f"step{result.steps}")
+                            tag=f"step{result.steps}", d=d, info=info)
 
         result.passes_done += 1
         parts_acc = parts_to_floats(parts_acc)
-        result.loss_history.append(_mean_parts(parts_acc, stage, pass_index, group))
+        row = _mean_parts(parts_acc, stage, pass_index, group)
+        result.loss_history.append(_combine_rows(all_gather_object(row, d)))
         _checkpoint(result, model, optimizer, ema, stage,
                     SamplerState(pass_index + 1, start.epoch_seed, start.n_specs,
                                  train_cfg.seed + pass_index + 1, 0),
-                    train_cfg, loop_cfg, scaler=scaler, tag=f"pass{pass_index}")
+                    train_cfg, loop_cfg, scaler=scaler, tag=f"pass{pass_index}",
+                    d=d, info=info)
     _close(pool)
     return result
 
@@ -580,7 +795,8 @@ def _mean_parts(parts: Sequence[Mapping[str, float]], stage: str, pass_index: in
 
 
 def _checkpoint(result: StageResult, model, optimizer, ema, stage, state,
-                train_cfg, loop_cfg, *, scaler, tag: str) -> None:
+                train_cfg, loop_cfg, *, scaler, tag: str, d: Dist = SINGLE,
+                info: Mapping[str, int] | None = None) -> None:
     """Write one checkpoint. Critical: ``scaler`` is required, not defaulted.
 
     It used to default to `None`, and the mid-epoch call site was the one that
@@ -589,11 +805,25 @@ def _checkpoint(result: StageResult, model, optimizer, ema, stage, state,
     default that means "no scaler" is indistinguishable from a caller that
     dropped the argument, so there is no default: an omission is a `TypeError`
     at the call site rather than a wrong number in a file nobody opens.
+
+    Under DDP every rank calls this (it is a collective): each rank's RNG state
+    is gathered, rank 0 alone writes, with the gathered states and the run's
+    world / global batch / accum under ``extra["dist"]``, and every rank waits
+    for the write (docs/training/14 D4). ``info`` is None on the historical
+    single-process path, whose checkpoint is unchanged.
     """
-    ck = save_train_checkpoint(
-        Path(loop_cfg.out_dir) / f"{stage}-{tag}.pt", model=model,
-        optimizer=optimizer, ema=ema, stage=stage, global_step=result.steps,
-        sampler=state, train_cfg=train_cfg, scaler=scaler)
+    path = Path(loop_cfg.out_dir) / f"{stage}-{tag}.pt"
+    extra = None
+    if info is not None:
+        extra = {"dist": {**info, "rng_by_rank": all_gather_object(_rng_state(), d)}}
+    if d.main:
+        ck = save_train_checkpoint(
+            path, model=model, optimizer=optimizer, ema=ema, stage=stage,
+            global_step=result.steps, sampler=state, train_cfg=train_cfg,
+            scaler=scaler, extra=extra)
+    else:
+        ck = TrainCheckpoint(path, stage, int(result.steps), state)
+    barrier(d)
     result.checkpoints.append(ck)
 
 
