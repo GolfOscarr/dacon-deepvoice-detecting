@@ -1,8 +1,9 @@
-# Run 3 plan — scale up and generalise (BRIEF, to be expanded)
+# Run 3 plan — scale up and generalise
 
-*Draft 2026-09-26 16:30 KST. DDP is out of scope here; the owner implements it. Numbers are
-measured unless marked ESTIMATE. Sources: docs/training/10 (run 1 diagnosis), 11 (run 2 design),
-12 (run 2 results and sizing).*
+*Rev 2, 2026-09-26 ~17:15 KST. Rev 1 (`3823472`, `fb1cf8d`) was reviewed adversarially and returned
+REVISE (1 blocker, 7 major); every finding is folded in here and logged in §10. DDP is out of scope
+(the owner implements it). Numbers are measured unless marked ESTIMATE. Sources:
+docs/training/10 (run 1 diagnosis), 11 (run 2 design), 12 (run 2 results + sizing).*
 
 ## 0 · Goal and clock
 
@@ -11,198 +12,232 @@ measured unless marked ESTIMATE. Sources: docs/training/10 (run 1 diagnosis), 11
 
   | | score | ADS | CPS |
   |---|---|---|---|
-  | run 2 (T7) | **0.81144** | 0.793 | 0.977 |
-  | leader | 0.89871 | 0.888 | 0.999 |
+  | run 2 (T7) | **0.81144** | 0.79302 | 0.97730 |
+  | leader | 0.89871 | 0.88756 | 0.99907 |
 
-  96 % of the gap is ADS, i.e. the detection EERs.
-- Server runtime is 3 m 09 s of the 60 min allowed, so we have **≈ 19× compute headroom** at inference.
-- **Goal:** close the ADS gap, which is a **generalisation** gap:
-  - VAL reads ≈ 0.95–0.96 while the LB reads 0.81;
-  - PROBE over-reads LB gains by about 3× (+0.058 on PROBE vs +0.020 on the LB, run 1 → run 2).
+  **97.5 % of the gap is ADS**: 0.9 × (0.88756 − 0.79302) = 0.0851 of 0.0873.
+- Runtime: 3 m 09 s of 60 min for today's model (19× headroom); **~6× for XLS-R-1B@48**
+  (est. 10.1 min).
+- **Goal:** close the ADS gap. It is a generalisation gap:
+  - v3 VAL reads 0.956 and v4 VAL 0.944, while the LB reads 0.811;
+  - PROBE over-reads LB gains by about 3×.
 
-## 1 · What the evidence says (drives every choice below)
+## 1 · Evidence
 
 | # | finding | source |
 |---|---|---|
-| E1 | New real diversity (Emilia) plus modern clones fixed the diagnosed failures: real LJ called fake .52 → .27, XTTS miss .31 → .09, musan called fake .49 → .25. The LB rose only +0.020 | 12 §2, §6 |
-| E2 | The data fix is from **data**, not steps (control T5). **Init from the previous run beats scratch** at equal steps (T4) | 12 §2 |
-| E3 | New regression: **unseen VITS-style TTS** (melo, mms) missed .05 → .19 and .003 → .17 | 12 §2 |
-| E4 | Music EER did not move (PROBE .090 → .091); nothing in run 2 touched music | 12 §3 |
-| E5 | Ensembling run-2 models gives nothing (errors are correlated) → the gain has to come from a **different or bigger representation**, not averaging | 12 §7 |
-| E6 | XLS-R-1B@48 fits L4 inference: est. 10 min / 1,200 files, 12.6 GiB (batch 8 × 60 s), zip ≈ 5.6 GB. Encoder training ≈ 5× today's | 12 §7 |
-| E7 | Codec and telephone chains are **not** where the errors are (VAL error flat across them) | 10 F4 |
-| **OPEN** | Per-head LB split (file / voice / music EER; presence AUCs) from diag A/B — **not yet submitted or reported** | 12 §1 |
+| E1 | New real diversity + modern clones fixed run 1's diagnosed failures on v3 VAL (real LJ called fake .52 → .27, XTTS miss .31 → .09, musan called fake .49 → .25), but the LB rose only +0.020 | 12 §2, §6 |
+| E2 | That fix came from **data**, not steps (T5). **Init from the previous run beats scratch** at equal steps (T4) | 12 §2 |
+| E3 | Unseen VITS-style TTS regressed on v3 VAL: melo .05 → .19, mms .003 → .17 | 12 §2 |
+| **E8** | **Run 2's own v4 VAL is where the largest held-out errors are.** Rates at the pooled threshold, `run_breakdown.py` on T1–T3: see the table below. Both **H1 (modern zero-shot cloners)** and **H2 (in-the-wild Korean real)** are live, not only VITS | review of rev 1; re-verified |
+| E4 | Music EER did not move (PROBE .090 → .091). The **music and presence heads read BEATs only** (`c_run2.yaml` branches), so a bigger XLS-R cannot help music | 12 §3 |
+| E5 | Averaging the two *sibling* run-2 models gives nothing (PROBE 0.9107 vs 0.9103). It says nothing about a **cross-architecture** ensemble | 12 §7 |
+| E6 | XLS-R-1B@48 fits L4 inference: est. 10.1 min / 1200 files; 12.6 GiB (batch 8 × 60 s); weights +3.6 GB → zip ≈ 4–5 GB (limit 10). Encoder training ≈ 5.1×, full step ≈ 3.7× | 12 §7 |
+| E7 | Codec and telephone chains are not where the errors are | 10 F4 |
+| E9 | **The FILE mode max3 beats the learned FILE head on run 2 too**: file EER v4 .0727 → .0675, v3 .0565 → .0535, better on 4/4 folds each (≈ +0.002 score). Not implemented yet | review of rev 1 |
 
-## 2 · Levers, ranked
+**E8 detail** (v4 VAL, rate at the pooled threshold):
 
-### A. Model scaling (owner decision: XLS-R-1B)
-1. **XLS-R-1B, all 48 layers**, LoRA as today. BEATs and the heads start from run 2 T7; the encoder
-   LoRA starts fresh.
-2. **Layer-weighted fusion over all hidden layers** (learnable softmax weights, or attentive fusion)
-   instead of a truncated stack. Spoofing cues sit in the low and mid layers. Near-zero cost.
-3. Fallback if 1B is late or unstable: **XLS-R-300M, all 24 layers** (~1.2× step; the first 12 layers
-   start from run 2).
+| fold | held-out fake missed | real called fake |
+|---|---|---|
+| 1 | maskgct-en .41 (n 347), maskgct-ko .27 (n 471) | emilia-ko .18 (n 1031), emilia-en .11 |
+| 2 | seedvc-en .22 (n 190), seedvc-ko .11, melo .21 (n 410) | emilia-ko .15 |
+| 3 | mms .22, cosyvoice-en .15 | emilia-ko .18 |
 
-### B. Objective
-4. **One-class margin loss** (OC-Softmax style) on the voice and file heads. Real is the compact
-   class, so unseen fakes fall outside it.
-5. **Paired contrastive loss:** real ↔ its own fake, from the clone pairs and copy-synthesis (C8).
-6. **Corpus-adversarial head** (gradient reversal on source corpus). It removes corpus and speaker
-   shortcuts (E1's mechanism).
-7. *Stretch:* mixture of LoRA experts (4 experts, rank 8, utterance router, top-2, load-balancing
-   loss) in the top layers; or a small gated fusion across BEATs and the XLS-R layer groups.
+**OPEN:** the per-head LB split. The run-1 diag A/B packages exist, but see §6 on re-packaging
+them on T7.
 
-### C. Data mixture and new data
-8. **Vocoder / codec copy-synthesis of our real speech** (Emilia-ko/en, Zeroth, LibriTTS-R) through
-   4–6 neural vocoders and codec decoders, labelled fake. Speaker-, text- and room-matched pairs.
-   This is the strongest data lever for unseen generators (E3) and shortcuts (E1). GPU-hours, not
-   days.
-9. **VITS-style coverage** (E3): answer from run 3a (ko-synth ×2/×3, due ≈ 19:00). If the up-weight
-   does not recover melo/mms, add VITS/MMS-TTS/Piper-style EN + KO synthesis.
-10. **Music** (E4, pending diag): more fake-music families; check the music head on real mixtures.
-    Owner call once the diag split is known.
-11. Keep the run-2 draw-symmetry rules: repetition, processed share and language balanced per
-    label; audit gates on every config change.
+## 2 · Label rule that constrains data work (blocker in rev 1)
 
-### D. Training recipe
-12. Init policy: every module that exists in run 2 T7 starts from T7 (E2).
-13. Length: 1B needs more steps than a fine-tune. ESTIMATE ≥ 30k steps × batch 16 equivalents
-    (DDP). Checkpoint every pass for learning curves.
-14. *Optional:* SAM (≈ 2× step) — only if time allows.
+DACON #417333 A1 (docs/competition/05 lines 64–90):
+- post-processing that **does not generate a new voice/music component is REAL**, and that
+  includes neural codec round-trips;
+- S1 (`interim/proc`) already trains EnCodec / DAC / XCodec2 / Mimi round-trips of real speech
+  as **REAL**.
 
-### E. Evaluation and selection
-15. Judge on the diagnosed slices (E1/E3), not pooled VAL (mistake 16). Use run 1's exact v3 VAL
-    specs plus v4 VAL.
-16. PROBE is for ranking only; it over-reads LB gains by about 3×. The **LB is the final judge**:
-    reserve submissions for it.
-17. Diag A/B (already packaged) settle which head to invest in.
+Therefore:
+- **No codec-decoder copy-synthesis labelled fake.** Rev 1's "C1" is withdrawn. It would teach
+  the inverse of the target and contradict S1.
+- **Mel → neural-vocoder copy-synthesis is ambiguous under A1.** The team's own reading
+  (05 lines 82–86) treats "self vocoder/codec resynthesis" as REAL.
+  - **Owner question Q-L1:** WaveFake is exactly vocoder copy-synthesis of LJ, and it is 181 h of
+    our English *fake*. Keep it (it is a published deepfake benchmark), down-weight it further,
+    or ask DACON?
+  - Until answered, no *new* vocoder copy-synthesis is generated.
+- New fake data must be **genuine generation**: TTS / cloning / voice conversion, new text.
 
-### F. Inference
-18. **Per-file test-time augmentation** (a few crops or time shifts averaged within a file). Legal
-    under rule 2.4. It uses the runtime headroom; measure the gain on VAL first.
-19. Real `script.py` timing on the packaged 1B model before any submission (the E6 estimate is a
-    same-GPU ratio).
+## 3 · Levers (IDs are used everywhere below)
 
-## 3 · Proposed sequence (ESTIMATE; refine after DDP lands)
+### Model
+- **M1 XLS-R-1B** with a learnable **layer-weighted fusion** over hidden layers (M2). Depth:
+  **@48 vs @24** is a real choice.
+  - @24 costs 6.0 min inference and 4.0× encoder training; @48 costs 10.1 min and 5.1×.
+  - M2's own mechanism says the top layers carry speaker/content, which feeds the E1 shortcut.
+  - **Default @24 + fusion** unless the owner prefers @48. Fusion can down-weight the top.
+- **M2 layer-weighted fusion.** Softmax weights over layers (or per-layer attentive pooling).
+  Low and mid SSL layers keep the acoustic detail where generation artifacts live. Near-zero cost;
+  inspect the learned weights.
+- **M3 init.** XLS-R-1B has width 1280 vs 1024, so **the voice and file heads (0.63 of the score
+  weight) cannot load strictly** (`models/model.py:76`, `init_from` strict).
+  - Only BEATs + its LoRA and the BEATs-only heads (music, v_pres, m_pres) transfer from T7.
+  - Needs a **non-strict partial init** (or a 1280 → 1024 projection) and a cold-start budget for
+    the voice/file heads and the new LoRA.
+- **M4 fallback: XLS-R-300M@24.** Loads the first 12 layers + all heads from T7 strictly-compatible
+  (same width); ≈ 1.2× step. It is **actually trained** in R2 (§7) so it exists if 1B slips.
 
-| when (KST) | step |
+### Objective
+- **O1 one-class margin loss** (OC-Softmax) on the voice/file heads. Binary CE bounds the
+  *training* fakes; OC makes **real** the compact class, so an unseen fake only has to be
+  "not real".
+  - Fits E3/E8: the missed families sit at p̄ ≈ .5.
+  - Risk: in-the-wild real (Emilia) is diverse, so a tight real cluster can raise false alarms
+    (E8's H2).
+  - Needs new head parameters → non-strict init.
+- **O2 paired real ↔ own-fake contrastive.**
+  - Clone pairs share the **speaker** (not text or room).
+  - Needs a pair-aware sampler that puts a real clip and its clone in one batch — does not exist.
+    **Deferred.**
+- **O3 corpus-adversarial head** (gradient reversal on source corpus). Needs corpus labels through
+  collate — do not exist. **Deferred.**
+- **O4 mixture of LoRA experts** (MoLE). Risk of memorising training families, routing collapse,
+  no tuning time. **Deferred** (owner decision).
+- **O5 FILE mode max3** (E9): max(learned, v·vp, m·mp). **Implement and ship** — measured +≈ 0.002
+  on 8/8 fold readings.
+
+### Data (all genuine generation or real; §2)
+- **D1 more modern zero-shot cloners, ko + en** (E8's H1): new families not yet in the corpus
+  (e.g. F5-TTS, Spark-TTS, IndexTTS, OpenVoice-v2 / GPT-SoVITS-style VC), plus **more hours of the
+  weakest-generalising ones** (maskgct, seedvc).
+  - Prompts from Emilia speakers, dataset transcripts (owner rule).
+  - Licence check per model.
+- **D2 VITS-style TTS** (E3): run 3a's answer (ko-synth ×2/×3, due ≈ 19:00). If insufficient, add
+  MMS-TTS / Piper / Melo EN + KO.
+- **D3 more in-the-wild Korean real** (E8's H2: Emilia-ko false alarms .15–.18).
+  - More Emilia-ko / YODAS-ko hours and speakers.
+  - Channel-diverse Korean real (phone-band, broadcast) where licensable.
+- **D4 music** (E4): only if the per-head split says so. BEATs-side work.
+- **D5 draw symmetry** kept (11 §1.1): repeats, processed share and language balanced per label;
+  the audit gates run on every config change.
+
+### Training recipe
+- **R-init:** every module that fits loads from T7 (E2); new parts are cold (M3).
+- **R-len:** stated in the **global** batch. ESTIMATE for 1B: global batch 128 (8 GPUs × 16) ×
+  4–6k steps ≈ 0.5–0.8 M samples.
+  - Check the memory: 1B@48 takes 40 GiB at batch 4 in the bench, so per-GPU 16 needs activation
+    checkpointing or @24.
+  - The owner sets this with DDP.
+- **R-SAM:** sharpness-aware minimisation, ≈ 2× step. Only if time allows.
+
+### Inference
+- **I1 per-file TTA** (K crops/shifts averaged within one file; rule 2.4 compliant).
+  - **Cap K so the *timed* total ≤ 30 min**: with 1B@48 (≈ 10 min), K ≤ 2–3.
+  - Verify that batch padding does not make a file's output depend on its batch-mates.
+- **I2 cross-architecture ensemble** (T7 + the 1B model, ≈ 13 min). E5 does not rule it out;
+  measure it.
+
+## 4 · Hypotheses for the LB gap (what each experiment must separate)
+
+| # | hypothesis | on VAL today | what tests it |
+|---|---|---|---|
+| H1 | test fakes = generator families we have not seen | **yes**: maskgct .41/.27, seedvc .22, melo .21, mms .22 (E8) | D1/D2, O1, M1/M2: held-out-family EER |
+| H2 | test real = recording domains we under-cover → false alarms | **yes**: Emilia-ko .15–.18 false alarm (E8) | D3, O1 (watch it), M1: unseen-real EER |
+| H3 | music side weak on the test | unknown (VAL music fine) | per-head LB split |
+| H4 | file head mis-combines voice + music | partly: max3 beats learned (E9) | O5; per-head split |
+| H5 | presence | ≤ 0.0022 of score | per-head split (CPS) |
+
+## 5 · Evaluation and decision rule (rev 1's rule was not meaningful)
+
+**Metrics** (every ablation task; both v3 VAL = run 1's specs and v4 VAL):
+- **S1 held-out-family EER**: that family's fakes vs *all* reals of the fold. Threshold-free, so it
+  does not trade off against S2 through a shared threshold.
+- **S2 unseen-real EER**: that corpus's reals (Emilia-ko, musan, CV-ko) vs all fakes.
+- **S3 pooled score** (guard).
+
+**Decision:** keep a component only if it improves S1 or S2 by **≥ 2 binomial SE on both folds**
+without S3 dropping > 0.005.
+- SE is computed from the slice n; with n ≈ 300–1000 that is ≈ 0.02–0.04 absolute.
+- **Seed noise is measured**: the R1 baseline runs twice.
+- Effective n is below nominal (specs reuse speakers), so this rule is a floor, not a guarantee.
+
+**PROBE** is not used for ablations. HANDOFF §4 forbids it outside the final check, and its voice
+side is Chinese.
+
+**The LB is the final judge.** Ablations cannot reach it (they are fold models), so R2 also trains
+**all-data variants that are submitted on Sunday** (§7).
+
+## 6 · Per-head LB split — re-package on T7
+
+- Diag A/B were packaged on run 1. Run 2's voice head changed a lot (PROBE voice .276 → .061), so
+  a run-1 split mis-weights today's decisions.
+- **Re-package diag A/B on `run2-T7`** (the same `model/diag_constant.json` mechanism, `2cb5611`)
+  and submit tonight or Sunday morning, before the main run's content is fixed.
+- Limitation: EER is symmetric, so a per-head EER cannot separate misses from false alarms (H1
+  vs H2 inside a head). VAL (E8) is the evidence for that split.
+- It uses 2 of the day's 3 submissions; the owner schedules it.
+
+## 7 · Rounds and GPUs
+
+Owner's DDP/1B development and smoke tests need GPUs: **2 GPUs are reserved for the owner** from
+19:30 until the main run. The ablation rounds use 6.
+
+| round | when (KST, ESTIMATE) | GPUs | tasks | question |
+|---|---|---|---|---|
+| R0 | running → ≈ 19:00 | 4 | run 3a: ko-synth ×2 / ×3, folds 2, 3 | D2: does up-weighting recover melo/mms? |
+| R1 | Sat ≈ 19:30 → Sun ≈ 00:30 | 6 | folds 1 + 2 × {(a) baseline, (a') baseline seed 2, (b) + O1 one-class}; proxy = 300M@12 from run-2 fold models, 10k steps | seed noise; does O1 help S1 without hurting S2? |
+| gen | Sat ≈ 19:00 → Sun ≈ 06:00 | shares R1's 6 when idle, else CPU | D1 new cloner families + more maskgct/seedvc hours; D3 more Emilia-ko | new data for v5 |
+| v5 | Sun ≈ 06:00 → 07:30 | CPU | strategy-v5 = v4 + D1 + D2 fix + D3; pinned folds; audits (build_strategy_v4.sh pattern) | — |
+| R2 | Sun ≈ 07:30 → 12:00 | 6 | **all-data** T7 fine-tunes: (a) v5, (b) v5 + O1 (if R1 kept it); **M4 300M@24 + M2 fusion** on v5 (all-data, the fallback); + fold 1 of (a) for a VAL reading | LB tests on Sunday; the trained fallback |
+| main | Sun ≈ 12:00 → Mon early | 8 (DDP) | **1B + M2 + v5 (+ O1 if kept)**, all-data | the submission |
+| eval | alongside | CPU / idle GPU | O5 max3 on every candidate; I1 TTA K ∈ {1, 2, 3}; I2 T7+1B ensemble | inference-only gains |
+
+- **Sunday submissions:** best R2 all-data model (with max3), plus diag A/B on T7 if not already
+  done.
+- **Monday:** 1B main (+ I1/I2 if measured better); final picks Tuesday morning.
+- **Proxy → 1B transfer** is plausible for *data* effects, much less for *objective* effects (a
+  warm 300M fine-tune vs a cold 1B LoRA). A 1B fold-1 check (± component) is what would falsify
+  it; it needs 2 GPUs during the main run, which DDP takes. **This is not measured, and we say
+  so.**
+
+## 8 · Other methods considered (not planned)
+
+| method | why not now |
 |---|---|
-| now → Sun AM | owner: DDP + 1B + layer fusion. Lead: copy-synthesis data (C8), run-3a readout (C9), objective code behind flags (B4–B6) |
-| Sun AM | strategy-v5 build (v4 + copy-synthesis + VITS fix) with pinned folds and audits; short smoke of 1B-DDP |
-| Sun midday → Sun night | **run 3 main**: 1B all-data (DDP). A small fold check in parallel if GPUs allow |
-| Mon AM | package, time on the server mirror, PROBE → **submit** |
-| Mon → Tue 10:00 | one more iteration (fine-tune / TTA / music), final 1–2 submissions |
+| AASIST-style graph back-end | our SED heads + presence masking would need re-validation |
+| label smoothing / mixup | weak evidence for unseen generators |
+| distillation from a larger teacher | the teacher has to be trained first |
+| pseudo-labelling the test | the test is hidden |
+| test-set statistics / rank normalisation | forbidden (rule 2.4) |
+| sub-band models | revisit only if the split shows the file head is the problem |
+| longer training on the same data | flat after ~36k (10 F7) |
+| same-init weight soup | only valid for all-data fine-tunes of the shipped architecture; the R2 all-data variants make it testable, otherwise dropped |
+| external real-world eval set (e.g. In-the-Wild) | useful to calibrate VAL against the LB; eval-only, licence check first — *owner call* |
 
-## 4 · Decisions for the owner
+## 9 · Owner decisions
 
-1. **Objective:** one-class and paired losses in run 3 (B4, B5), or data-only first?
-2. **MoLE** (B7): run 3 or later?
-3. **Music investment** (C10): waits on the diag A/B scores.
-4. **Fold runs for 1B:** some validation runs, or all-data only (faster to a submission)?
+1. **Q-L1** WaveFake (vocoder copy-synthesis labelled fake) vs DACON A1: keep, down-weight, or ask
+   DACON?
+2. 1B depth: **@24 + fusion** (default) or @48?
+3. O1 one-class: in R1 (default) or skip?
+4. O4 MoLE: deferred (default) or in?
+5. When to submit diag A/B on T7 (2 submissions)?
+6. External eval-only set (In-the-Wild) for calibration: yes / no?
 
-## 5 · Sections to expand (owner)
-- [ ] A: exact architecture (fusion form, LoRA targets and rank for 1B, heads)
-- [ ] B: loss definitions, weights, which heads
-- [ ] C: copy-synthesis vocoder list, hours, label and fold rules; v5 draw weights
-- [ ] D: step budget, LR, schedule, batch under DDP
-- [ ] E: acceptance criteria per slice; submission schedule
-- [ ] F: TTA scheme and its runtime budget
+## 10 · Review log
 
----
+Rev 1 adversarial review (critic agent, read-only + CPU checks; `run_breakdown.py` on v4 VAL):
 
-# Details (expanded 2026-09-26 evening)
+| finding | resolution |
+|---|---|
+| **BLOCKER** copy-synthesis labelled fake contradicts DACON A1 and S1 | withdrawn (§2); new fake data = genuine generation; WaveFake raised as Q-L1 |
+| MAJOR largest held-out failures (v4 VAL) ignored | E8 added; H1/H2 re-weighted; D1/D3 added |
+| MAJOR decision rule not meaningful | threshold-free per-slice EER, ≥ 2 SE both folds, seed replicate (§5) |
+| MAJOR no ablation reaches the LB | R2 is all-data variants submitted Sunday (§7) |
+| MAJOR GPU/time conflicts; "small loss additions" false | 2 GPUs reserved for the owner; O2/O3 deferred (need a sampler / labels); one v5 time (§7) |
+| MAJOR heads cannot load from T7 at width 1280 | M3: partial init + cold-start budget |
+| MAJOR D3 soup unshippable | dropped unless it is all-data variants of the shipped architecture (§8) |
+| MAJOR diag A/B on the wrong model; over-claimed | re-package on T7; limitation stated (§6) |
+| minor: gap share 97.5 %; headroom ~6× for 1B; ID collisions; @24 vs @48; zip size; step budget in global batch; max3 decidable now; PROBE use; pair claim; E5 overstated; §4/§9 consistency; fold 2 also holds openvoice | all fixed in place (E5, E6, E9, M1, M3, O2, O5, R-len, I1, §5) |
 
-## 6 · Why the leaderboard moved so little — hypotheses to test
-
-Run 1 → run 2 moved the LB +0.020 but PROBE +0.058 and v3 VAL +0.006. The LB-to-VAL gap is the
-real problem, so every experiment should separate these:
-
-| # | hypothesis | predicts | discriminating evidence |
-|---|---|---|---|
-| H1 | **Test fakes come from generator families we never trained on** (commercial TTS, newer cloners, VITS-style) | voice and file EER high on the LB; held-out-family misses high on VAL | diag B voice EER; held-out family miss per fold (12 §2: melo .19, mms .17) |
-| H2 | **Test real audio is a recording domain we under-cover** (phone, broadcast, lossy uploads, spontaneous speech) → false alarms | real-side false alarms dominate; pooled EER inflated by real | CV-ko / Emilia false alarms on VAL; diag B voice EER vs diag A file EER |
-| H3 | **Music side is weak on the test** (fake-music generators, real mixtures) | diag A plus run-1 ADS → music EER high | diag A/B → music EER by subtraction |
-| H4 | **The file head mis-combines voice and music** on real mixtures | file EER ≫ max(voice, music) contribution | diag A file EER vs B voice EER |
-| H5 | **Presence** is harder on the test (CPS .977 vs leader .999) | worth ≤ 0.0022 of score; low priority | CPS from both diag submissions (they isolate each AUC) |
-
-**Diag A/B are the cheapest experiment we have:** 2 submissions settle H3–H5 and weight H1 vs H2.
-They are packaged; the owner submits.
-
-## 7 · Methods — why each should help, cost, risk, how we measure it
-
-Mechanisms are stated against our own evidence. Literature is named only where the method is a
-well-known published one. **Citations are from memory: verify before quoting outside the team.**
-
-| method | why it should generalise (mechanism) | evidence it fits *our* failure | cost | risk | measured by |
-|---|---|---|---|---|---|
-| **A1 XLS-R-1B** (all 48 layers) | A larger SSL model pre-trained on more speech has a richer "what natural speech sounds like" prior. Artifacts of unseen generators fall outside it. The SSL front-end + light back-end recipe (e.g. Tak et al. 2022, wav2vec 2.0 + AASIST + RawBoost) is the standard strong baseline for unseen attacks | H1/H2 are generalisation failures; E5 says averaging our current representation adds nothing | inference ~3× (est. 10 min / 1200), encoder training ~5× | new encoder LoRA starts cold; more steps needed; overfits the training generators if data stays narrow | fold VAL diagnosed slices; PROBE; LB |
-| **A2 layer-weighted fusion** (softmax over all hidden layers, or per-layer attentive pooling) | Low and mid SSL layers keep acoustic/phase detail where vocoder and codec artifacts live; top layers drift to phonetic and speaker content, which feeds the speaker shortcut (E1). Letting the model choose layers keeps the artifact layers. Layer-selection classifiers on XLS-R (e.g. "SLS", Zhang et al. 2024) report gains | E1: the pooled number was carried by speaker/corpus identity | ~0 params, ~0 time | little; can collapse to one layer (inspect the weights) | same + learned layer weights |
-| **A3 XLS-R-300M@24** (fallback) | same as A1, smaller | — | ~1.2× step | smaller gain | same |
-| **B1 one-class margin loss** (OC-Softmax, Zhang et al. 2021) | Binary CE learns a boundary around the *training fakes*; OC pulls **real** into a tight region and pushes anything else out by a margin, so an unseen fake only has to be "not real" | H1 (unseen families): run 2 misses melo/mms with p̄ ≈ 0.5, i.e. they sit between the classes | ~0 | if real is too diverse (Emilia in-the-wild), the real cluster is loose → false alarms rise (H2). Tune the margin | held-out-family miss vs real false alarm |
-| **B2 paired real ↔ own-fake contrastive** | The same speaker, text and room on both sides leave the generator as the *only* difference; the loss forces features that encode the artifact, not identity | E1 (T3 gap .083 still), H1 | small; needs pairs (clone pairs exist; C1 gives many more) | little | T3 gap; held-out-family miss |
-| **B3 corpus-adversarial head** (gradient reversal on source corpus / recording chain) | Removes "which corpus is this" from the features; the LJ/musan false alarms were corpus identity | E1 mechanism | small | can also remove useful channel cues; keep its weight small | real false alarm per unseen corpus |
-| **B4 mixture of LoRA experts** (MoLE; top-k LoRA experts with a router) | Generator families differ (vocoder / codec-LM / VC / VITS); experts can specialise while sharing the backbone | H1 | moderate code; more params | memorises training families; routing collapse; hard to tune in 2 days | same slices; expert utilisation |
-| **C1 vocoder/codec copy-synthesis of our real speech** (fake labels; Wang & Yamagishi 2023 show vocoded data is an efficient spoofing training set) | Every modern TTS/cloner ends in a vocoder or codec decoder; copy-synthesis teaches those artifacts on **our** speakers and rooms, so real/fake differ *only* in the artifact (kills E1-type shortcuts and covers H1) | E1, E3, H1 | GPU-hours; the S1 code path already runs codecs (`scripts/proc`) | a label shortcut if the drawn shares are asymmetric → audits (11 §1.1) | held-out family miss; T3 gap; audit I1c |
-| **C2 VITS-style coverage** (ko-synth ×2/×3 draw weight, or new MMS-TTS/Piper/Melo EN+KO) | E3 regression | E3 | draw weight: 0; synthesis: hours | — | run 3a (due ≈ 19:00): melo / mms miss |
-| **C3 in-the-wild / channel real** (more Emilia, phone-band real, broadcast) | H2 | CV-ko false alarm still .02–.11 | hours | — | real false alarm |
-| **C4 music** (more fake-music families, real music mixed at realistic ratios) | H3; music head reads BEATs only (`c_run2.yaml` branches) | E4 flat | hours–day | — | music EER, cell 4/6 |
-| **D1 init from T7** where modules match | E2 | E2 | 0 | carries run-2 biases | T4-style control |
-| **D2 SAM** (sharpness-aware minimisation; reported to help cross-dataset anti-spoofing) | Flatter minima transfer better under domain shift | H1/H2 | ~2× step | time | same slices |
-| **D3 weight soup of fine-tunes from one init** | Unlike run 1's soup (54k steps apart), short fine-tunes from the same T7 init stay in one basin; averaging them is a free ensemble at no inference cost | E5 says prediction ensembles of *different* runs add nothing; a same-basin soup is a different claim — test it | 0 train (reuses ablation runs), 0 inference | may equal the best single model | PROBE, VAL |
-| **F1 per-file TTA** (average over K crops/shifts within a file) | Reduces variance on long files; uses the runtime headroom; legal under rule 2.4 (per file) | runtime 3 m / 60 m | K× inference | little | VAL/PROBE with vs without |
-| **F2 file-head mode max3** (11 §2) | Label-consistent OR of the present heads | run 1: 0.060 vs 0.064 file EER | 0 | small | fold VAL |
-
-## 8 · Other methods considered (not planned unless evidence says so)
-
-- **AASIST-style graph back-end** on the SSL features. A strong published back-end, but our heads
-  are SED heads with presence masking; swapping them costs a re-validation we cannot afford. *Later.*
-- **Label smoothing / mixup between real and fake.** Mild calibration gains; weak evidence for
-  unseen generators.
-- **Knowledge distillation from a larger teacher** (e.g. XLS-R-2B). Needs the teacher trained
-  first; no time.
-- **Pseudo-labelling the test.** Impossible: the test is hidden (code submission).
-- **Test-set statistics / rank normalisation.** Forbidden (rule 2.4, per file only).
-- **Frequency-band / sub-band models** (high-band artifacts). Covered in part by BEATs and the
-  multi-layer fusion; revisit only if diag shows the file head is the problem.
-- **Longer training at the same data.** Measured flat after ~36k (10 F7); no.
-
-## 9 · Ablation plan
-
-**Principle.** Ablate on the **cheap proxy** (today's architecture, XLS-R-300M@12, init from run 2's
-fold models, 10k steps, ~3.5–4 h per round on 8 GPUs). Transfer the winners into the **1B main
-run**. The 1B run itself gets one component check (A2) through its fold-validation tasks.
-
-**Folds used for ablations: fold 1 and fold 2**, each task paired over the two.
-- Fold 1 holds out XTTS (unseen cloner) and maskgct, and has musan and CV-ko real (H2).
-- Fold 2 holds out melo (VITS-style, E3) and seedvc (voice conversion).
-- Fold 0's LJ test stays in the final check.
-
-**Metrics for every task** (on run 1's exact v3 VAL specs *and* v4 VAL, via `post_run2.sbatch`-
-style scoring + `run_breakdown.py`):
-- M1 held-out-family miss rate (xtts, melo, maskgct, seedvc) at the pooled threshold;
-- M2 real false alarm on unseen real corpora (musan, CV-ko, Emilia VAL);
-- M3 T3 matched-pair gap (fold 0 only, final check);
-- M4 pooled score (guard: must not drop > 0.005).
-
-**Decision rule:** a component is kept if it improves **M1 or M2 on both folds** without hurting
-the other by more than its gain, and M4 holds.
-
-| round | when (KST, ESTIMATE) | tasks (8 GPUs = 4 variants × folds 1, 2) | question |
-|---|---|---|---|
-| R0 | running → 19:00 | run 3a: ko-synth ×2 / ×3, folds 2, 3 | C2: does up-weighting recover melo/mms? |
-| R1 | Sat 19:30 → Sun 00:00 | (a) baseline: continue on v4; (b) + B1 one-class; (c) + B2 paired contrastive; (d) + B3 corpus-adversarial | which objective terms help unseen families / unseen real |
-| R2 | Sun 00:30 → 05:00 | (a) v5 data (+ C1 copy-synthesis, + C2 fix); (b) v5 + R1 winner; (c) v5 + winner + D2 SAM *or* B4 MoLE; (d) A3 300M@24 + fusion | does copy-synthesis help; does the stack compose |
-| — | Sun 05:00 → | eval-only: D3 soups of the R1/R2 fine-tunes; F1 TTA K ∈ {1, 3, 5}; F2 max3 | free gains at inference |
-| main | Sun midday → Mon early | **1B + A2 fusion + winners + v5**, all-data (DDP), plus a small fold check if GPUs allow | the submission |
-
-**Budget check.**
-- R1 and R2 need the objective code (B1–B3) behind flags by ≈ 19:30 and the v5 data by ≈ 00:30.
-  - B1–B3: the lead writes them tonight; they are small loss additions.
-  - C1: generated tonight on GPUs 4–7 *until R1 starts*, then on CPU where possible.
-- The data side: v5 = v4 + C1 + C2. It is built with the pinned folds (the new families are placed
-  like run 2's), and the audits must pass.
-- If the objective code is not ready by 19:30, R1 runs the data questions first and the rounds
-  swap order.
-
-## 10 · Double-check log
-(filled after review)
+Literature named in rev 1 (Tak 2022 SSL+AASIST+RawBoost; Zhang/Jiang/Duan 2021 OC-Softmax;
+Wang & Yamagishi 2023 vocoded training data; Zhang 2024 SLS) was judged correct by the reviewer.
+The SAM-for-anti-spoofing attribution is unsure. Rev 2 names methods, not citations.
