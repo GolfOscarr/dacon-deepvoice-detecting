@@ -59,3 +59,40 @@ Music did not move: run 2 changed nothing on the music side.
 - ~1.0–1.2 s/step (single task: 0.86); `data_wait_s` 1–10 s per 50 steps.
 - Peak ≈ 104 GiB per GPU with checkpointing off.
 - 20k steps: 6 h 50 m – 7 h 25 m wall, including the end-of-run VAL.
+
+## 6 · Leaderboard: run 2 (T7)
+
+`run2-T7` scored **0.81144** (ADS 0.79302, CPS 0.97730); server runtime **3 min 09 s** for 1,200
+files. Against run 1: +0.020 (ADS +0.020, CPS +0.014). PROBE had moved +0.058, so PROBE
+over-reads the gain by about 3×.
+
+## 7 · Sizing measurements for run 3 (no training)
+
+**Ensemble** (`scripts/eval_probe.py --ensemble`, PROBE n 3000):
+
+| | score |
+|---|---|
+| T6 | 0.9067 |
+| T7 | 0.9103 |
+| per-file prob mean | 0.9102 |
+| per-file logit mean | 0.9107 |
+
+No gain: the two run-2 models make near-identical errors.
+
+**Encoder size** (`scripts/diag/bench_encoders.py`, one H200; inference fp32, batch 8 × 60 s as
+shipped; training bf16, batch 4 × 60 s, full activation backward). The L4 estimate =
+3 m 09 s × (current − XLS-R-300M@12 + candidate) / current. Current full model: 0.588 s per batch.
+
+| encoder | params | infer s/batch | infer peak | est. L4 min / 1200 | encoder train step vs today's |
+|---|---|---|---|---|---|
+| XLS-R-300M @12 (today) | 164M | 0.363 | 9.5 GiB | 3.1 | 1.0× |
+| XLS-R-300M @24 | 315M | 0.615 | 10.1 GiB | 4.5 | 1.26× |
+| XLS-R-1B @24 | 490M | 0.894 | 10.8 GiB | 6.0 | 4.0× |
+| XLS-R-1B @48 | 963M | 1.657 | 12.6 GiB | 10.1 | 5.1× |
+| XLS-R-2B @48 | 2,159M | 2.814 | 17.1 GiB | 16.3 | 7.2× |
+| w2v-BERT 2.0 @24 | 581M | 1.328 | **26.9 GiB (> L4 24 GB at batch 8)** | 8.3 | OOM at batch 4 × 60 s — **UNMEASURED** |
+
+The encoder is ~⅔ of today's step. Estimated full step: 300M@24 ≈ 1.2×; 1B@48 ≈ 3.7×.
+
+Weights are under `/data/project/private/dacon-weights/{xlsr-1b,xlsr-2b,w2v-bert-2.0}`, with
+README.txt provenance (revision, sha256; Apache-2.0 / Apache-2.0 / MIT).

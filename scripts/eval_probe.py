@@ -24,10 +24,12 @@ import json
 import pathlib
 import sys
 
+import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+from metrics.dacon import PREDICTION_COLUMNS, dacon_score  # noqa: E402
 from models.model import load_checkpoint  # noqa: E402
 from processing.config import load_processing_config  # noqa: E402
 from processing.render import ManifestIndex  # noqa: E402
@@ -49,6 +51,9 @@ def main() -> int:
     p.add_argument("--processing", default="configs/processing_first_run.yaml")
     p.add_argument("--scored", action="append", required=True)
     p.add_argument("--soup", action="store_true", help="also score the uniform soup")
+    p.add_argument("--ensemble", action="store_true",
+                   help="also score the per-file PREDICTION average of the single models "
+                        "(prob mean and logit mean) -- per file, so legal under rule 2.4")
     p.add_argument("--weights", required=True)
     p.add_argument("--eval-n", type=int, default=3000)
     p.add_argument("--eval-seed", type=int, default=4321)
@@ -68,6 +73,7 @@ def main() -> int:
     w = _weights(args.weights)
 
     rows = []
+    preds = {}
     candidates = [(str(s), [s]) for s in args.scored]
     if args.soup and len(args.scored) > 1:
         candidates.append((f"soup of {len(args.scored)}", args.scored))
@@ -75,7 +81,10 @@ def main() -> int:
         model = load_checkpoint(paths[0], weights=w)
         if len(paths) > 1:
             model.load_state_dict(checkpoint_soup(paths), strict=True)
-        m = evaluate(model, ds, batch_size=8, device=args.device, precision="fp32").metrics
+        report = evaluate(model, ds, batch_size=8, device=args.device, precision="fp32")
+        m = report.metrics
+        if len(paths) == 1:
+            preds[name] = report.predictions
         row = {"model": name, "eval_n": args.eval_n,
                **{k: float(v) for k, v in dataclasses.asdict(m).items()
                   if isinstance(v, (int, float))}}
@@ -84,6 +93,28 @@ def main() -> int:
               f"voice {row['eer_voice']:.4f}  music {row['eer_music']:.4f}", flush=True)
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    for i, (name, df) in enumerate(preds.items()):
+        df.assign(model=name).to_parquet(out / f"probe_pred_{i}.parquet", index=False)
+    if args.ensemble and len(preds) > 1:
+        frames = list(preds.values())
+        base = frames[0].copy()
+        for how in ("prob_mean", "logit_mean"):
+            ens = base.copy()
+            for c in PREDICTION_COLUMNS:
+                stack = np.stack([f.set_index("file_id").loc[base["file_id"], c].to_numpy()
+                                  for f in frames])
+                if how == "prob_mean":
+                    ens[c] = stack.mean(0)
+                else:
+                    z = np.log(np.clip(stack, 1e-12, 1 - 1e-12) / np.clip(1 - stack, 1e-12, 1))
+                    ens[c] = 1 / (1 + np.exp(-z.mean(0)))
+            m = dacon_score(ens)
+            row = {"model": f"ensemble {how} of {len(frames)}", "eval_n": args.eval_n,
+                   **{k: float(v) for k, v in dataclasses.asdict(m).items()
+                      if isinstance(v, (int, float))}}
+            rows.append(row)
+            print(f"{row['model']:<70} score {row['score']:.4f}  file {row['eer_file']:.4f}  "
+                  f"voice {row['eer_voice']:.4f}  music {row['eer_music']:.4f}", flush=True)
     (out / "probe_eval.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
     return 0
 
