@@ -32,7 +32,7 @@ from metrics.dacon import PREDICTION_COLUMNS
 __all__ = [
     "AdapterConfig", "AggregationConfig", "AudioConfig", "AuxConfig",
     "BranchConfig", "ConfigError", "DistillConfig", "FileHeadConfig",
-    "FreqPoolConfig", "FrontendConfig", "LossConfig", "ModelConfig",
+    "FreqPoolConfig", "FrontendConfig", "FusionConfig", "LossConfig", "ModelConfig",
     "OutputConfig", "RuntimeConfig", "SEDHeadConfig", "SegmentationConfig",
     "TrainConfig",
     "load_model_config", "load_train_config", "dump_config",
@@ -144,6 +144,26 @@ class FreqPoolConfig:
     rectifier: str = "softplus"   # softplus | clamp
 
 
+#: Frontends whose wrapper can hand every kept transformer layer to a fusion.
+FUSABLE_FRONTENDS = ("xlsr_300m", "xlsr_1b")
+
+
+@dataclass(frozen=True)
+class FusionConfig:
+    """Learnable layer fusion over a frontend's kept transformer layers
+    (docs/training/13 M2).
+
+    `weighted`: every branch that reads this frontend gets its own softmax over
+    the layers, and reads the weighted sum of the layer outputs, each normalised
+    by a non-affine layer norm first -- XLS-R is pre-LN, so the residual stream
+    between blocks is unnormalised and its scale grows with depth. The weights
+    live in the top-level ``model.fusion`` (not under ``model.frontends``) so the
+    frontend hold does not freeze them. `none` = the frontend's last layer, as
+    before.
+    """
+    kind: str = "none"                # none | weighted
+
+
 @dataclass(frozen=True)
 class FrontendConfig:
     name: str
@@ -171,6 +191,7 @@ class FrontendConfig:
     #: outputs move by float rounding, not by what a row can see. False = the
     #: per-row loop run 1 trained with.
     batched_tokens: bool = False
+    fusion: FusionConfig = field(default_factory=FusionConfig)
 
     def __post_init__(self) -> None:
         if self.window_patches is not None and self.window_patches < 1:
@@ -518,6 +539,20 @@ def validate_model_config(cfg: ModelConfig) -> None:
             raise ConfigError(
                 f"frontends.{name}: an unfrozen frontend with adapters is almost never "
                 "intended -- set adapter.kind: none or freeze: true")
+        if fe.fusion.kind not in ("none", "weighted"):
+            raise ConfigError(f"frontends.{name}.fusion.kind invalid: {fe.fusion.kind!r}")
+        if fe.fusion.kind != "none":
+            if fe.name not in FUSABLE_FRONTENDS:
+                raise ConfigError(
+                    f"frontends.{name}: fusion is implemented for {list(FUSABLE_FRONTENDS)}, "
+                    f"not {fe.name!r}")
+            if not any(name in br.sources for br in cfg.branches.values()):
+                # its fusion and adapter would receive no gradient: a DDP hang
+                raise ConfigError(f"frontends.{name}: fused but read by no branch")
+            if cfg.distill.enabled or cfg.aux.separation_head:
+                raise ConfigError(
+                    f"frontends.{name}: fusion with distill / separation_head is not "
+                    "implemented -- those read one (B, T, D) output per frontend")
 
     if not cfg.branches:
         raise ConfigError("model: at least one branch is required")

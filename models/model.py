@@ -28,7 +28,8 @@ from models.heads import SEDHead
 from models.outputs import branch_logit, to_probability
 from models.utils import align_time
 
-__all__ = ["DeepVoiceNet", "load_checkpoint", "save_checkpoint", "shipped_weights"]
+__all__ = ["DeepVoiceNet", "LayerFusion", "load_checkpoint", "save_checkpoint",
+           "shipped_weights"]
 
 #: Config fields the *model* deliberately does not read, with who owns them.
 #: tests/test_model.py asserts that every other field is read somewhere, so a
@@ -55,6 +56,84 @@ CONSUMED_ELSEWHERE = {
 }
 
 
+_LN_EPS = 1e-5
+
+
+def _norm(h: Tensor) -> tuple[Tensor, Tensor]:
+    """Non-affine layer norm over the last dim, in at least float32: (y, 1/sigma)."""
+    h = h.to(torch.promote_types(h.dtype, torch.float32))
+    mu = h.mean(-1, keepdim=True)
+    rstd = torch.rsqrt(h.var(-1, unbiased=False, keepdim=True) + _LN_EPS)
+    return (h - mu) * rstd, rstd
+
+
+class _WeightedLayerSum(torch.autograd.Function):
+    """``sum_l p[l] * LN(h_l)``, in at least float32, streaming in both directions.
+
+    Autograd over the plain expression would keep all L normalised layers --
+    L x (B, T, D), 24 x 1280 wide on XLS-R-1B -- alive from the forward to the
+    backward. The backward instead recomputes one layer's norm at a time from
+    ``h_l``, which the encoder keeps for its own backward anyway, so the fusion
+    adds O(one layer) of memory rather than O(L).
+    """
+
+    @staticmethod
+    def forward(ctx, p: Tensor, *hs: Tensor) -> Tensor:
+        out = None
+        for i, h in enumerate(hs):
+            y = _norm(h)[0] * p[i]
+            out = y if out is None else out + y
+        ctx.save_for_backward(p, *hs)
+        return out
+
+    @staticmethod
+    def backward(ctx, g: Tensor):
+        p, *hs = ctx.saved_tensors
+        g = g.to(torch.promote_types(g.dtype, torch.float32))
+        grad_p = torch.empty_like(p) if ctx.needs_input_grad[0] else None
+        grads = []
+        for i, h in enumerate(hs):
+            y, rstd = _norm(h)
+            if grad_p is not None:
+                grad_p[i] = (g * y).sum()
+            if ctx.needs_input_grad[1 + i]:
+                dy = g * p[i]
+                dx = rstd * (dy - dy.mean(-1, keepdim=True)
+                             - y * (dy * y).mean(-1, keepdim=True))
+                grads.append(dx.to(h.dtype))
+            else:
+                grads.append(None)
+        return (grad_p, *grads)
+
+
+class LayerFusion(nn.Module):
+    """docs/training/13 M2: per (branch, fused frontend), a softmax over the
+    frontend's kept layers, applied to the layer-normalised layer outputs.
+
+    Parameters are ``fusion.<branch>.<source>``, a (L,) logit vector at zero:
+    a uniform average at init. Every branch reading a fused source applies its
+    own, so every parameter here is used in every forward (DDP runs with
+    ``find_unused_parameters=False``).
+    """
+
+    def __init__(self, pairs: dict[str, dict[str, int]]):
+        super().__init__()
+        self.logits = nn.ModuleDict({
+            branch: nn.ParameterDict({src: nn.Parameter(torch.zeros(n))
+                                      for src, n in srcs.items()})
+            for branch, srcs in pairs.items()})
+
+    def weights(self, branch: str, source: str) -> Tensor:
+        return torch.softmax(self.logits[branch][source].float(), dim=0)
+
+    def forward(self, branch: str, source: str, layers: tuple[Tensor, ...]) -> Tensor:
+        p = self.weights(branch, source)
+        if len(layers) != p.numel():
+            raise ValueError(f"fusion {branch}.{source}: {p.numel()} weights for "
+                             f"{len(layers)} layers")
+        return _WeightedLayerSum.apply(p, *layers)
+
+
 class DeepVoiceNet(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
@@ -76,6 +155,14 @@ class DeepVoiceNet(nn.Module):
             in_dim = sum(cfg.frontends[s].output_dim for s in br.sources)
             self.heads[name] = SEDHead(in_dim, br.head)
 
+        # 13 M2. A TOP-LEVEL module, not under `frontends`: the frontend hold
+        # (LoopConfig.frontend_hold_steps) must not freeze it.
+        pairs = {name: {s: self.frontends[s].n_layers for s in br.sources
+                        if cfg.frontends[s].fusion.kind != "none"}
+                 for name, br in cfg.branches.items()}
+        pairs = {k: v for k, v in pairs.items() if v}
+        self.fusion = LayerFusion(pairs) if pairs else None
+
         # Training-only appendages. Both are deleted before packaging, so neither
         # may contribute to a submission column.
         self.distill_head = None
@@ -92,6 +179,11 @@ class DeepVoiceNet(nn.Module):
     def _branch_input(self, name: str, encoded: dict[str, tuple[Tensor, Tensor]]):
         """Gather a branch's sources onto one time base and concatenate."""
         br = self.cfg.branches[name]
+        if self.fusion is not None and name in self.fusion.logits:
+            # a fused source's features are its layer outputs: this branch's mix
+            encoded = {s: ((self.fusion(name, s, encoded[s][0]), encoded[s][1])
+                           if s in self.fusion.logits[name] else encoded[s])
+                       for s in br.sources}
         if len(br.sources) == 1:
             return encoded[br.sources[0]]
 

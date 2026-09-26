@@ -15,6 +15,12 @@ Layout written (and zipped to <out>.zip):
     model/weights/<frontend>/                        what each pretrained frontend needs to
                                                      construct offline (models.model.shipped_weights)
 
+XLS-R-1B is shipped PRE-TRUNCATED to the config's ``layers`` (docs/training/14 §5.3):
+``config.json`` says ``num_hidden_layers: <layers>`` and the ``.bin`` holds only those
+blocks -- 24 of 48 is ~1.9 GB instead of 3.9 GB. The frontend's own truncation is then a
+no-op, and every weight is overwritten by the strict load of ``scored.pt`` regardless;
+the shipped-copy check at the end of `main` proves the result bitwise.
+
 Several ``--scored`` are averaged with `training.checkpoint.checkpoint_soup`,
 which refuses checkpoints of different architectures; their processing.json
 files must be identical. requirements.txt is empty on purpose: every package
@@ -32,6 +38,7 @@ import argparse
 import dataclasses
 import json
 import pathlib
+import re
 import shutil
 import sys
 
@@ -47,7 +54,31 @@ from training.checkpoint import checkpoint_soup  # noqa: E402
 CODE = ("models", "processing", "training", "metrics")
 #: what each frontend kind needs on disk to construct
 NEEDED = {"beats": ("BEATs_iter3_plus_AS2M.pt",),
-          "xlsr_300m": ("config.json", "*.bin", "*.safetensors", "preprocessor_config.json")}
+          "xlsr_300m": ("config.json", "*.bin", "*.safetensors", "preprocessor_config.json"),
+          "xlsr_1b": ("config.json", "*.bin", "*.safetensors", "preprocessor_config.json")}
+#: frontends whose snapshot ships cut to the config's `layers` (see the docstring)
+TRUNCATE_ON_SHIP = ("xlsr_1b",)
+_LAYER_KEY = re.compile(r"(?:^|\.)encoder\.layers\.(\d+)\.")
+
+
+def ship_truncated_xlsr(src: pathlib.Path, dst: pathlib.Path, layers: int) -> int:
+    """Copy a wav2vec2 snapshot keeping only encoder blocks ``< layers``; returns
+    the number of files written."""
+    cfg = json.loads((src / "config.json").read_text(encoding="utf-8"))
+    if layers > cfg["num_hidden_layers"]:
+        raise SystemExit(f"layers={layers} > the snapshot's {cfg['num_hidden_layers']}")
+    bins = sorted(src.glob("*.bin"))
+    if len(bins) != 1 or list(src.glob("*.safetensors")):
+        raise SystemExit(f"{src}: expected one pytorch_model.bin and no safetensors")
+    state = torch.load(bins[0], map_location="cpu", weights_only=True)
+    kept = {k: v for k, v in state.items()
+            if not ((m := _LAYER_KEY.search(k)) and int(m.group(1)) >= layers)}
+    torch.save(kept, dst / bins[0].name)
+    cfg["num_hidden_layers"] = layers
+    (dst / "config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    shutil.copy2(src / "preprocessor_config.json", dst / "preprocessor_config.json")
+    print(f"  {dst.name}: {len(kept)} of {len(state)} tensors ({layers} layers)")
+    return 3
 
 
 def _weights_arg(s: str) -> dict[str, pathlib.Path]:
@@ -129,7 +160,9 @@ def main() -> int:
         dst = model_dir / "weights" / name
         dst.mkdir(parents=True)
         copied = 0
-        for pattern in NEEDED.get(fe.name, ("*",)):
+        if fe.name in TRUNCATE_ON_SHIP and fe.layers is not None:
+            copied = ship_truncated_xlsr(src, dst, fe.layers)
+        for pattern in (() if copied else NEEDED.get(fe.name, ("*",))):
             for f in src.glob(pattern):
                 shutil.copy2(f, dst / f.name)
                 copied += 1

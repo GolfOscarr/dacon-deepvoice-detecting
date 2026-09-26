@@ -141,6 +141,63 @@ def init_from(model: DeepVoiceNet, path: str) -> None:
     print(f"  initialised from {path}", flush=True)
 
 
+def init_partial(model: DeepVoiceNet, path: str) -> dict[str, list[str]]:
+    """docs/training/13 M3 / 14 §5.1: initialise what fits from a scored.pt of a
+    DIFFERENT architecture (run-2 T7, 300M@12, into 1B@24 + fusion).
+
+    A key loads when its name AND shape match. On top of that:
+
+    * a head (``heads.<name>``) and a frontend (``frontends.<name>``) load
+      all-or-nothing: one missing or mismatched key leaves the WHOLE module at
+      its fresh init -- a head whose first layer is fresh and whose later layers
+      are T7's is neither model. 🔴 For a frontend this is not tidiness: the
+      300M and 1B CNN feature extractors have the SAME shapes (512 channels), so
+      a key-by-key load would put 300M's CNN under 1B's transformer;
+    * everything else that does not fit (the fusion) stays fresh, and is reported;
+    * nothing of BEATs (a ``beats`` frontend) loading is refused: then this is
+      not a partial init of the T7 model at all.
+
+    Run on every rank before the DDP wrap, so every rank holds the same result.
+    Returns {"loaded": [...], "fresh": [...], "unused": [...]} (keys).
+    """
+    from training.distributed import current as current_dist
+
+    src = torch.load(path, map_location="cpu", weights_only=False)["state_dict"]
+    own = model.state_dict()
+    fits = {k for k, v in own.items() if k in src and tuple(src[k].shape) == tuple(v.shape)}
+    for prefix in ([f"heads.{n}." for n in model.heads]
+                   + [f"frontends.{n}." for n in model.frontends]):
+        keys = [k for k in own if k.startswith(prefix)]
+        if not all(k in fits for k in keys):
+            fits -= set(keys)
+    beats = tuple(f"frontends.{n}." for n, fe in model.cfg.frontends.items()
+                  if fe.name == "beats")
+    if not beats or not any(k.startswith(beats) for k in fits):
+        raise RuntimeError(f"init_partial {path}: no BEATs frontend key fits the model; "
+                           f"refusing a partial init that loads nothing of it")
+    res = model.load_state_dict({k: src[k] for k in fits}, strict=False)
+    assert not res.unexpected_keys, res.unexpected_keys
+    report = {"loaded": sorted(fits), "fresh": sorted(set(own) - fits),
+              "unused": sorted(set(src) - fits)}
+    if current_dist().main:
+        def modules(keys):
+            out: dict[str, int] = {}
+            for k in keys:
+                parts = k.split(".")
+                m = ".".join(parts[:2]) if parts[0] in ("heads", "frontends", "fusion") \
+                    else parts[0]
+                out[m] = out.get(m, 0) + 1
+            return ", ".join(f"{m} ({n})" for m, n in sorted(out.items())) or "-"
+        print(f"  partial init from {path}", flush=True)
+        print(f"    loaded: {modules(report['loaded'])}", flush=True)
+        print(f"    fresh:  {modules(report['fresh'])}", flush=True)
+        print(f"    unused from the checkpoint: {modules(report['unused'])}", flush=True)
+        lora = [k for k in report["fresh"] if ".lora_" in k]
+        if lora:
+            print(f"    fresh LoRA tensors: {len(lora)}", flush=True)
+    return report
+
+
 def build_model(model_cfg_path: str, weights: str | None) -> DeepVoiceNet:
     cfg = load_model_config(model_cfg_path)
     by_name = parse_weights(weights, cfg.frontends)
@@ -241,7 +298,7 @@ def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
 
     model = build_model(args.model, args.weights)
     if args.init_weights:
-        init_from(model, args.init_weights)
+        (init_partial if args.init_partial else init_from)(model, args.init_weights)
     check_chain(model, ds)                      # one shipped chain, once (05 C2)
     t0 = time.time()
     results = run_schedule(model, ds, train_cfg=train_cfg, loop_cfg=loop_cfg,
@@ -325,7 +382,7 @@ def train_all_data(*, manifest, folds_tbl, args, run_cfg, train_cfg) -> str:
                           else run_cfg.loop.checkpoint_every))
     model = build_model(args.model, args.weights)
     if args.init_weights:
-        init_from(model, args.init_weights)
+        (init_partial if args.init_partial else init_from)(model, args.init_weights)
     check_chain(model, ds)
     t0 = time.time()
     results = run_schedule(model, ds, train_cfg=train_cfg, loop_cfg=loop_cfg,
@@ -372,6 +429,11 @@ def main() -> int:
     p.add_argument("--init-weights",
                    help="a scored.pt whose weights initialise the model (run 2 from run 1's "
                         "soup); a fresh optimizer, schedule and draw -- unlike --resume")
+    p.add_argument("--init-partial", action="store_true",
+                   help="with --init-weights: load only the keys that match by name AND "
+                        "shape; a head with any mismatch stays fresh whole; the speech "
+                        "trunk, its LoRA and the fusion may be fresh (docs/training/13 M3). "
+                        "Off: the strict init")
     p.add_argument("--resume", help="a training checkpoint (e.g. <out>/fold1/joint-pass0.pt) "
                         "to continue the first --stages stage from; the run's other "
                         "arguments must match the ones it was started with")
@@ -406,6 +468,8 @@ def main() -> int:
                         "noise for a test")
     p.add_argument("--dry-run", action="store_true", help="print the plan and exit")
     args = p.parse_args()
+    if args.init_partial and not args.init_weights:
+        raise SystemExit("--init-partial needs --init-weights")
 
     # Under torchrun: join the group first, pin this rank's GPU, and keep the
     # other ranks' stdout out of the Slurm log (their errors still reach stderr).
