@@ -40,6 +40,9 @@ class SEDOutput(dict):
                              is scored on
     ``attention``    (B, T)  where the model actually looked
     ``mask``         (B, T)  which frames are real
+    ``embedding``    (B, hidden)  attention-pooled hidden, the OC-Softmax input,
+    ``oc_center``    (hidden,)    and its centre; both present only when the head
+                             has ``oc: true`` (training-only, docs/training/13 O1)
 
     🔴 ``mask`` is carried here rather than left to the caller because
     ``frame_logits`` on padded frames are arbitrary. A ``frame_max`` taken
@@ -142,6 +145,11 @@ class SEDHead(nn.Module):
         # lets the magnitude grow, so the softmax can still concentrate.
         self.att_scale = (nn.Parameter(torch.ones(())) if cfg.attention == "scaled_tanh"
                           else None)
+        # O1: the one-class centre. Only built when asked for, so a flag-off head
+        # has exactly the run-2 parameters and a run-2 checkpoint loads strictly.
+        # Its init scale is irrelevant: the loss L2-normalises it.
+        if cfg.oc:
+            self.oc_center = nn.Parameter(torch.randn(cfg.hidden) / cfg.hidden ** 0.5)
 
     def forward(self, x: Tensor, mask: Tensor | None = None) -> SEDOutput:
         """(B, T, D) -> clip (B,), frame (B, T), attention (B, T).
@@ -175,8 +183,16 @@ class SEDHead(nn.Module):
             mask = torch.ones_like(frame_logits, dtype=torch.bool)
         attention = torch.softmax(att_logits, dim=-1)
         clip_logits = (attention * frame_logits).sum(dim=-1)
-        return SEDOutput(clip_logits=clip_logits, frame_logits=frame_logits,
-                         attention=attention, mask=mask)
+        out = SEDOutput(clip_logits=clip_logits, frame_logits=frame_logits,
+                        attention=attention, mask=mask)
+        if self.cfg.oc:
+            # Masked frames carry exactly 0 attention, so this is the sum over
+            # valid frames only. Nothing on the inference path reads it.
+            # The centre travels with the output (as the mask does) so the loss
+            # needs no handle on the model and the training loop is unchanged.
+            out["embedding"] = torch.einsum("bt,bht->bh", attention, h)
+            out["oc_center"] = self.oc_center
+        return out
 
 
 def frame_max(frame_logits: Tensor, mask: Tensor | None = None) -> Tensor:

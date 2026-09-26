@@ -124,7 +124,8 @@ print(sorted(probs))
 ```
 
 `submission_probs` honours `file_head.mode`: `learned` reads the file branch, while `noisy_or`
-and `max` combine the component and presence columns analytically. G3 records the FILE
+and `max` combine the component and presence columns analytically, and `max3` takes the max of
+the learned column and both component products (docs/training/13 O5). G3 records the FILE
 construction as an open question with no prior art, so all three must genuinely differ — and a
 test asserts they do.
 
@@ -257,7 +258,7 @@ being ignored:
 | `segmentation.mode: tiling` | ❌ `DeepVoiceNet` raises — windowing belongs to the inference script |
 | `frontends.freeze` | ✅ applied (encoder frozen; the GeM exponent stays trainable — it is ours) |
 | `distill.stop_gradient` | ✅ applied — branch heads get detached features |
-| `file_head.mode` | ✅ all three implemented |
+| `file_head.mode` | ✅ all four implemented (`max3`: 13 O5) |
 | `audio.band_hz` | ✅ applied, as a brick wall in the rFFT domain |
 | `audio.channels` | ✅ applied by `models.audio.prepare_waveform`, which the data path calls |
 | `runtime.*`, `audio.min/max_seconds`, `aggregation.*` | consumed by the inference script / data loader |
