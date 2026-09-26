@@ -183,7 +183,7 @@ Owner's DDP/1B development and smoke tests need GPUs: **2 GPUs are reserved for 
 | round | when (KST, ESTIMATE) | GPUs | tasks | question |
 |---|---|---|---|---|
 | R0 | running → ≈ 19:00 | 4 | run 3a: ko-synth ×2 / ×3, folds 2, 3 | D2: does up-weighting recover melo/mms? |
-| R1 | Sat ≈ 19:30 → Sun ≈ 00:30 | 6 | folds 1 + 2 × {(a) baseline, (b) + O1 one-class, (c) WaveFake ×0 (Q-L1)}; proxy = 300M@12 from run-2 fold models, 10k steps. Seed replicate of (a) fold 1 **only if a 7th GPU is free**; otherwise the 2-SE rule stands without a measured seed floor (stated in the readout) | does O1 help S1 without hurting S2? does WaveFake help or hurt? |
+| R1 | Sat ≈ 19:30 → Sun ≈ 00:30 | 6 | folds 1 + 2 × {(a) baseline, (b) + O1 one-class, (c) LJ-voice fakes ×0 (Q-L1; `configs/processing_run3_nowf.yaml`)}; proxy = 300M@12 from run-2 fold models, 10k steps. Seed replicate of (a) fold 1 **only if a 7th GPU is free**; otherwise the 2-SE rule stands without a measured seed floor (stated in the readout) | does O1 help S1 without hurting S2? does WaveFake help or hurt? |
 | gen | Sat ≈ 19:00 → Sun ≈ 06:00 | shares R1's 6 when idle, else CPU | D1 new cloner families + more maskgct/seedvc hours; D3 more Emilia-ko | new data for v5 |
 | v5 | Sun ≈ 06:00 → 07:30 | CPU | strategy-v5 = v4 + D1 + D2 fix + D3; pinned folds; audits (build_strategy_v4.sh pattern) | — |
 | R2 | Sun ≈ 07:30 → 12:00 | 6 | **all-data** T7 fine-tunes: (a) v5, (b) v5 + O1 (if R1 kept it); **M4 300M@24 + M2 fusion** on v5 (all-data, the fallback); + fold 1 of (a) for a VAL reading | LB tests on Sunday; the trained fallback |
@@ -222,6 +222,26 @@ Owner's DDP/1B development and smoke tests need GPUs: **2 GPUs are reserved for 
 | 4 | O4 MoLE | **Deferred** |
 | 5 | Diag A/B on T7 | **Tonight** (2 of today's 3). Packaged as `run2-T7-diagA/B.zip` |
 | 6 | External eval-only set | **Skip** |
+
+## 9b · Q-L1 ablation config — measured
+
+- **Domain weights alone cannot zero WaveFake.** Ten MLAAD TTS families use the LJSpeech voice and
+  share WaveFake's speaker bucket (`ljspeech_LJ`). An MLAAD-LJ anchor tiles from that bucket, which
+  is ~all WaveFake (101k files).
+- `processing_run3_nowf.yaml` therefore zeroes `wavefake|`, `proc-*|wavefake|` **and**
+  `mlaad|tts_models_en_ljspeech` (≈ 290 files): an "**all LJ-voice fakes removed**" variant.
+- Measured on fold 1, 4,000 specs:
+
+  | config | WaveFake share of fake voice tiles |
+  |---|---|
+  | run 2 draw | 1734 of ~20.2k ≈ 8.6 % |
+  | `wavefake|` ×0 alone | 756 |
+  | + MLAAD-LJ ×0 | **151 of 20,236 = 0.75 %** (residual: bucket fallbacks, processed MLAAD-LJ) |
+
+- Audits at n = 40,000: **audit ok on folds 1 and 2** (I1c passes; processed .200/.265 and
+  .184/.239; ko/en .556/.444 real).
+- Side finding: the tile fallback (`sampler._tiles`, bucket exhausted → uniform over the pool,
+  weights ignored) fires 14–25 times per 40k voice tiles. Rare, but it ignores `domain_weights`.
 
 ## 10 · Review log
 
