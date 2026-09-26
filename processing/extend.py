@@ -262,7 +262,10 @@ def _zh_synth(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
 def _emilia(root: Path, lang: str) -> pd.DataFrame:
     """Real in-the-wild speech. `speaker_ref_id` is Emilia's source key."""
     corpus = f"emilia-{lang}"
-    d = _metadata(root / "interim" / corpus / "metadata.csv")
+    # metadata_yodas2.csv: N3's second YODAS sample (docs/training/15 §4), disjoint by video
+    parts = [_metadata(root / "interim" / corpus / n) for n in ("metadata.csv", "metadata_yodas2.csv")]
+    parts = [x for x in parts if not x.empty]
+    d = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
     if d.empty:
         return pd.DataFrame(columns=["path"])
     spk = d["speaker_ref_id"].astype(str)
