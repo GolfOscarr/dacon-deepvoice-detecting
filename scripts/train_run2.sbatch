@@ -45,6 +45,11 @@ TASKS=(
   "all:0 | v4 | $P2 | $FT | $R1/all_data_seed0/scored.pt"   # T6 submission candidate
   "all:2 | v4 | $P2 | $FT | $R1/all_data_seed2/scored.pt"   # T7 second candidate
 )
+# TASK_TABLE=<file>: one task line per row (same format; '#' comments and blank lines skipped)
+if [ -n "${TASK_TABLE:-}" ]; then
+  mapfile -t TASKS < <(grep -v -E '^\s*(#|$)' "$TASK_TABLE")
+fi
+[ "$TASK" -lt "${#TASKS[@]}" ] || { echo "FATAL: task $TASK not in table (${#TASKS[@]} rows)"; exit 1; }
 IFS='|' read -r who man proc train init <<< "${TASKS[$TASK]}"
 trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; echo "${s%"${s##*[![:space:]]}"}"; }
 who=$(trim "$who"); man=$(trim "$man"); proc=$(trim "$proc"); train=$(trim "$train")
