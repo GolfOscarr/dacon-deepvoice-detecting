@@ -476,15 +476,15 @@ def _sing_real_whole(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
 
 def _mtg_jamendo(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
     """strategy-v6: MTG-Jamendo instrumentals -> pool C (real music components).
-    30 s 16 kHz mono excerpts (scripts/data_extra/jamendo_prepare.py) that the vocal
-    screen calls instrumental. Publisher atom `mtg-jamendo/<artist id>` (the draw's
+    10 s rows of 30 s 16 kHz mono excerpts (scripts/data_extra/jamendo_prepare.py) that
+    the vocal screen calls instrumental. Publisher atom `mtg-jamendo/<artist id>` (the draw's
     domain and its `domain_weights` prefix); speaker key = processing.corpus's artist
     atom (`artist:<name>`), the key FMA and MUSAN rows use."""
     d = _metadata(root / "interim" / "mtg-jamendo" / "metadata.csv")
     if d.empty:
         return pd.DataFrame(columns=["path"])
     return pd.DataFrame({
-        "file_id": "mtg-jamendo:" + d["track_id"].astype(str),
+        "file_id": "mtg-jamendo:" + d["file"].astype(str).str.replace(".wav", "", regex=False),
         "path": "interim/mtg-jamendo/" + d["file"].astype(str),
         "artifact_family": None, "source_name": d["source_name"].astype(str),
         "speaker_ref_id": d["speaker_ref_id"].astype(str),

@@ -12,7 +12,7 @@ def _write(tmp_path):
     d = tmp_path / "interim" / "mtg-jamendo"
     d.mkdir(parents=True)
     pd.DataFrame({
-        "file": ["clips/00/track_1.wav", "clips/01/track_2.wav"],
+        "file": ["seg10/00/track_1_0.wav", "seg10/01/track_2_0.wav"],
         "track_id": ["track_1", "track_2"],
         "source_name": ["mtg-jamendo/artist_1", "mtg-jamendo/artist_2"],
         "speaker_ref_id": ["artist:foo", "artist:bar"],
@@ -23,8 +23,8 @@ def _write(tmp_path):
 def test_instrumentals_are_pool_c_rows(tmp_path):
     _write(tmp_path)
     out = _mtg_jamendo(tmp_path, pd.DataFrame())
-    assert list(out["file_id"]) == ["mtg-jamendo:track_1"]            # kept=False never enters
-    assert list(out["path"]) == ["interim/mtg-jamendo/clips/00/track_1.wav"]
+    assert list(out["file_id"]) == ["mtg-jamendo:seg10/00/track_1_0"]            # kept=False never enters
+    assert list(out["path"]) == ["interim/mtg-jamendo/seg10/00/track_1_0.wav"]
     assert list(out["source_name"]) == ["mtg-jamendo/artist_1"]
     assert list(out["speaker_ref_id"]) == ["artist:foo"]
     assert out["artifact_family"].isna().all() and out["domain_key"].isna().all()

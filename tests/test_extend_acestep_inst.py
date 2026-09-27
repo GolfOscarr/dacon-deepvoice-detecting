@@ -55,3 +55,22 @@ def test_caption_and_qc_rules():
     assert qc_reason({**ok, "vox_max": 0.03}) == "ast-vocal-or-ambiguous"
     assert qc_reason({**ok, "vox_max": float("nan")}) == "untagged"
     assert qc_reason({"ok": False}) == "decode-failed"
+
+
+def test_clips_are_cut_into_three_10s_rows(tmp_path):
+    """Symmetric with the Jamendo side: the music draw's tile share is a row count."""
+    import numpy as np
+    import soundfile as sf
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "synth3"))
+    from music_acestep_inst_gen import segments
+    (tmp_path / "clips").mkdir()
+    y = (0.1 * np.sin(np.arange(30 * 16000) / 10.0)).astype(np.float32)
+    y[20 * 16000:] = 0.0                                   # a silent last third is dropped
+    sf.write(tmp_path / "clips/a.wav", y, 16000, subtype="PCM_16")
+    kept = pd.DataFrame({"file": ["clips/a.wav"], "id": ["a"], "file_id": ["acestep-inst:a"],
+                         "offset_s": [4.0], "duration_s": [30.0]})
+    out = segments(kept, tmp_path)
+    assert list(out["file_id"]) == ["acestep-inst:a_0", "acestep-inst:a_1"]
+    assert list(out["file"]) == ["seg10/a_0.wav", "seg10/a_1.wav"]
+    assert list(out["clip"]) == ["clips/a.wav"] * 2 and list(out["offset_s"]) == [4.0, 14.0]
+    assert all(sf.info(tmp_path / f).duration == 10.0 for f in out["file"])

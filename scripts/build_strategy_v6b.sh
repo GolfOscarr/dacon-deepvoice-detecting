@@ -7,8 +7,7 @@
 #
 # Inputs: $M/strategy-v6/{manifest,folds}.parquet (scripts/build_strategy_v6.sh) and
 # interim/acestep-inst/metadata.csv (scripts/synth3/music_acestep_inst_gen.py finalize).
-# configs/processing_run6b.yaml is derived from processing_run6.yaml here when missing
-# (one domain_weights entry, a PROPOSAL for the lead) and must stay run6 + that entry.
+# The draw config is configs/processing_run6.yaml, unchanged (see CFG below).
 set -euo pipefail
 # nice + <= 8 workers: this runs on the training node
 V="nice -n 19 /data/project/private/dacon-venvs/dacon311/bin/python"
@@ -16,41 +15,16 @@ export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 M=/data/project/private/dacon-corpus/manifests
 BASE=$M/strategy-v6
 OUT=${OUT:-$M/strategy-v6b}
-CFG6=${CFG6:-configs/processing_run6.yaml}
-CFG=${CFG:-configs/processing_run6b.yaml}
+# run 6's draw as it is: a domain weight cannot steer music tiles (one bucket per side,
+# tiles uniform over the rows that fit: processing.sampler bucket_keys / _tiles), so
+# ACE-Step's share of fake-music tiles is its row count (3 x 10 s rows per clip, the
+# Jamendo side's cut) and there is no acestep-inst entry to add
+CFG=${CFG:-configs/processing_run6.yaml}
 ONLY=acestep-inst
 cd "$(dirname "$0")/.."
 
 echo "== config"
-[ -e "$CFG6" ] || { echo "FATAL: $CFG6 missing"; exit 1; }
-grep -q JAMENDO_WEIGHT "$CFG6" && { echo "FATAL: $CFG6 still has the JAMENDO_WEIGHT placeholder"; exit 1; }
-if [ ! -e "$CFG" ]; then
-  awk '
-    NR == 1 {
-      print "# [v6b] RUN 6b: processing_run6.yaml on strategy-v6b (= strategy-v6 + ACE-Step 1.5"
-      print "# [v6b] instrumentals, scripts/build_strategy_v6b.sh). The only change is one"
-      print "# [v6b] draw.domain_weights entry, \"acestep-inst|\" (see there). Everything else is run 6'"'"'s."
-      print "# [v6b]"
-    }
-    { print }
-    /^    "mtg-jamendo\/":/ {
-      print "    # [v6b] PROPOSAL (lead to confirm): ACE-Step 1.5 instrumentals, pool D domain"
-      print "    # [v6b] acestep-inst|acestep15-inst. Pool D is 10 generator domains (5 SONICS versions,"
-      print "    # [v6b] 5 FakeMusicCaps models), each capped at 500 rows by the DOSS cap = 10 % of the"
-      print "    # [v6b] fake-music draw each. x2.0 gives the newest family 2 of 11 shares (~18 %);"
-      print "    # [v6b] x1.0 would be ~9 %, the share of one SONICS version."
-      print "    \"acestep-inst|\": 2.0"
-      n++
-    }
-    END { if (n != 1) exit 3 }' "$CFG6" > "$CFG.part" || { rm -f "$CFG.part"; echo "FATAL: no \"mtg-jamendo/\" line in $CFG6"; exit 1; }
-  mv "$CFG.part" "$CFG"; echo "derived $CFG from $CFG6"
-fi
-# run6b must be run6 plus the [v6b] lines, nothing else (a stale copy is an error)
-grep -v -e '^ *# \[v6b\]' -e '^    "acestep-inst|":' "$CFG" | diff - "$CFG6" >/dev/null \
-  || { echo "FATAL: $CFG is not $CFG6 + the [v6b] lines; re-derive it (rm it and rerun)"; exit 1; }
-$V -c "from processing.config import load_processing_config as l; c = l('$CFG'); \
-print('domain_weights', [w for w in c.draw.domain_weights if w[0].startswith(('acestep', 'mtg'))])"
-
+[ -e "$CFG" ] || { echo "FATAL: $CFG missing"; exit 1; }
 ROOT=${CORPUS_ROOT:-/data/project/private/dacon-corpus}
 META=$ROOT/interim/acestep-inst/metadata.csv
 [ -s "$META" ] || { echo "FATAL: $META missing (music_acestep_inst_gen.py finalize)"; exit 1; }

@@ -33,7 +33,8 @@ tag      the vocal screen: GPUs were busy and full htdemucs on CPU (~4 core-s pe
          tagger (AST) instead, calibrated against htdemucs on the clips it separated.
 measure  Silero on the htdemucs vocal chunks of that calibration subset (sing_screen's
          speech_ratio), so finalize can apply the v5 chunk conditions there.
-finalize interim/mtg-jamendo/metadata.csv: the clips RULES calls instrumental.
+finalize interim/mtg-jamendo/metadata.csv: the clips RULES calls instrumental, each cut
+         into 10 s rows (see _segments: the music draw's tile share is a row count).
 """
 from __future__ import annotations
 
@@ -60,6 +61,7 @@ BASE = CORPUS / "manifests/strategy-v5/manifest.parquet"
 PER_ARTIST, PER_ALBUM, EXCERPT_S, SR = 4, 2, 30.0, 16000
 ZERO_RUN_MS, ZERO_FRAC = 20.0, 0.05
 RMS_MIN_CLIP = -40.0          # sing_screen's near-silent floor, on the whole clip
+SEG_S = 10.0                  # pool-C row length (finalize: see _segments)
 # RULES (finalize). Vocal presence is the ONLY uncertain label (every row is real music);
 # a clip the screen cannot call instrumental is dropped, never labelled. Instrumental =
 #   AST: every 10 s window's max P(vocal class) < AST_INSTR_MAX (calibrated on the clips
@@ -302,12 +304,40 @@ def tag(args) -> int:
     return 0
 
 
+def _segments(keep: pd.DataFrame) -> pd.DataFrame:
+    """Each kept 30 s clip -> consecutive SEG_S rows (seg10/<NN>/<id>_<k>.wav, PCM16 16 kHz).
+    Why: the music draw has ONE bucket per side and tiles it uniformly over the rows that
+    fit (processing.sampler.bucket_keys / _tiles), so a corpus's share of music tiles is its
+    row count -- draw.domain_weights cannot move it. 10 s is fakemusiccaps' row length.
+    A near-silent segment (rms < RMS_MIN_CLIP) is dropped."""
+    import soundfile as sf
+    n = int(SEG_S * SR)
+    rows = []
+    for r in keep.to_dict("records"):
+        y, sr = sf.read(OUT / r["file"], dtype="int16")
+        assert sr == SR, (r["file"], sr)
+        for k in range(len(y) // n):
+            c = y[k * n:(k + 1) * n]
+            rms = float(np.sqrt(np.mean((c / 32768.0) ** 2)))
+            if 20 * np.log10(rms + 1e-12) < RMS_MIN_CLIP:
+                continue
+            rel = f"seg10/{r['file'].split('/')[1]}/{r['track_id']}_{k}.wav"
+            dst = OUT / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if not dst.exists():
+                sf.write(dst.with_suffix(".part.wav"), c, SR, subtype="PCM_16")
+                dst.with_suffix(".part.wav").replace(dst)
+            rows.append({**r, "clip": r["file"], "seg": k, "file": rel, "duration_s": len(c) / SR,
+                         "offset_s": r["offset_s"] + k * SEG_S})
+    return pd.DataFrame(rows)
+
+
 def finalize(args) -> int:
     sys.path.insert(0, str(REPO / "scripts/synth3"))
     from sing_screen import REL_MIN, RMS_MIN, SPEECH_MIN
     tracks = pd.read_csv(WORK / "selection_tracks.csv").set_index("track_id")
     clips = pd.read_csv(WORK / "clips.csv").set_index("track_id")
-    s = pd.read_csv(WORK / "selection.csv")
+    s = pd.read_csv(WORK / "selection.csv").drop(columns=["offset_s", "excerpt_s"])
     s["file"] = s["path"].str.replace("interim/mtg-jamendo/", "", regex=False)
     s["track_id"] = s["file_id"].str.replace("mtg-jamendo:", "", regex=False)
     s = s.merge(pd.read_csv(WORK / "ast_tags.csv").drop_duplicates("file", keep="last"), on="file", how="left")
@@ -336,13 +366,14 @@ def finalize(args) -> int:
     ast_i = cal["vox_max"] < AST_INSTR_MAX
     print(f"calibration (htdemucs-separated, n={len(cal)}): AST instrumental {int(ast_i.sum())}, of which "
           f"htdemucs vocal chunk {int((ast_i & (cal['htdemucs_vocal_s'] > 0)).sum())}")
-    keep = s[s["kept"]]
-    cols = ["file", "track_id", "artist_id", "album_id", "speaker_ref_id", "source_name", "duration_s",
+    keep = _segments(s[s["kept"]])
+    cols = ["file", "clip", "seg", "track_id", "artist_id", "album_id", "speaker_ref_id", "source_name", "duration_s",
             "offset_s", "track_s", "src_sr", "src_channels", "rms_dbfs", "peak_src", "clip_frac",
             "zero_run_ms", "zero_frac", "rolloff99_hz", "vox_max", "htdemucs_vocal_s", "licence",
             "licence_verdict", "tags", "kept"]
     keep[cols].sort_values("track_id").to_csv(OUT / "metadata.csv", index=False)
-    print(f"instrumental: {len(keep)} clips, {keep['duration_s'].sum() / 3600:.2f} h, "
+    print(f"instrumental: {keep['clip'].nunique()} clips -> {len(keep)} {SEG_S:g} s rows, "
+          f"{keep['duration_s'].sum() / 3600:.2f} h, "
           f"{keep['speaker_ref_id'].nunique()} artists, {keep['album_id'].nunique()} albums")
     return 0
 
