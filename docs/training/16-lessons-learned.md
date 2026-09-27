@@ -25,6 +25,8 @@ measurements. Plan documents: 11 (run 2), 13 (run 3), 14 (DDP), 15 (data plan).*
 | run 1 (`first-v3-seed0`) | 0.79188 | 0.77288 | 0.96287 | |
 | run 2 T7 (`run2-T7`) | **0.81144** | 0.79302 | 0.97730 | best so far |
 | T7 diagA (file head + music presence live, others 0.5) | 0.65797 | 0.64914 | 0.73744 | per-head split |
+| **T7 fine-tuned on strategy-v5, learned file head** (`run5-T7v5-learned`) | 0.82487 | 0.80575 | 0.99698 | **v5 data: +0.0134**; CPS 0.977 → 0.997 (presence heads, likely the singing fix) |
+| **same, file mode max3** (`run5-T7v5-max3`) | **0.83046** | 0.81196 | 0.99698 | **max3: +0.0056**, test file EER −0.012 (6× the VAL gain); used for every package from now on |
 | leader | 0.89871 | 0.88756 | 0.99907 | 97.5 % of our gap is ADS |
 
 **Per-head split of T7 on the real test** (diagA + T7, by the formulas in HANDOFF_RUN3 §4):
@@ -42,6 +44,11 @@ measurements. Plan documents: 11 (run 2), 13 (run 3), 14 (DDP), 15 (data plan).*
   local numbers; decide with per-slice VAL plus the LB.
 - **L2. The file head is the single biggest lever.** At 0.5 weight and 0.20 EER it loses as much
   ADS as voice and music together. Tonight's max3 A/B on the v5 model tests one cheap fix.
+- **L2b. max3 is worth 6× more on the test than on VAL** (file EER −0.012 vs −0.002): on unseen
+  data the component heads catch fakes the learned file head misses. Next cheap test: `--file-mode
+  max` (components only).
+- **L2c. v5 moved the LB more than PROBE predicted** (+0.0134 LB vs +0.010 PROBE); the 1B
+  pass-2 EMA checkpoint scores PROBE 0.9251 (300M-v5 0.9205, T7 0.9103), voice EER 0.051 vs 0.071.
 - **L3. diagB was not worth a slot on Sunday.** It separates voice from music, but nothing before
   Tuesday would change on the answer.
 
