@@ -61,7 +61,6 @@ BASE = CORPUS / "manifests/strategy-v5/manifest.parquet"
 PER_ARTIST, PER_ALBUM, EXCERPT_S, SR = 4, 2, 30.0, 16000
 ZERO_RUN_MS, ZERO_FRAC = 20.0, 0.05
 RMS_MIN_CLIP = -40.0          # sing_screen's near-silent floor, on the whole clip
-SEG_S = 10.0                  # pool-C row length (finalize: see _segments)
 # RULES (finalize). Vocal presence is the ONLY uncertain label (every row is real music);
 # a clip the screen cannot call instrumental is dropped, never labelled. Instrumental =
 #   AST: every 10 s window's max P(vocal class) < AST_INSTR_MAX (calibrated on the clips
@@ -305,19 +304,20 @@ def tag(args) -> int:
 
 
 def _segments(keep: pd.DataFrame) -> pd.DataFrame:
-    """Each kept 30 s clip -> consecutive SEG_S rows (seg10/<NN>/<id>_<k>.wav, PCM16 16 kHz).
+    """Each kept 30 s clip -> consecutive 10 s rows (seg10/<NN>/<id>_<k>.wav, PCM16 16 kHz).
     Why: the music draw has ONE bucket per side and tiles it uniformly over the rows that
     fit (processing.sampler.bucket_keys / _tiles), so a corpus's share of music tiles is its
     row count -- draw.domain_weights cannot move it. 10 s is fakemusiccaps' row length.
     A near-silent segment (rms < RMS_MIN_CLIP) is dropped."""
     import soundfile as sf
-    n = int(SEG_S * SR)
+    sys.path.insert(0, str(REPO / "scripts/strategy"))
+    from cut_music_rows import pieces_of      # the ONE music cut rule (>= 15 s -> 10 s pieces)
     rows = []
     for r in keep.to_dict("records"):
         y, sr = sf.read(OUT / r["file"], dtype="int16")
         assert sr == SR, (r["file"], sr)
-        for k in range(len(y) // n):
-            c = y[k * n:(k + 1) * n]
+        for k, (off, length) in enumerate(pieces_of(len(y) / SR)):
+            c = y[int(round(off * SR)):int(round((off + length) * SR))]
             rms = float(np.sqrt(np.mean((c / 32768.0) ** 2)))
             if 20 * np.log10(rms + 1e-12) < RMS_MIN_CLIP:
                 continue
@@ -328,7 +328,7 @@ def _segments(keep: pd.DataFrame) -> pd.DataFrame:
                 sf.write(dst.with_suffix(".part.wav"), c, SR, subtype="PCM_16")
                 dst.with_suffix(".part.wav").replace(dst)
             rows.append({**r, "clip": r["file"], "seg": k, "file": rel, "duration_s": len(c) / SR,
-                         "offset_s": r["offset_s"] + k * SEG_S})
+                         "offset_s": r["offset_s"] + off})
     return pd.DataFrame(rows)
 
 
@@ -372,7 +372,7 @@ def finalize(args) -> int:
             "zero_run_ms", "zero_frac", "rolloff99_hz", "vox_max", "htdemucs_vocal_s", "licence",
             "licence_verdict", "tags", "kept"]
     keep[cols].sort_values("track_id").to_csv(OUT / "metadata.csv", index=False)
-    print(f"instrumental: {keep['clip'].nunique()} clips -> {len(keep)} {SEG_S:g} s rows, "
+    print(f"instrumental: {keep['clip'].nunique()} clips -> {len(keep)} 10 s rows, "
           f"{keep['duration_s'].sum() / 3600:.2f} h, "
           f"{keep['speaker_ref_id'].nunique()} artists, {keep['album_id'].nunique()} albums")
     return 0

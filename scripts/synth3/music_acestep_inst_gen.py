@@ -66,7 +66,6 @@ JAMENDO = CORPUS / "interim/mtg-jamendo"
 # the Jamendo side's constants (scripts/data_extra/jamendo_prepare.py), mirrored here so
 # both sides pass the same rules
 CLIP_S, SR = 30.0, 16000
-SEG_S = 10.0          # pool-D row length: 3 rows per clip, as the Jamendo side (see segments)
 ZERO_RUN_MS, ZERO_FRAC, RMS_MIN_CLIP = 20.0, 0.05, -40.0
 AST_INSTR_MAX = 0.03
 VOICE_TAGS = ("instrument---voice", "genre---rap", "genre---hiphop", "genre---singersongwriter")
@@ -349,7 +348,7 @@ def qc_reason(r) -> str:
 
 
 def segments(kept, out: pathlib.Path):
-    """Each kept 30 s clip -> consecutive SEG_S rows (seg10/<id>_<k>.wav, PCM16 16 kHz),
+    """Each kept 30 s clip -> consecutive 10 s rows (seg10/<id>_<k>.wav, PCM16 16 kHz),
     exactly as the Jamendo side (scripts/data_extra/jamendo_prepare.py _segments). Why:
     the music draw has ONE bucket per side and tiles it uniformly over the rows that fit
     (processing.sampler.bucket_keys / _tiles), so a corpus's share of music tiles is its
@@ -357,13 +356,14 @@ def segments(kept, out: pathlib.Path):
     import numpy as np
     import pandas as pd
     import soundfile as sf
-    n = int(SEG_S * SR)
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "strategy"))
+    from cut_music_rows import pieces_of      # the ONE music cut rule (>= 15 s -> 10 s pieces)
     rows = []
     for r in kept.to_dict("records"):
         y, sr = sf.read(out / r["file"], dtype="int16")
         assert sr == SR, (r["file"], sr)
-        for k in range(len(y) // n):
-            c = y[k * n:(k + 1) * n]
+        for k, (off, length) in enumerate(pieces_of(len(y) / SR)):
+            c = y[int(round(off * SR)):int(round((off + length) * SR))]
             rms = float(np.sqrt(np.mean((c / 32768.0) ** 2)))
             if 20 * np.log10(rms + 1e-12) < RMS_MIN_CLIP:
                 continue
@@ -374,7 +374,7 @@ def segments(kept, out: pathlib.Path):
                 sf.write(dst.with_suffix(".part.wav"), c, SR, subtype="PCM_16")
                 dst.with_suffix(".part.wav").replace(dst)
             rows.append({**r, "clip": r["file"], "seg": k, "file": rel, "file_id": f"{r['file_id']}_{k}",
-                         "duration_s": len(c) / SR, "offset_s": r["offset_s"] + k * SEG_S})
+                         "duration_s": len(c) / SR, "offset_s": r["offset_s"] + off})
     return pd.DataFrame(rows)
 
 
@@ -438,7 +438,7 @@ def finalize(args) -> int:
     m = pd.concat([m[~m["kept"]].assign(clip=m["file"], seg=pd.NA), k], ignore_index=True)
     m = m.reindex(columns=["file", "clip", "seg"] + cols[1:]).sort_values(["id", "seg"])
     m.to_csv(out / "metadata.csv", index=False)
-    print(f"kept {k['clip'].nunique()} / {m['id'].nunique()} clips -> {len(k)} {SEG_S:g} s rows, "
+    print(f"kept {k['clip'].nunique()} / {m['id'].nunique()} clips -> {len(k)} 10 s rows, "
           f"{k['duration_s'].sum() / 3600:.2f} h -> {out / 'metadata.csv'}")
     return 0
 
