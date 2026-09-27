@@ -568,7 +568,14 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
         # A checkpoint written before DDP (or by a 1-rank, no-accum run) carries
         # no `dist` block: it is world 1, accum 1.
         saved = (blob.get("extra") or {}).get("dist") or {"world": 1, "grad_accum": 1}
-        if (saved["world"], saved["grad_accum"]) != (d.world, accum) or (
+        # DDP_ALLOW_WORLD_CHANGE=1: resume on a different GPU count when the GLOBAL
+        # batch and accum are unchanged -- the pass plan, LR schedule and step count
+        # are then identical; only the rank slicing and the per-rank dropout streams
+        # differ (reseeded below), so the run is no longer bitwise-reproducible.
+        world_changed = saved["world"] != d.world
+        allow_world = (os.environ.get("DDP_ALLOW_WORLD_CHANGE") == "1"
+                       and saved.get("global_batch") == global_batch)
+        if saved["grad_accum"] != accum or (world_changed and not allow_world) or (
                 "global_batch" in saved and saved["global_batch"] != global_batch):
             raise ValueError(
                 f"checkpoint was written at world {saved['world']}, grad_accum "
@@ -579,8 +586,15 @@ def train_stage(model: DeepVoiceNet, dataset: SpecDataset, *,
         model.load_state_dict(blob["state_dict"], strict=True)
         if blob.get("ema") is not None and ema is not None:
             ema.load_state_dict(blob["ema"])
-        _set_rng_state(saved["rng_by_rank"][d.rank] if "rng_by_rank" in saved
-                       else blob["rng"])
+        if world_changed:
+            torch.manual_seed(train_cfg.seed + 1000 * d.rank + 7919 * int(blob["global_step"]))
+            if d.main:
+                print(f"  resumed across a world change {saved['world']} -> {d.world} at "
+                      f"global batch {global_batch}: per-rank RNG reseeded, not restored "
+                      "(not bitwise-reproducible)", flush=True)
+        else:
+            _set_rng_state(saved["rng_by_rank"][d.rank] if "rng_by_rank" in saved
+                           else blob["rng"])
         start = blob["sampler"]
         # Critical: a resume that redraws under a different key is a different run under
         # the same name. The draw is `(i, epoch, seed)` and `n`, so a mismatch in

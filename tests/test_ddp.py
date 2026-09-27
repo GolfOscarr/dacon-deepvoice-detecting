@@ -508,3 +508,18 @@ def test_set_epoch_to_the_current_epoch_keeps_the_same_list(corpus):
     assert ds.specs is before            # no redraw: it is already epoch 0's draw
     ds.set_epoch(1)
     assert ds.specs != before
+
+
+def test_a_world_change_resume_is_allowed_only_opted_in_and_at_the_same_global_batch(
+        corpus, model_cfg, tmp_path, monkeypatch):
+    part = _stage_run(tmp_path, corpus, model_cfg, "part", max_steps=2)   # world 2 x 1
+    ck = part["ckpts"][-1]
+    monkeypatch.setenv("DDP_ALLOW_WORLD_CHANGE", "1")
+    with pytest.raises(ValueError, match="world 2"):        # global batch 4 != 2: refused
+        train_stage(_model(model_cfg), _dataset(corpus, n=6),
+                    train_cfg=_train_cfg(stage="joint", epochs=2, batch_size=4),
+                    loop_cfg=_loop(tmp_path / "g4"), resume_from=ck)
+    res = train_stage(_model(model_cfg), _dataset(corpus, n=6),     # world 1 x 2 = 2: allowed
+                      train_cfg=_train_cfg(stage="joint", epochs=2, batch_size=2),
+                      loop_cfg=_loop(tmp_path / "g2"), resume_from=ck)
+    assert res.steps == 6
