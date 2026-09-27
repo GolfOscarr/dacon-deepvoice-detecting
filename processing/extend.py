@@ -474,6 +474,24 @@ def _sing_real_whole(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
     return _whole_songs(root, "interim/sing-real/whole_songs.csv", v2)
 
 
+def _mtg_jamendo(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    """strategy-v6: MTG-Jamendo instrumentals -> pool C (real music components).
+    30 s 16 kHz mono excerpts (scripts/data_extra/jamendo_prepare.py) that the vocal
+    screen calls instrumental. Publisher atom `mtg-jamendo/<artist id>` (the draw's
+    domain and its `domain_weights` prefix); speaker key = processing.corpus's artist
+    atom (`artist:<name>`), the key FMA and MUSAN rows use."""
+    d = _metadata(root / "interim" / "mtg-jamendo" / "metadata.csv")
+    if d.empty:
+        return pd.DataFrame(columns=["path"])
+    return pd.DataFrame({
+        "file_id": "mtg-jamendo:" + d["track_id"].astype(str),
+        "path": "interim/mtg-jamendo/" + d["file"].astype(str),
+        "artifact_family": None, "source_name": d["source_name"].astype(str),
+        "speaker_ref_id": d["speaker_ref_id"].astype(str),
+        "domain_key": None, "prompt_speaker": None, "lang": None,
+        "licence_verdict": d["licence_verdict"].astype(str)})
+
+
 NEW_CORPORA = (
     NewCorpus("ko-synth", "B", _ko_synth),
     NewCorpus("sonics-sep", "D", _sonics_sep),
@@ -497,6 +515,8 @@ NEW_CORPORA = (
     NewCorpus("sing-real", "A", _sing_real),
     NewCorpus("aisong-kr-en", "W", _aisong_kr_en),
     NewCorpus("fma-medium-songs", "W", _sing_real_whole),
+    # strategy-v6: real music diversity (polished real production, not only FMA/MUSAN)
+    NewCorpus("mtg-jamendo", "C", _mtg_jamendo),
 )
 
 
