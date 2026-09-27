@@ -1,6 +1,6 @@
 #!/bin/bash
 # strategy-v6 = strategy-v5 + MTG-Jamendo real music, in order:
-# manifest -> drops -> folds -> music cut -> cache -> balance -> audits. Stops at the first
+# manifest -> drops -> folds -> music cut -> music filters -> cache -> balance -> audits. Stops at the first
 # failure.
 # strategy-v5 is the base and is never written. Rerunnable: a fresh --out each time.
 #
@@ -14,6 +14,7 @@
 # (scripts/strategy/cut_music_rows.py): the music draw tiles its one bucket per side
 # uniformly over rows, so a corpus's tile share is its row count; after the cut it
 # follows hours. Folds are pinned to v5 BEFORE the cut; pieces copy their parent's row.
+# Then the music filters (exact zeros on both sides; sonics-sep subsample).
 set -euo pipefail
 # nice + <= 16 workers: this runs on the training node (lead, 2026-09-28)
 V="nice -n 19 /data/project/private/dacon-venvs/dacon311/bin/python"
@@ -32,7 +33,10 @@ echo "== folds"; $V scripts/build_folds_pinned.py --base-dir $M/strategy-v5 --ma
   --dropped "$OUT/_pre/dropped.parquet" | tail -30
 cat "$OUT/_pre/folds.caveats.txt" || true
 # pieces from cache16k (the parents' cached audio) into interim/music-cut10; VG1 re-checked
-echo "== music cut"; $V scripts/strategy/cut_music_rows.py --in-dir "$OUT/_pre" --out "$OUT" --workers 16 | tail -40
+echo "== music cut"; $V scripts/strategy/cut_music_rows.py --in-dir "$OUT/_pre" --out "$OUT/_cut" --workers 16 | tail -40
+# the exact-zero rule on every music piece (both sides) + sonics-sep subsampled to .33 of
+# fake-music rows counting v6b's ACE-Step rows (scripts/strategy/v6_music_filters.py)
+echo "== music filters"; $V scripts/strategy/v6_music_filters.py --in-dir "$OUT/_cut" --out "$OUT" --workers 16 | tail -60
 # resumable: existing cache16k entries are kept, only the new file_ids are decoded
 echo "== cache"; $V scripts/build_cache.py --processing-config $CFG --manifest-dir "$OUT" --workers 16 | tail -12
 # label symmetry (docs/training/11 §1.1): repeats, processed and language shares must match
