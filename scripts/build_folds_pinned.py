@@ -33,7 +33,10 @@ FAMILY_FOLD = {"fishspeech": 0, "maskgct": 1, "seedvc": 2, "cosyvoice": 3, "chat
                # N2 singing: a SONICS vocal stem goes where its version's sonics-sep
                # instrumental stems are; ACE-Step stems and whole songs are one atom
                "chirp-v3.5": 0, "udio-120s": 1, "udio-30s": 1, "chirp-v3": 2,
-               "chirp-v2-xxl-alpha": 3, "acestep-en": 2, "acestep-ko": 2, "acestep15": 2}
+               "chirp-v2-xxl-alpha": 3, "acestep-en": 2, "acestep-ko": 2, "acestep15": 2,
+               # strategy-v6b: ACE-Step instrumentals sit with the ACE-Step songs, so fold 2
+               # holds the whole ACE-Step line out
+               "acestep15-inst": 2}
 
 
 def main() -> int:
