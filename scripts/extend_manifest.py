@@ -34,6 +34,9 @@ def main() -> int:
     p.add_argument("--floor", type=float, default=2.5, help="component_floor_s")
     p.add_argument("--only", help=f"comma-separated subset of "
                                   f"{[c.name for c in NEW_CORPORA]}; '' adds none")
+    p.add_argument("--append", default="",
+                   help="comma-separated corpora already in the base whose NEW rows (file_id "
+                        "not in the base) are added, e.g. emilia-ko for its second YODAS sample")
     p.add_argument("--workers", type=int, default=32)
     p.add_argument("--scheme", default="strategy-v3",
                    help="scheme_version for every row (strategy-v4 for round 2, docs/training/09)")
@@ -47,6 +50,7 @@ def main() -> int:
     v2 = pd.read_parquet(v2_dir / "manifest.parquet")
     m, report = extend_manifest(v2, pathlib.Path(args.corpus_root),
                                 component_floor_s=args.floor, only=only,
+                                append=tuple(x for x in args.append.split(",") if x),
                                 workers=args.workers, scheme_version=args.scheme)
     print(json.dumps(report, indent=2))
     if args.dry_run:

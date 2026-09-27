@@ -255,6 +255,23 @@ def _ko_synth2(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
     return _synth_families(root, "ko-synth2", "ko")
 
 
+def _ko_synth3(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    """Round-3 Korean cloner families (docs/training/15 N1-ko), same contract as ko-synth2."""
+    return _synth_families(root, "ko-synth3", "ko")
+
+
+def _ko_synth2_extra(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    """N5 (docs/training/15 §4): more ko-synth2 maskgct/seedvc with new prompt speakers. Same
+    generator families as ko-synth2, so family, speaker and draw-domain keys are ko-synth2's;
+    only file_id/path say ko-synth2-extra."""
+    d = _synth_families(root, "ko-synth2-extra", "ko")
+    if d.empty:
+        return d
+    for c in ("artifact_family", "source_name", "speaker_ref_id", "domain_key"):
+        d[c] = d[c].str.replace("ko-synth2-extra", "ko-synth2", n=1, regex=False)
+    return d
+
+
 def _zh_synth(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
     return _synth_families(root, "zh-synth", "zh")
 
@@ -289,6 +306,23 @@ def _emilia_en(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
 def _en_synth2(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
     """English clones of Emilia-EN / LibriTTS-R speakers by the round-2 cloners."""
     return _synth_families(root, "en-synth2", "en")
+
+
+def _en_synth3(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    """Round-3 English cloner families (docs/training/15 N1-en), same contract as en-synth2."""
+    return _synth_families(root, "en-synth3", "en")
+
+
+def _en_synth2_extra(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    """N5 (docs/training/15 §4): more hours of en-synth2's maskgct / seedvc with new prompt
+    speakers. Same model and settings, so the rows keep en-synth2's family, draw domain and
+    speaker keys (one family atom with the round-2 files); only file_id and path differ."""
+    d = _synth_families(root, "en-synth2-extra", "en")
+    if d.empty:
+        return d
+    for col in ("artifact_family", "source_name", "speaker_ref_id", "domain_key"):
+        d[col] = d[col].str.replace("en-synth2-extra", "en-synth2", n=1, regex=False)
+    return d
 
 
 def _proc(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
@@ -348,6 +382,98 @@ def _ctrsvdd(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
         "lang": d.get("lang", pd.Series(None, index=d.index)).to_numpy()})
 
 
+def _sing(root: Path, v2: pd.DataFrame, side: str) -> pd.DataFrame:
+    """N2 (docs/training/15 §3): htdemucs VOCAL stems of songs, cut into
+    vocal-active chunks (scripts/synth3/sing_*.py). A fake stem (SONICS,
+    ACE-Step) is family `sing-fake/<generator>` with the speaker key of its
+    source songs (`sonics/<version>`, `aisong-kr-en/acestep15`), so a stem and
+    the whole song it came from share a fold atom. A real stem keeps its SOURCE
+    song's artist key and publisher atom, as a realmusic-sep stem does: from
+    the base manifest when the song is there, else from the metadata
+    (fma_medium tracks, keyed the way processing.corpus keys FMA)."""
+    corpus = f"sing-{side}"
+    d = _metadata(root / "interim" / corpus / "metadata.csv")
+    if d.empty:
+        return pd.DataFrame(columns=["path"])
+    lang = d["lang"].where(d["lang"].notna(), None).to_numpy()
+    if side == "fake":
+        ver = d["generator_version"].astype(str)
+        fam = corpus + "/" + ver
+        # The speaker key is also the draw's tile bucket, so it is cut to the real
+        # side's size (a real stem's key is its artist: ~4 stems): one key per 3
+        # source songs (~4-5 stems), never per version (hundreds of files, so a
+        # fake singing slot tiled from ~14 songs vs ~5 on the real side: audit
+        # I1c's voice_n_files). The family (source_name) is still one fold atom.
+        # A SONICS stem never takes SONICS' `sonics/<version>` key: the whole
+        # files are sealed in PROBE (strategy-v3), and that key would pull it in.
+        song = d["source_file_id"].astype(str)
+        rank = song.groupby(ver).rank(method="dense").astype(int) - 1
+        root = d["speaker_ref_id"].astype(str)
+        root = root.where(~root.str.startswith("sonics/"), fam)
+        spk = root + "/s" + (rank // 3).map("{:04d}".format)
+        return pd.DataFrame({
+            "file_id": corpus + ":" + d["file"].astype(str),
+            "path": f"interim/{corpus}/" + d["file"].astype(str),
+            "artifact_family": fam, "source_name": fam,
+            "speaker_ref_id": spk,
+            "domain_key": corpus + "|" + ver, "prompt_speaker": None, "lang": lang})
+    src = v2.drop_duplicates("file_id").set_index("file_id")
+    sid = d["source_file_id"].astype(str)
+    hit = sid.isin(src.index).to_numpy()
+    name = d["source_name"].astype(object).to_numpy().copy()
+    spk = d["speaker_ref_id"].astype(object).to_numpy().copy()
+    name[hit] = src.loc[sid[hit], "source_name"].to_numpy()
+    spk[hit] = src.loc[sid[hit], "speaker_ref_id"].to_numpy()
+    if pd.isna(spk).any() or pd.isna(name).any():
+        raise ValueError(f"{corpus}: rows without a source key, e.g. "
+                         f"{d.loc[pd.isna(spk) | pd.isna(name), 'file'].head(3).tolist()}")
+    return pd.DataFrame({
+        "file_id": corpus + ":" + d["file"].astype(str),
+        "path": f"interim/{corpus}/" + d["file"].astype(str),
+        "artifact_family": None, "source_name": name, "speaker_ref_id": spk,
+        "domain_key": None, "prompt_speaker": None, "lang": lang})
+
+
+def _sing_fake(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    return _sing(root, v2, "fake")
+
+
+def _sing_real(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    return _sing(root, v2, "real")
+
+
+def _whole_songs(root: Path, meta: str, v2: pd.DataFrame) -> pd.DataFrame:
+    """Whole-file song rows (`cell` per row) from a list CSV: `path` relative
+    to the corpus root plus the key columns. The audio is not copied."""
+    d = _metadata(root / meta)
+    if d.empty:
+        return pd.DataFrame(columns=["path"])
+    key = d["base_file_id"] if "base_file_id" in d.columns else d["file_id"]
+    d = d[~key.isin(set(v2["file_id"])).to_numpy()]      # never twice
+    fake = d["cell"].astype(int).eq(8).to_numpy()
+    fam = d.get("artifact_family", pd.Series(None, index=d.index)).to_numpy()
+    return pd.DataFrame({
+        "file_id": d["file_id"].astype(str), "path": d["path"].astype(str),
+        "cell": d["cell"].astype(int).to_numpy(),
+        "artifact_family": np.where(fake, fam, None),
+        "source_name": np.where(fake, fam, d["source_name"].astype(object).to_numpy()),
+        "speaker_ref_id": d["speaker_ref_id"].astype(str).to_numpy(),
+        "domain_key": np.where(fake, d.get("domain_key", pd.Series(None, index=d.index)).to_numpy(), None),
+        "licence_verdict": d.get("licence_verdict", pd.Series(None, index=d.index)).to_numpy(),
+        "prompt_speaker": None, "lang": d.get("lang", pd.Series(None, index=d.index)).to_numpy()})
+
+
+def _aisong_kr_en(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    """N2c: ACE-Step 1.5 songs with Korean / English lyrics, cell 8 as-is."""
+    return _whole_songs(root, "interim/aisong-kr-en/metadata.csv", v2)
+
+
+def _sing_real_whole(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+    """N2b: fma_medium songs whose vocal stem passed the N2 screen, cell 5 as-is
+    (fma_small / MUSAN songs with vocals are already cell-5 rows of the base)."""
+    return _whole_songs(root, "interim/sing-real/whole_songs.csv", v2)
+
+
 NEW_CORPORA = (
     NewCorpus("ko-synth", "B", _ko_synth),
     NewCorpus("sonics-sep", "D", _sonics_sep),
@@ -358,10 +484,19 @@ NEW_CORPORA = (
     NewCorpus("proc", "*", _proc),
     NewCorpus("emilia-ko", "A", _emilia_ko),
     NewCorpus("ko-synth2", "B", _ko_synth2),
+    NewCorpus("ko-synth3", "B", _ko_synth3),
+    NewCorpus("ko-synth2-extra", "B", _ko_synth2_extra),
     NewCorpus("emilia-en", "A", _emilia_en),
     NewCorpus("en-synth2", "B", _en_synth2),
+    NewCorpus("en-synth3", "B", _en_synth3),
+    NewCorpus("en-synth2-extra", "B", _en_synth2_extra),
     NewCorpus("zh-synth", "B", _zh_synth),
     NewCorpus("ctrsvdd", "*", _ctrsvdd),
+    # N2 singing (docs/training/15 §3); "W" = whole-file rows, `cell` per row
+    NewCorpus("sing-fake", "B", _sing_fake),
+    NewCorpus("sing-real", "A", _sing_real),
+    NewCorpus("aisong-kr-en", "W", _aisong_kr_en),
+    NewCorpus("fma-medium-songs", "W", _sing_real_whole),
 )
 
 
@@ -371,7 +506,13 @@ def _frame(rows: pd.DataFrame, probe: pd.DataFrame, nc: NewCorpus) -> pd.DataFra
              else np.array([nc.pool] * n, dtype=object))
     if nc.pool == "*" and "pool" not in rows.columns:
         raise ValueError(f"{nc.name}: the reader must give a per-row pool")
-    fake = np.isin(pools, ["B", "D"])
+    whole = nc.pool == "W"
+    if whole:
+        from training.spec import CELL_TABLE, is_fake_cell
+        cells = rows["cell"].astype(int).to_numpy()
+        pools = np.array([None] * n, dtype=object)
+    fake = (np.array([is_fake_cell(c) for c in cells], dtype=bool) if whole
+            else np.isin(pools, ["B", "D"]))
     m = pd.DataFrame({
         "file_id": rows["file_id"].to_numpy(), "path": rows["path"].to_numpy(),
         "sha256": probe["sha256"].to_numpy(), "row_kind": "component", "pool": nc.pool,
@@ -383,7 +524,11 @@ def _frame(rows: pd.DataFrame, probe: pd.DataFrame, nc: NewCorpus) -> pd.DataFra
     m["pool"] = pools
     for i, col in enumerate(("label_voice_present", "label_music_present",
                              "label_voice_fake", "label_music_fake")):
-        m[col] = pd.array([POOL_LABELS[p][i] for p in pools], dtype="Int64")
+        m[col] = pd.array([CELL_TABLE[c][i] for c in cells] if whole
+                          else [POOL_LABELS[p][i] for p in pools], dtype="Int64")
+    if whole:
+        m["row_kind"] = "whole_file"
+        m["cell"] = pd.array(cells, dtype="Int64")
     m["artifact_family"] = np.where(fake, rows["artifact_family"].to_numpy(), None)
     m["source_name"] = rows["source_name"].to_numpy()
     m["speaker_ref_id"] = rows["speaker_ref_id"].to_numpy()
@@ -397,7 +542,8 @@ def _frame(rows: pd.DataFrame, probe: pd.DataFrame, nc: NewCorpus) -> pd.DataFra
     m["aug_strength"] = 1.0
     m["corpus"] = nc.name
     m["noise_has_speech"] = False
-    m["licence_verdict"] = None
+    m["licence_verdict"] = (rows["licence_verdict"].to_numpy()
+                            if "licence_verdict" in rows.columns else None)
     m["stage"] = rows["path"].str.split("/", n=1).str[0].to_numpy()
     m["reassigned_from"] = None
     m["prompt_speaker"] = rows["prompt_speaker"].to_numpy()
@@ -406,10 +552,12 @@ def _frame(rows: pd.DataFrame, probe: pd.DataFrame, nc: NewCorpus) -> pd.DataFra
 
 
 def extend_manifest(v2: pd.DataFrame, corpus_root: Path, *, component_floor_s: float,
-                    only: tuple[str, ...] | None = None,
+                    only: tuple[str, ...] | None = None, append: tuple[str, ...] = (),
                     workers: int = 32, scheme_version: str = SCHEME_VERSION) -> tuple[pd.DataFrame, dict[str, Any]]:
     """``(v3 manifest, report)``. v2's rows are copied unchanged but for
-    `scheme_version`, `lang` and an empty `prompt_speaker`."""
+    `scheme_version`, `lang` and an empty `prompt_speaker`. A corpus already in
+    the base is skipped unless named in `append`: then only its rows whose
+    `file_id` the base lacks are added (e.g. emilia-ko's second YODAS sample)."""
     report: dict[str, Any] = {"scheme_version": scheme_version, "base_rows": int(len(v2)),
                               "new": {}}
     base = v2.copy()
@@ -419,9 +567,11 @@ def extend_manifest(v2: pd.DataFrame, corpus_root: Path, *, component_floor_s: f
     parts = [base]
     seen_sha = set(v2["sha256"].astype(str))
     for nc in NEW_CORPORA:
-        if (only is not None and nc.name not in only) or nc.name in have:
+        if (only is not None and nc.name not in only) or (nc.name in have and nc.name not in append):
             continue
         rows = nc.reader(corpus_root, v2)
+        if nc.name in have and not rows.empty:
+            rows = rows[~rows["file_id"].isin(set(base["file_id"]))].reset_index(drop=True)
         if rows.empty:
             report["new"][nc.name] = {"rows": 0, "note": "no input found"}
             continue

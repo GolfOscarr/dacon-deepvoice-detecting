@@ -94,11 +94,15 @@ def finalize(family: str) -> tuple[int, int, float]:
     fcntl.flock(lock, fcntl.LOCK_EX)
     try:
         qc = {r["file"]: r for r in kc.read_csv(d / "qc.csv")}
+        # optional exact-zero screen (scripts/synth3/ko_zeros.py writes zeros.csv; absent = no-op)
+        zero = {r["file"] for r in kc.read_csv(d / "zeros.csv") if r["flagged"] == "True"}
         rows = []
         for r in kc.read_csv(d / "synth.csv"):
             q = qc.get(r["file"])
             if q is None:
                 continue
+            if r["file"] in zero:
+                q = {**q, "kept": "False", "drop_reason": "|".join(x for x in (q["drop_reason"], "zeros") if x)}
             rows.append({**{k: r[k] for k in kc.META_COLUMNS},
                          "qc_cer": q["qc_cer"], "kept": q["kept"], "drop_reason": q["drop_reason"]})
         tmp = d / f"metadata.csv.tmp{os.getpid()}"
