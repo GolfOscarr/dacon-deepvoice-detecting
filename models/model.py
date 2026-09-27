@@ -15,6 +15,7 @@ and independently fake, leaving a hard switch undefined.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -22,14 +23,14 @@ import torch
 from torch import Tensor, nn
 
 from models.audio import bandpass
-from models.config import ModelConfig, dump_config, _model_from_dict
+from models.config import ModelConfig, dump_config, _model_from_dict, validate_model_config
 from models.frontends import build_frontend
 from models.heads import SEDHead
 from models.outputs import branch_logit, to_probability
 from models.utils import align_time
 
 __all__ = ["DeepVoiceNet", "LayerFusion", "load_checkpoint", "save_checkpoint",
-           "shipped_weights"]
+           "shipped_weights", "with_file_mode"]
 
 #: Config fields the *model* deliberately does not read, with who owns them.
 #: tests/test_model.py asserts that every other field is read somewhere, so a
@@ -299,6 +300,18 @@ def save_checkpoint(model: DeepVoiceNet, path: str | Path) -> None:
     """
     torch.save({"config": dump_config(model.cfg),
                 "state_dict": model.state_dict()}, Path(path))
+
+
+def with_file_mode(model: DeepVoiceNet, mode: str) -> DeepVoiceNet:
+    """The same module with ``cfg.file_head.mode`` replaced (the config is frozen).
+
+    Only `submission_probs` reads the mode, so no parameter or buffer changes.
+    """
+    cfg = dataclasses.replace(
+        model.cfg, file_head=dataclasses.replace(model.cfg.file_head, mode=mode))
+    validate_model_config(cfg)
+    model.cfg = cfg
+    return model
 
 
 def shipped_weights(model_dir: str | Path) -> dict[str, str] | None:
