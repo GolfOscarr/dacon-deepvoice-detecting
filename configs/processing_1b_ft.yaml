@@ -1,0 +1,212 @@
+# 1B SECOND RUN (warm restart for the ensemble, owner 2026-09-28): processing_1b_main.yaml with
+# the frontend hold off and a short warmup, since it starts from the trained 1B final (--init-weights).
+# 1B MAIN RUN (docs/training/14, 15), GENERATED from configs/processing_run5.yaml (strategy-v5 draw)
+# + loop: grad_checkpointing (per-rank 16), grad_accum 1, frontend_hold_steps 1000, warmup 1000,
+# frontend_lr_scale 0.5. Comments are in processing_run5.yaml.
+draw:
+  cell_mix:
+    p:
+      1: 0.06
+      2: 0.13
+      3: 0.06
+      4: 0.135
+      5: 0.155
+      6: 0.125
+      7: 0.125
+      8: 0.095
+      9: 0.115
+  f8: 1.0
+  domain_cap: 500
+  lang_shares:
+    ko: 0.6
+    en: 0.4
+    zh: 0.0
+    ja: 0.0
+    other: 0.0
+  domain_weights:
+    wavefake|: 0.25
+    proc-codec-lm|wavefake|: 0.25
+    proc-dac|wavefake|: 0.25
+    proc-dsp|wavefake|: 0.25
+    proc-encodec|wavefake|: 0.25
+    proc-enhance|wavefake|: 0.25
+    ljspeech/: 25.0
+    proc-codec-lm/: 18.0
+    proc-dac/: 18.0
+    proc-encodec/: 18.0
+    proc-dsp/: 18.0
+    proc-enhance/: 18.0
+    proc-codec-lm|: 0.35
+    proc-dac|: 0.35
+    proc-encodec|: 0.35
+    proc-dsp|: 0.35
+    proc-enhance|: 0.35
+    ko-synth2|: 1.1
+    en-synth2|: 1.8
+    en-synth3|: 1.8
+    emilia-ko/: 2.6
+    emilia-en/: 2.6
+    sing-fake|: 1.6
+    fma_artist_: 16.0
+    musan-music: 16.0
+  duration_range:
+  - 4.0
+  - 60.0
+  take_range_s:
+  - 1.5
+  - 2.5
+  edge_margin_s: 0.5
+  component_floor_s: 2.5
+  gain_db_range:
+  - -15.0
+  - 15.0
+  gain_db_mean: -3.6
+  gain_db_sigma: 4.0
+  sequential_prob: 0.25
+  crossfade_ms_range:
+  - 10.0
+  - 200.0
+  silence_lead_s: 3.0
+  silence_tail_s: 1.0
+  p_noise_layer: 0.5
+  noise_snr_db_range:
+  - 10.0
+  - 30.0
+  augments:
+  - name: gain_jitter
+    p: 1.0
+    db_range:
+    - -12.0
+    - 12.0
+  - name: rawboost_ssi
+    p: 0.5
+    snr_db_range:
+    - 10.0
+    - 40.0
+    tilt_db_range:
+    - -12.0
+    - 12.0
+  - name: gaussian_noise
+    p: 0.3
+    snr_db_range:
+    - 10.0
+    - 30.0
+  - name: pink_noise
+    p: 0.3
+    snr_db_range:
+    - 10.0
+    - 30.0
+  - name: stereo_imbalance
+    p: 0.3
+    db_range:
+    - -4.0
+    - 4.0
+  - name: rir
+    p: 0.3
+    wet_range:
+    - 0.3
+    - 1.0
+    max_rir_s: 1.0
+    pattern: '*_rir_*.wav'
+    bank_dir: /data/project/private/dacon-corpus/interim/rirs-noises/openslr-28/RIRS_NOISES/real_rirs_isotropic_noises
+  - name: compression
+    p: 0.2
+    threshold_db_range:
+    - -12.0
+    - 0.0
+    ratio_range:
+    - 2.0
+    - 8.0
+    release_ms_range:
+    - 50.0
+    - 300.0
+    target_dbfs_range:
+    - -26.0
+    - -14.0
+  - name: packet_loss
+    p: 0.1
+    rate_range:
+    - 0.01
+    - 0.05
+    frame_ms: 20.0
+    repeat_prob: 0.5
+  normalize_menu:
+    container:
+      wav: 0.28
+      flac: 0.14
+      mp3_32: 0.05
+      mp3_48: 0.05
+      mp3_64: 0.13
+      mp3_96: 0.13
+      mp3_128: 0.13
+      mp3_192: 0.09
+    channels:
+      mono: 0.5
+      stereo: 0.5
+    telephone:
+      none: 0.7
+      ulaw: 0.08
+      alaw: 0.04
+      plain: 0.04
+      gsm: 0.04
+      opus_8: 0.025
+      opus_12: 0.025
+      opus_16: 0.025
+      opus_24: 0.025
+    telephone_hz: 8000
+  scheme_version: strategy-v5
+  allow_unsound_mix: false
+render:
+  root: /data/project/private/dacon-corpus
+  audio:
+    sample_rate: 16000
+    min_seconds: 4.0
+    max_seconds: 60.0
+    channels: downmix
+    band_hz: null
+  resampler: training.render.resample_poly_to
+  crossfade_shape: sigmoid
+  check_duration: true
+  cache_root: /data/project/private/dacon-corpus/cache16k
+  target_rms_dbfs: -23.0
+  tile_rms_dbfs: -23.0
+  clip: true
+  single_thread: true
+ship:
+  sample_rate: 16000
+  channels: downmix
+  preprocess:
+  - dc_offset
+  band_hz:
+  - 0.0
+  - 7200.0
+folds:
+  n_folds: 4
+  probe_share: 0.1
+  scheme_version: null
+  caveat_families_per_val_fold: 2
+  require_component_coverage: true
+  allow_no_probe: false
+  assigned_at: null
+  probe_budget_drawable_only: true
+  probe_min_real_hours: 5.0
+  probe_min_real_atoms: 5
+  balance_on: hours
+  caveat_min_role_hours: 5.0
+loop:
+  out_dir: runs/dev
+  n_buckets: 4
+  ema_decay: 0.999
+  grad_clip: 5.0
+  device: cuda
+  checkpoint_every: 0
+  max_steps: null
+  render_workers: 7
+  lr_schedule: cosine
+  warmup_steps: 300
+  min_lr_ratio: 0.05
+  frontend_lr_scale: 0.5
+  log_every: 50
+  grad_checkpointing: true
+  grad_accum: 1
+  frontend_hold_steps: 0
