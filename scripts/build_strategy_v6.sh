@@ -37,7 +37,9 @@ echo "== music cut"; $V scripts/strategy/cut_music_rows.py --in-dir "$OUT/_pre" 
 echo "== cache"; $V scripts/build_cache.py --processing-config $CFG --manifest-dir "$OUT" --workers 16 | tail -12
 # label symmetry (docs/training/11 §1.1): repeats, processed and language shares must match
 echo "== balance all-data"; $V scripts/strategy/draw_balance.py --manifest-dir "$OUT" --processing $CFG --all-data --n 8000
-echo "== audit fold 0"; $V scripts/strategy/audit_fold.py --manifest-dir "$OUT" --processing $CFG --fold 0 --n 40000 | grep -E "FAIL|PASS|audit ok|drawn"
-echo "== audit fold 1"; $V scripts/strategy/audit_fold.py --manifest-dir "$OUT" --processing $CFG --fold 1 --n 40000 | grep -E "FAIL|PASS|audit ok|drawn"
-echo "== audit all-data"; $V scripts/strategy/audit_fold.py --manifest-dir "$OUT" --processing $CFG --all-data --n 40000 | grep -E "FAIL|PASS|audit ok|drawn"
+# n=80000, not 40000: after the music cut most real pieces are drawn exactly twice at
+# n=40000, and I3 (training/audit.py, gate >= 0.5) then reads 1-q^2-(1-q)^2 = .475 at q=.611
+echo "== audit fold 0"; $V scripts/strategy/audit_fold.py --manifest-dir "$OUT" --processing $CFG --fold 0 --n 80000 | grep -E "FAIL|PASS|audit ok|drawn"
+echo "== audit fold 1"; $V scripts/strategy/audit_fold.py --manifest-dir "$OUT" --processing $CFG --fold 1 --n 80000 | grep -E "FAIL|PASS|audit ok|drawn"
+echo "== audit all-data"; $V scripts/strategy/audit_fold.py --manifest-dir "$OUT" --processing $CFG --all-data --n 80000 | grep -E "FAIL|PASS|audit ok|drawn"
 echo "strategy-v6 built at $OUT"
