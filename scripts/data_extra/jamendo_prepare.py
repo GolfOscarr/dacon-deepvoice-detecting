@@ -351,7 +351,8 @@ def finalize(args) -> int:
     s["htdemucs_vocal_s"] = s["file_id"].map(ch[pre].groupby("source_file_id")["duration_s"].sum()).fillna(0.0)
     s.loc[~s["separated"], "htdemucs_vocal_s"] = np.nan
     s = s.join(clips.drop(columns=["file", "ok"]), on="track_id").join(
-        tracks[["artist_id", "album_id", "speaker_ref_id", "tags", "licence", "verdict"]], on="track_id")
+        tracks[["artist_id", "album_id", "speaker_ref_id", "tags", "licence", "verdict", "path"]]
+        .rename(columns={"path": "jamendo_path"}), on="track_id")
     s["voice_tag"] = s["tags"].fillna("").map(lambda t: any(v in t for v in VOICE_TAGS))
     why = np.select(
         [s["vox_max"].isna(), s["vox_max"] >= AST_INSTR_MAX, s["htdemucs_vocal_s"].fillna(0) > 0, s["voice_tag"]],
@@ -367,7 +368,9 @@ def finalize(args) -> int:
     print(f"calibration (htdemucs-separated, n={len(cal)}): AST instrumental {int(ast_i.sum())}, of which "
           f"htdemucs vocal chunk {int((ast_i & (cal['htdemucs_vocal_s'] > 0)).sum())}")
     keep = _segments(s[s["kept"]])
-    cols = ["file", "clip", "seg", "track_id", "artist_id", "album_id", "speaker_ref_id", "source_name", "duration_s",
+    # provenance: the original MP3 in the dataset tar; offset_s is within that track
+    keep["source_path"] = "raw/mtg-jamendo/audio/" + keep["jamendo_path"].str.replace(".mp3", ".low.mp3", regex=False)
+    cols = ["file", "clip", "seg", "track_id", "source_path", "artist_id", "album_id", "speaker_ref_id", "source_name", "duration_s",
             "offset_s", "track_s", "src_sr", "src_channels", "rms_dbfs", "peak_src", "clip_frac",
             "zero_run_ms", "zero_frac", "rolloff99_hz", "vox_max", "htdemucs_vocal_s", "licence",
             "licence_verdict", "tags", "kept"]

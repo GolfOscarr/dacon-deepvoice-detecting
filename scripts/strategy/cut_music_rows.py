@@ -26,8 +26,10 @@ source recording) except file_id, path, sha256, duration_s, stage; and its paren
 fold-table row (slice incl. PROBE, fold, atoms) with only file_id replaced -- no fold
 moves. The parents leave the manifest and the fold table. VG1 must pass.
 
+Deterministic: no randomness; the same cache gives byte-identical pieces (checked).
 Writes <out>/manifest.parquet, folds.parquet (+ caveats / vg1 / report), cut_map.parquet
-(piece -> parent, offset_s), cut_report.json.
+(the provenance ledger: piece -> parent file_id, parent path, offset_s within the parent's
+16 kHz audio, licence_verdict), cut_report.json.
 """
 from __future__ import annotations
 
@@ -152,6 +154,10 @@ def main() -> int:
         raise SystemExit(f"FATAL: VG1 fails:\n{vg1}")
     out.mkdir(parents=True, exist_ok=True)
     mm.to_parquet(out / "manifest.parquet", index=False)
+    # provenance ledger: every piece -> its original file, offset and licence
+    par = base.loc[cm["parent"], ["path", "corpus", "licence_verdict"]].reset_index(drop=True)
+    cm = cm.assign(parent_path=par["path"].to_numpy(), parent_corpus=par["corpus"].to_numpy(),
+                   licence_verdict=par["licence_verdict"].to_numpy())
     cm.to_parquet(out / "cut_map.parquet", index=False)
 
     def hours(d: pd.DataFrame) -> dict:
