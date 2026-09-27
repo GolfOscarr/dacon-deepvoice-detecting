@@ -109,6 +109,29 @@ def frozen_eval_specs(sampler: Sampler, n: int, *, epoch: int = 0,
     return tuple(sampler.epoch_specs(n, epoch=epoch, seed=seed))
 
 
+def draw_epoch(sampler: Any, n: int, *, epoch: int, seed: int) -> tuple[SampleSpec, ...]:
+    """One epoch's spec list: ``sampler.epoch_specs(n, epoch, seed)``, drawn in
+    parallel across DDP ranks when a process group is up.
+
+    A spec is a pure function of ``(i, epoch, seed)`` (``sample_spec``), so rank
+    ``r`` draws indices ``r, r + W, ...`` and the ranks exchange their parts:
+    the same tuple, element for element, at 1/W of the time. Measured on
+    strategy-v5: ~6 ms per spec, so 128,000 specs took ~13 min on every rank at
+    every pass (docs/training/14 §8). One process, or a sampler without
+    ``sample_spec``, draws serially as before.
+    """
+    from training.distributed import all_gather_object, current
+    d = current()
+    if not d.enabled or not hasattr(sampler, "sample_spec"):
+        return tuple(sampler.epoch_specs(n, epoch=epoch, seed=seed))
+    mine = [sampler.sample_spec(i, epoch=epoch, seed=seed)
+            for i in range(d.rank, n, d.world)]
+    out: list[Any] = [None] * n
+    for r, part in enumerate(all_gather_object(mine, d)):
+        out[r::d.world] = part
+    return tuple(out)
+
+
 class SpecDataset(Dataset):
     """``index -> RenderedSample``. Holds specs, not audio.
 
@@ -155,7 +178,7 @@ class SpecDataset(Dataset):
         """The training mode: a spec list that `set_epoch` redraws. ``sampler``
         is anything with ``epoch_specs``, ``slice_`` and ``fold`` -- the
         training sampler or ``processing.sampler.Sampler``."""
-        return cls(sampler.epoch_specs(n, epoch=epoch, seed=seed), index, cfg,
+        return cls(draw_epoch(sampler, n, epoch=epoch, seed=seed), index, cfg,
                    slice_=sampler.slice_, fold=sampler.fold,
                    sampler=sampler, n=n, seed=seed, epoch=epoch, ship=ship)
 
@@ -241,9 +264,12 @@ class SpecDataset(Dataset):
                 "this SpecDataset is frozen: its spec list is a value, not a "
                 "seed. Re-draw with SpecDataset.from_sampler if you meant the "
                 "training set")
+        if int(epoch) == self.epoch:
+            # The list already IS this epoch's draw (a pure function of
+            # (i, epoch, seed)); redrawing it cost ~13 min at 128k specs.
+            return
         self.epoch = int(epoch)
-        self._specs = tuple(self._sampler.epoch_specs(
-            self._n, epoch=self.epoch, seed=self.seed))
+        self._specs = draw_epoch(self._sampler, self._n, epoch=self.epoch, seed=self.seed)
 
     # -- the audits ---------------------------------------------------------- #
 

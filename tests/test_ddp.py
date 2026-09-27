@@ -470,3 +470,41 @@ def test_train_py_refuses_several_stages_under_ddp(integration_corpus, tmp_path)
 def test_dist_defaults_describe_one_process():
     assert current() == SINGLE and not SINGLE.enabled and SINGLE.main
     assert Dist(rank=1, world=2).enabled and not Dist(rank=1, world=2).main
+
+
+# --------------------------------------------------------------------------- #
+# The epoch draw, sharded across ranks (docs/training/14 §8: 13 min per pass)
+
+
+def _w_draw(rank, world, init, corpus, n, out):
+    _join(rank, world, init)
+    try:
+        from training.dataset import draw_epoch
+        from training.sampler import Sampler
+        from loop_fixtures import DRAW
+        manifest, _, _ = corpus
+        specs = draw_epoch(Sampler(manifest, DRAW), n, epoch=3, seed=7)
+        if rank == 1:                   # a non-zero rank must hold the full list too
+            torch.save([s.to_dict() for s in specs], out)
+    finally:
+        dist.destroy_process_group()
+
+
+def test_the_sharded_epoch_draw_is_the_serial_draw(corpus, tmp_path):
+    from training.sampler import Sampler
+    from loop_fixtures import DRAW
+    manifest, _, _ = corpus
+    n = 11                               # not a multiple of the world size
+    serial = [s.to_dict() for s in Sampler(manifest, DRAW).epoch_specs(n, epoch=3, seed=7)]
+    out = tmp_path / "draw.pt"
+    _spawn(_w_draw, tmp_path, corpus, n, out)
+    assert torch.load(out, weights_only=False) == serial
+
+
+def test_set_epoch_to_the_current_epoch_keeps_the_same_list(corpus):
+    ds = _dataset(corpus, n=6)
+    before = ds.specs
+    ds.set_epoch(0)
+    assert ds.specs is before            # no redraw: it is already epoch 0's draw
+    ds.set_epoch(1)
+    assert ds.specs != before
