@@ -165,9 +165,12 @@ verified.
 - **Primary goal: the score.**
 - **Settled:** data first (strategy-v5 done); max3 everywhere; the one-class loss is dropped;
   WaveFake stays ×0.25; no diagB.
-- **Open (owner):** OuteTTS + Higgs (Llama-3 naming clause) are IN v5 with their own draw
-  weights. The owner has not decided whether to keep them; they cannot be removed from the
-  running 1B model.
+- **Decided (owner, 2026-09-28):** OuteTTS + Higgs (Llama 3.2 licence) STAY, and we COMPLY:
+  every model trained on v5+ data is named with a leading "Llama" (e.g. "Llama-DeepVoice-Detector")
+  in the 2nd-stage reports, with "Built with Llama" attribution.
+- **Decided (owner, 2026-09-28):** ND-licensed music (fma, mtg-jamendo `derivatives_barred`) is
+  used under talkboard A5: the 2nd-stage package ships ORIGINAL files + deterministic code
+  (cut/convert scripts), never the derived pieces.
 - **Slurm:**
   - Every job `-J eval-hyeonseop`, partition `debug`, per-job `CUDA_CACHE_PATH=/tmp/...`.
   - The node exposes **64 usable CPUs** (8 per GPU).
