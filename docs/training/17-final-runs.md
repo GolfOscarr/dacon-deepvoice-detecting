@@ -1,7 +1,7 @@
 # 17 · Final runs (Mon 2026-09-28 → Tue 09-29): 1B on v6b/v6c, soups, ensembles
 
 The closing 30 hours of the competition: the XLS-R-1B main run finished, three new data
-versions (v6, v6b, v6c) were built, five fine-tune runs were planned (four started), and the final packages are
+versions (v6, v6b, v6c) were built, four fine-tune runs were planned (A–D) and three started (A, C, D), and the final packages are
 soups and a two-model ensemble. Read with [16-lessons-learned.md](16-lessons-learned.md) (runs 1–3,
 strategy-v5) and [../HANDOFF_RUN4.md](../HANDOFF_RUN4.md) (the 1B run's operations).
 
@@ -10,12 +10,12 @@ strategy-v5) and [../HANDOFF_RUN4.md](../HANDOFF_RUN4.md) (the 1B run's operatio
 - **The v6b music fix was the biggest late gain:** LB 0.83046 → **0.85441** (+0.024, almost all ADS,
   0.812 → 0.838), from real music diversity (MTG-Jamendo), a fair real/fake music draw (10 s cut)
   and newer fake music (ACE-Step 1.5), on the 1B model.
-- **Every model peaks mid-run.** The 1B main run peaked at pass 15 of 24, run A at pass 8 of 15, run C
-  at pass 5 of 11. Training loss keeps falling while PROBE falls back, so **soups of the mid-run passes**
+- **Every model peaks mid-run.** The 1B main run peaked at pass 15 of 24, run A around passes 5–8 of 15, run C
+  around pass 5 of 11. Training loss keeps falling while PROBE falls back, so **soups of the mid-run passes**
   are the final models.
-- **max3 beats the learned file head on every model** (+0.005 to +0.012 PROBE).
+- **max3 beats the learned file head on every model** (+0.004 to +0.012 PROBE).
 - **Averaging with weaker (v5) models hurts;** averaging two strong models from different data does not
-  hurt and helps voice (see §6).
+  hurt and helps voice (see §5).
 - **Continuing a converged model on shifted data at a low LR hurts** (run D).
 
 ## 2 · Leaderboard
@@ -33,20 +33,22 @@ strategy-v5) and [../HANDOFF_RUN4.md](../HANDOFF_RUN4.md) (the 1B run's operatio
   1.75×, down from ~3× in runs 1–2). PROBE differences above ~0.005 are trustworthy in sign.
 - **diagB** (Mon 03:30) completed T7's per-head test split: **file 0.202, voice 0.218, music 0.209 EER**,
   voice-presence AUC 0.980. Music costs 0.063 of ADS vs voice 0.044 (weights .3 vs .2), and music had
-  the biggest VAL→test gap (~0.02 → 0.21). That result chose the music-first data plan below.
+  the biggest VAL→test gap (~0.02 → 0.21). The Jamendo work had already started (02:37, on the suspicion that real music was thin); diagB
+  confirmed music as the priority and decided the ACE-Step generation.
 
 ## 3 · Runs
 
 All runs: XLS-R-1B@24 + BEATs, per-branch layer fusion, LoRA, SED heads (`configs/c_1b_fusion.yaml`),
-DDP on 8×H200, per-rank batch 14 (global 112), 128,000 draws per pass (1,142 steps), bf16, EMA 0.999,
+DDP on 8×H200, per-rank batch 14 (global 112; the main run's passes 0–4 ran as job 221505 on
+7 GPUs × 16, same global batch), 128,000 draws per pass (**1,140 steps**), bf16, EMA 0.999,
 cosine to 5 % of peak, frontend LR ×0.5, loss weights file .45 / music .27 / voice .18 / presence .05.
-Code: worktree `dacon-ddp-1b`, branch `feat/ddp-1b`. Launcher: `_ops/train_resumable.sbatch`
+Code: worktree `dacon-ddp-1b`, branch `feat/ddp-1b`. Launcher: `/data/project/private/dacon-runs/_ops/train_resumable.sbatch`
 (requeue-safe: resumes from the newest complete checkpoint).
 
 | run | job | data | init | LR peak | passes | node | status | best PROBE (max3) |
 |---|---|---|---|---|---|---|---|---|
-| main 1B | 221709 | v5 | pretrained | 3e-4 | 24 | 42 | done (20 h 47 m) | pass 15: 0.9510 |
-| **A** | 222290 | **v6b** | main pass 15 | 1.5e-4 | 15 (stopped after 12) | 68 | stopped 22:40 (past its best) | **soup 5+8: 0.9649** |
+| main 1B | 221505 → 221709 | v5 | pretrained | 3e-4 | 24 (27,360 steps) | 42 | done (5 h 30 m + 20 h 47 m) | pass 15: 0.9510 |
+| **A** | 222290 | **v6b** | main pass 15 | 1.5e-4 | 15 (stopped after 12) | 68 | stopped 22:40 (past its best) | pass 5: 0.9640; **soup 5+8: 0.9649** |
 | B | – | v6b | main pass 15 | 1e-4 | 12 | 42 | cancelled before start (owner: node 42 for the v6c ablation) | – |
 | **C** | 222620 | **v6c** + voice fixes | main pass 15 | 1.5e-4 | 11 | 42 | done | **soup 5–7: 0.9652, 5–8: 0.9654** |
 | D | 222733 | v6c + voice fixes | A pass 8 | 5e-5 | 6 (stopped after 3) | 68 | stopped 04:10 (got worse) | – |
@@ -66,7 +68,7 @@ Configs (worktree): `processing_1b_ft.yaml` (A: run 5 draw, hold 0, warmup 300),
 | main · final (23) | 0.9354 | 0.9471 | 0.085 | 0.049 | 0.065 |
 | A · 2 | 0.9578 | 0.9627 | 0.055 | 0.045 | 0.035 |
 | A · 4 | | 0.9626 | | 0.046 | 0.035 |
-| A · 5 | 0.9586 | | 0.055 | 0.048 | 0.030 |
+| A · 5 | 0.9586 | 0.9640 | 0.055 | 0.048 | 0.030 |
 | A · 8 | 0.9590 | 0.9636 | 0.054 | 0.049 | 0.029 |
 | A · 11 | 0.9577 | | 0.052 | 0.049 | 0.037 |
 | C · 2 | 0.9574 | 0.9611 | 0.056 | 0.044 | 0.036 |
@@ -80,11 +82,12 @@ EER columns are the learned-head row where both exist. With max3 the file EER of
 
 ### 3.2 Readings
 - **Mid-run peak, every run.** Train loss for A fell 0.027 → 0.018 across passes 1–12 while PROBE
-  peaked at pass 8; C peaked at pass 5 (its 11-pass cosine decays faster). The late low-LR passes fit
+  peaked around passes 5–8 (pass 5 is the best single A checkpoint under max3, 0.9640); C peaked at pass 5 (its 11-pass cosine decays faster). The late low-LR passes fit
   the seen files, not the held-out ones. Next time: shorter schedules, or keep the mid-run checkpoints
   and soup them (both done here).
 - **v6c + voice fixes vs v6b (C vs A):** a PROBE tie at matched passes (C best learned 0.9595 vs A
-  0.9590). C has the best voice (0.044–0.045) and music (0.027) of any model. The voice fixes target
+  0.9590). C has the best voice of the v6 models (0.044–0.045; the v5 main run reached 0.037 at pass 6) and
+  the best music of any model (0.027). The voice fixes target
   the real test's channel and noise-floor domain, which PROBE only partly contains; the LB result of
   the ensemble is the only read of that.
 - **Run D:** continuing A pass 8 (0.9590) on v6c at 5e-5 fell to 0.9558 by pass 1 and 0.9530 by pass 3, on every head. Shifted data
@@ -105,7 +108,7 @@ the base; PROBE membership never changes; audits at **n=80000** on fold 0, fold 
 |---|---|---|---|
 | v6 | 635,560 | + MTG-Jamendo real instrumentals 23.7 h (2,843 clips, 1,476 artists); all music rows cut to 10 s; music exact-zero rule; sonics-sep subsampled to 1/3 of fake music | `scripts/build_strategy_v6.sh` |
 | v6b | 641,220 | + ACE-Step 1.5 instrumentals 15.7 h (1,888 of 2,400 clips kept) | `scripts/build_strategy_v6b.sh` |
-| v6c | 652,165 | + Jamendo batch 2 20.8 h (2,502 clips) + ACE-Step batch 2 9.6 h (1,154 of 1,504) | `scripts/build_strategy_v6c.sh` |
+| v6c | 652,165 | + Jamendo batch 2 20.8 h (2,499 distinct tracks after 3 byte-duplicates) + ACE-Step batch 2 9.6 h (1,154 of 1,504) | `scripts/build_strategy_v6c.sh` |
 
 ### 4.2 How the music mixture works (and the trap)
 - **Domain weights cannot steer music.** Music has one bucket per side (`processing/sampler.py`
@@ -155,14 +158,16 @@ Evidence: `/data/project/private/dacon-runs/_voice_audit/`.
 I3 fold 0 0.517, fold 1 0.513, all-data **0.505** (gate ≥ 0.5 — n=40000 fails it because 10 s pieces
 are drawn only ~twice; n=80000 is the standard now); I1c music_fake 0.530, voice_fake 0.592–0.597;
 I1b/I1bp (run C's augmentation) 0.49–0.51. All `audit ok: True`.
+v6b's audits (I3 0.526 / 0.513 / 0.510, all ok) are only in `manifests/_build_v6b-222213.log`
+(the v6b directory has no README or `_audit_*.log`, unlike v6 and v6c).
 
 ## 5 · Inference ablations (PROBE, max3 unless noted)
 
 | candidate | PROBE | note |
 |---|---|---|
 | file mode on A pass 2: learned / max3 / max | 0.9578 / 0.9627 / 0.9635 | max ≈ max3; max3 kept (LB-proven) |
-| A pass 2 + main pass 15 (prob mean) | 0.9588 | worse than A alone: weaker v5 member dilutes |
-| A pass 2 + 300M v5 | 0.9534 | worse |
+| A pass 2 + main pass 15 (prob / logit mean) | 0.9587 / 0.9588 | worse than A alone: weaker v5 member dilutes |
+| A pass 2 + 300M v5 (prob / logit mean) | 0.9509 / 0.9534 | worse |
 | A pass 8 + C pass 2 | 0.9639 | = A pass 8 (0.9636); voice 0.049 → 0.043 |
 | soup A 5+8 / 4+5+8 | 0.9649 / 0.9642 | |
 | soup C 5+8 / 5–7 / 5–8 | 0.9650 / 0.9652 / 0.9654 | |
@@ -173,7 +178,8 @@ I1b/I1bp (run C's augmentation) 0.49–0.51. All `audit ok: True`.
 Server runtime: single 1B ≈ a few minutes for 1,200 files; the two-model package took 1.7× a single
 model on the CPU mirror, far inside the 60-minute limit.
 
-## 6 · Final packages (S3 `dacon-deepfake-detection/submissions/`, all server-mirror checked)
+## 6 · Final packages (`s3://hyeonseop-s3/dacon-deepfake-detection/submissions/` and
+`/data/project/private/dacon-submissions/`, all server-mirror checked)
 
 | package | contents | PROBE | size |
 |---|---|---|---|

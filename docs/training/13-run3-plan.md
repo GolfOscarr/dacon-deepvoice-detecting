@@ -1,5 +1,8 @@
 # Run 3 plan — scale up and generalise
 
+> **Superseded:** the rounds below were replaced by the data-first plan ([15](15-data-plan.md)) and the 1B DDP
+> run (global batch 112); outcomes in [16](16-lessons-learned.md) and [17](17-final-runs.md).
+
 *Rev 2, 2026-09-26 ~17:15 KST. Rev 1 (`3823472`, `fb1cf8d`) was reviewed adversarially and returned
 REVISE (1 blocker, 7 major); every finding is folded in here and logged in §10. DDP is out of scope
 (the owner implements it). Numbers are measured unless marked ESTIMATE. Sources:

@@ -1,5 +1,9 @@
 # 15 · Data plan for strategy-v5: new generators, singing, channel augmentation, mixture
 
+> **As built (2026-09-29):** 12 new voice families (not 4+4); AMR-NB/AMR-WB were never wired (no encoder in
+> this ffmpeg; `configs/processing_run5.yaml`); the §8 question was answered by diagB. The later music work
+> (strategy-v6/v6b/v6c) is in [17-final-runs.md](17-final-runs.md).
+
 *2026-09-27 ~00:30 KST. Owner decision: **data first**, then the 1B run on the new data. This is
 the plan for approval: nothing here is generated until the owner says go. Every hour figure for
 the current corpus was measured on `strategy-v4/manifest.parquet`. **UNVERIFIED** marks licence

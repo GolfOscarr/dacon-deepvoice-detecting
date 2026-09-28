@@ -12,7 +12,8 @@
 - The leader is at 0.89871 (ADS 0.88756, CPS 0.99907).
 - 96 % of the gap to the leader is ADS.
 
-The per-head split is pending the diagnostic submissions `first-v3-diagA/B`
+The per-head split is pending the diagnostic submissions `first-v3-diagA/B` (done later on T7 instead:
+see [16](16-lessons-learned.md) §2 and [17](17-final-runs.md) §2)
 (`script.py` `model/diag_constant.json`, `2cb5611`).
 
 ## 2 · Like-for-like on run 1's exact VAL specs (v3, `processing_first_run.yaml`, n 6000)

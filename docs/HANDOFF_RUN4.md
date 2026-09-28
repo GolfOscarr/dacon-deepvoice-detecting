@@ -1,5 +1,11 @@
 # Handoff — run 4: the 1B main run is training; package, submit and pick by Tue 10:00
 
+> **Superseded (2026-09-29):** this is the Mon 01:30 snapshot. The 1B run finished (pass 15 was its
+> best); runs A–D, strategy-v6/v6b/v6c, the soups, ensembles and final packages are in
+> [training/17-final-runs.md](training/17-final-runs.md). Corrections to this snapshot: a pass is
+> **1,140** steps (27,360 in all), not 1,142; diagB *was* submitted; runs A and D used the `normal`
+> partition (node 68) with the owner's approval.
+
 *Written 2026-09-28 ~01:30 KST by the lead session (its context is full). Every state claim was
 measured at writing time; the command that shows it is next to it. **UNVERIFIED** marks what was
 not. Read with `docs/training/16-lessons-learned.md` (what we learned, all LB results) and

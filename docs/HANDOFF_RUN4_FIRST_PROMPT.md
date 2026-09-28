@@ -1,3 +1,6 @@
+> **Superseded (2026-09-29):** historical first prompt for run 4; the final state is in
+> `docs/training/17-final-runs.md`.
+
 You are continuing the DACON deep-voice detection competition (leaderboard closes **Tue 2026-09-29
 10:00 KST**, 3 submissions/day, goal: the highest score). Read `docs/HANDOFF_RUN4.md` in
 `/home/hyeonseop.shin/workspace/dacon-deepvoice-detecting` in full first, then

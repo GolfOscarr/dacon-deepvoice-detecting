@@ -27,14 +27,14 @@ measurements. Plan documents: 11 (run 2), 13 (run 3), 14 (DDP), 15 (data plan).*
 | T7 diagA (file head + music presence live, others 0.5) | 0.65797 | 0.64914 | 0.73744 | per-head split |
 | **T7 fine-tuned on strategy-v5, learned file head** (`run5-T7v5-learned`) | 0.82487 | 0.80575 | 0.99698 | **v5 data: +0.0134**; CPS 0.977 → 0.997 (presence heads, likely the singing fix) |
 | **same, file mode max3** (`run5-T7v5-max3`) | **0.83046** | 0.81196 | 0.99698 | **max3: +0.0056**, test file EER −0.012 (6× the VAL gain); used for every package from now on |
-| leader | 0.89871 | 0.88756 | 0.99907 | 97.5 % of our gap is ADS |
+| leader | 0.89871 | 0.88756 | 0.99907 | 97.5 % of T7's gap is ADS (99.7 % of run5-T7v5-max3's) |
 
 **Per-head split of T7 on the real test** (diagA + T7, by the formulas in HANDOFF_RUN3 §4):
 
 | quantity | test | our VAL (v4, run 2 fold models) | reading |
 |---|---|---|---|
 | file EER | **0.202** | ~0.03–0.08 | 3–6× worse on test; costs 0.10 of ADS by itself |
-| voice + music EER | 0.2·(1−v) + 0.3·(1−m) = 0.394 → **≈ 0.21 each if equal** | 0.05–0.15 / 0.003–0.04 | not separable without diagB (range: music 0.02–0.35) |
+| voice + music EER | 0.2·(1−v) + 0.3·(1−m) = 0.394 → **≈ 0.21 each if equal** | 0.05–0.15 / 0.003–0.04 | not separable without diagB (range: music 0.02–0.35). **Resolved Mon 03:30:** voice 0.218, music 0.209 ([17](17-final-runs.md) §2) |
 | music-presence AUC | **0.975** | 0.99999 | presence also generalizes worse |
 | voice-presence AUC | **0.980** | 0.99999 | likely part singing (§5.2), UNVERIFIED |
 
@@ -49,7 +49,7 @@ measurements. Plan documents: 11 (run 2), 13 (run 3), 14 (DDP), 15 (data plan).*
   max` (components only).
 - **L2c. v5 moved the LB more than PROBE predicted** (+0.0134 LB vs +0.010 PROBE); the 1B
   pass-2 EMA checkpoint scores PROBE 0.9251 (300M-v5 0.9205, T7 0.9103), voice EER 0.051 vs 0.071.
-- **L3. diagB was not worth a slot on Sunday.** It separates voice from music, but nothing before
+- **L3. diagB was not worth a slot on Sunday** (it was submitted on Monday and did steer the music plan; see [17](17-final-runs.md) §2). It separates voice from music, but nothing before
   Tuesday would change on the answer.
 
 ## 3 · Data: what moved the needle and what did not
@@ -131,6 +131,11 @@ generated".
   - Commercial APIs are excluded by ToS.
 
 ## 7 · Where this leaves us (10:00 Sunday)
+
+> **Superseded:** the open questions below are answered in [17-final-runs.md](17-final-runs.md): v6 raised the
+> LB, max3 beat the learned head, 1B beat 300M (0.85441), diagB gave the voice/music split, and the owner chose
+> to comply with the Llama licence (73d8f2e). The main run was job 221505 (7 GPUs, passes 0–4), then 221709
+> (8 GPUs), not 221491 (cancelled).
 
 - **strategy-v5:** 590,316 rows, 3,324 h. Audits pass on folds 0 and 1; the all-data audit is
   finishing.
