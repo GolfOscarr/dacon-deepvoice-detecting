@@ -23,7 +23,7 @@ this directory says what the loss does with it.
 | [11-run2-design.md](11-run2-design.md) | Run 2 design (strategy-v4) |
 | [12-run2-results.md](12-run2-results.md) | Run 2 results, LB 0.81144 |
 | [13-run3-plan.md](13-run3-plan.md) | Run 3 plan (superseded by 15–17) |
-| 14-ddp-plan.md | DDP + XLS-R-1B plan (on branch `feat/ddp-1b`) |
+| [14-ddp-plan.md](14-ddp-plan.md) | DDP + XLS-R-1B plan (as built: notes inline) |
 | [15-data-plan.md](15-data-plan.md) | strategy-v5 data plan |
 | [16-lessons-learned.md](16-lessons-learned.md) | ⭐ What we learned, runs 1–3 and strategy-v5 |
 | [17-final-runs.md](17-final-runs.md) | ⭐ **Final runs**: 1B, runs A–D, strategy-v6/v6b/v6c, soups, ensembles, final packages |
