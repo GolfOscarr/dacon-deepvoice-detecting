@@ -9,6 +9,12 @@
     python scripts/data_extra/jamendo_prepare.py measure --workers 1
     python scripts/data_extra/jamendo_prepare.py finalize
 
+strategy-v6c's second batch (interim/mtg-jamendo-2) is the same pipeline in its own
+directory: `--out`, `--licences`, and at select `--prior <v6 selection_tracks.csv>`
+(its tracks are never re-selected; its selected tracks count toward the caps) with
+`--per-artist 8 --per-album 3 --max-select N`. The htdemucs calibration is v6's
+(no separated subset in the second batch; AST + voice tags decide there).
+
 Source: MTG-Jamendo `raw_30s` audio-low (96 kbps MP3, full tracks), tars
 `raw/mtg-jamendo/tars/raw_30s_audio-low-NN.tar` (sha256 checked against the
 dataset's list), metadata from the dataset repo (`raw/mtg-jamendo/meta_repo`).
@@ -96,7 +102,8 @@ def _tars() -> list[int]:
 def select(args) -> int:
     from filter_track_licences import classify, load_jamendo
     from processing.corpus import _artist_atom
-    tars = _tars()
+    # --tars: select before the tars are downloaded (extract refuses an unverified tar)
+    tars = [int(x) for x in args.tars.split(",")] if args.tars else _tars()
     print(f"verified tars: {tars}", flush=True)
     rows = [ln.rstrip("\n").split("\t") for ln in open(META / "data/raw_30s_cleantags.tsv")][1:]
     d = pd.DataFrame([(r[0], r[1], r[2], r[3], float(r[4]), "|".join(r[5:])) for r in rows],
@@ -120,12 +127,23 @@ def select(args) -> int:
     d["select_reason"] = ""
     d.loc[d["verdict"].eq("deny"), "select_reason"] = "licence-deny"
     d.loc[clash & d["select_reason"].eq(""), "select_reason"] = "artist-in-base"
-    rng = np.random.default_rng(0)
+    # a prior batch: its tracks are never taken again, its selected tracks use up the caps
+    used_album = used_artist = pd.Series(dtype=int)
+    if args.prior:
+        pr = pd.read_csv(args.prior, dtype={"track_id": str, "album_id": str})
+        ps = pr[pr["selected"].astype(bool)]
+        d.loc[d["track_id"].isin(set(ps["track_id"])), "select_reason"] = "prior-batch"
+        used_album = ps.groupby("album_id").size()
+        used_artist = ps.groupby(ps["speaker_ref_id"].astype(str)).size()
+    rng = np.random.default_rng(args.seed)
     d["_r"] = rng.permutation(len(d))
     ok = d[d["select_reason"].eq("")].sort_values("_r")
-    ok = ok[ok.groupby("album_id").cumcount() < PER_ALBUM]
-    ok = ok[ok.groupby("speaker_ref_id").cumcount() < PER_ARTIST]
+    ok = ok[ok.groupby("album_id").cumcount() + ok["album_id"].map(used_album).fillna(0) < args.per_album]
+    ok = ok[ok.groupby("speaker_ref_id").cumcount() + ok["speaker_ref_id"].map(used_artist).fillna(0)
+            < args.per_artist]
     d.loc[d["select_reason"].eq("") & ~d.index.isin(ok.index), "select_reason"] = "cap"
+    if args.max_select and len(ok) > args.max_select:     # the first N of the seeded order
+        d.loc[ok.index[args.max_select:], "select_reason"] = "max-select"
     d["selected"] = d["select_reason"].eq("")
     WORK.mkdir(parents=True, exist_ok=True)
     d = d.drop(columns="_r").sort_values("track_id")
@@ -194,6 +212,9 @@ def _extract_one(r: dict) -> dict:
 def extract(args) -> int:
     s = pd.read_csv(WORK / "selection_tracks.csv")
     s = s[s["selected"]]
+    bad = sorted(set(s["tar"].astype(int)) - set(_tars()))
+    if bad:
+        raise SystemExit(f"FATAL: selected tracks in unverified tars {bad} (download + untar first)")
     if args.limit:
         s = s.head(args.limit)
     with ProcessPoolExecutor(args.workers) as ex:
@@ -212,7 +233,7 @@ def extract(args) -> int:
     sel = ok[~zero & ~quiet & (ok["duration_s"] >= 10)].sample(frac=1.0, random_state=0).reset_index(drop=True)
     pd.DataFrame({
         "sel_idx": np.arange(len(sel)), "side": "real", "group": "jamendo",
-        "path": "interim/mtg-jamendo/" + sel["file"], "file_id": "mtg-jamendo:" + sel["track_id"],
+        "path": f"{OUT.relative_to(CORPUS)}/" + sel["file"], "file_id": "mtg-jamendo:" + sel["track_id"],
         "offset_s": 0.0, "excerpt_s": EXCERPT_S,
         "out_prefix": "jamendo/" + sel["file"].str.split("/").str[1] + "/" + sel["track_id"],
     }).to_csv(WORK / "selection.csv", index=False)
@@ -284,7 +305,7 @@ def tag(args) -> int:
     """CPU vocal screen (the GPU-free replacement for the htdemucs screen, calibrated
     against it on the clips htdemucs separated): <work>/ast_tags.csv, resumable."""
     sel = pd.read_csv(WORK / "selection.csv")
-    files = sel["path"].str.replace("interim/mtg-jamendo/", "", regex=False).tolist()
+    files = sel["path"].str.replace(f"{OUT.relative_to(CORPUS)}/", "", regex=False).tolist()
     if args.limit:
         files = files[:args.limit]
     path = WORK / "ast_tags.csv"
@@ -338,17 +359,22 @@ def finalize(args) -> int:
     tracks = pd.read_csv(WORK / "selection_tracks.csv").set_index("track_id")
     clips = pd.read_csv(WORK / "clips.csv").set_index("track_id")
     s = pd.read_csv(WORK / "selection.csv").drop(columns=["offset_s", "excerpt_s"])
-    s["file"] = s["path"].str.replace("interim/mtg-jamendo/", "", regex=False)
+    s["file"] = s["path"].str.replace(f"{OUT.relative_to(CORPUS)}/", "", regex=False)
     s["track_id"] = s["file_id"].str.replace("mtg-jamendo:", "", regex=False)
     s = s.merge(pd.read_csv(WORK / "ast_tags.csv").drop_duplicates("file", keep="last"), on="file", how="left")
     # htdemucs on the calibration subset
     done = {int(p.stem) for p in (WORK / "done_jam").glob("*.done")}
-    sep = pd.concat([pd.read_csv(p) for p in sorted(WORK.glob("sep_jam_*.csv"))], ignore_index=True)
-    sep = sep[sep["sel_idx"].isin(done) & sep["file"].notna()].drop_duplicates("file", keep="last")
-    ch = sep.merge(pd.read_csv(WORK / "screen_cache.csv"), on=["side", "file"], how="left")
-    pre = (ch["rms_dbfs"] >= RMS_MIN) & (ch["vox_rel_db"] >= REL_MIN) & (ch["speech_ratio"] >= SPEECH_MIN)
+    parts = sorted(WORK.glob("sep_jam_*.csv"))
+    if parts:
+        sep = pd.concat([pd.read_csv(p) for p in parts], ignore_index=True)
+        sep = sep[sep["sel_idx"].isin(done) & sep["file"].notna()].drop_duplicates("file", keep="last")
+        ch = sep.merge(pd.read_csv(WORK / "screen_cache.csv"), on=["side", "file"], how="left")
+        pre = (ch["rms_dbfs"] >= RMS_MIN) & (ch["vox_rel_db"] >= REL_MIN) & (ch["speech_ratio"] >= SPEECH_MIN)
+        vocal_s = ch[pre].groupby("source_file_id")["duration_s"].sum()
+    else:                  # a batch with no htdemucs subset (the calibration is v6's)
+        vocal_s = pd.Series(dtype=float)
     s["separated"] = s["sel_idx"].isin(done)
-    s["htdemucs_vocal_s"] = s["file_id"].map(ch[pre].groupby("source_file_id")["duration_s"].sum()).fillna(0.0)
+    s["htdemucs_vocal_s"] = s["file_id"].map(vocal_s).fillna(0.0)
     s.loc[~s["separated"], "htdemucs_vocal_s"] = np.nan
     s = s.join(clips.drop(columns=["file", "ok"]), on="track_id").join(
         tracks[["artist_id", "album_id", "speaker_ref_id", "tags", "licence", "verdict", "path"]]
@@ -382,12 +408,22 @@ def finalize(args) -> int:
 
 
 def main() -> int:
+    global OUT, WORK, LICENCES     # the workers fork after this and see the batch's paths
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("cmd", choices=["select", "extract", "measure", "tag", "finalize"])
     ap.add_argument("--threads", type=int, default=4, help="tag: torch threads per AST process")
     ap.add_argument("--workers", type=int, default=32)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--out", type=pathlib.Path, default=OUT, help="a batch's own directory")
+    ap.add_argument("--licences", type=pathlib.Path, default=LICENCES)
+    ap.add_argument("--prior", default=None, help="select: a prior batch's selection_tracks.csv")
+    ap.add_argument("--per-artist", type=int, default=PER_ARTIST)
+    ap.add_argument("--per-album", type=int, default=PER_ALBUM)
+    ap.add_argument("--max-select", type=int, default=0, help="select: at most N tracks (0 = all)")
+    ap.add_argument("--seed", type=int, default=0, help="select: the order's seed")
+    ap.add_argument("--tars", default="", help="select: comma-separated tar numbers (default: verified)")
     a = ap.parse_args()
+    OUT, WORK, LICENCES = a.out, a.out / "_work", a.licences
     return {"select": select, "extract": extract, "measure": measure, "tag": tag, "finalize": finalize}[a.cmd](a)
 
 

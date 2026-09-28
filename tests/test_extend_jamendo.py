@@ -33,3 +33,20 @@ def test_instrumentals_are_pool_c_rows(tmp_path):
 
 def test_missing_metadata_is_empty(tmp_path):
     assert _mtg_jamendo(tmp_path, pd.DataFrame()).empty
+
+
+def test_second_batch_reads_its_own_dir_with_the_same_keys(tmp_path):
+    """strategy-v6c: interim/mtg-jamendo-2 rows are their own corpus (file_id prefix =
+    cache dir) but keep the artist keys, so an artist's new tracks join its atom."""
+    d = tmp_path / "interim" / "mtg-jamendo-2"
+    d.mkdir(parents=True)
+    pd.DataFrame({
+        "file": ["seg10/50/track_9_1.wav"], "track_id": ["track_9"],
+        "source_name": ["mtg-jamendo/artist_1"], "speaker_ref_id": ["artist:foo"],
+        "licence_verdict": ["allow"], "kept": [True]}).to_csv(d / "metadata.csv", index=False)
+    nc = {nc.name: nc for nc in NEW_CORPORA}["mtg-jamendo-2"]
+    out = nc.reader(tmp_path, pd.DataFrame())
+    assert nc.pool == "C"
+    assert list(out["file_id"]) == ["mtg-jamendo-2:seg10/50/track_9_1"]
+    assert list(out["path"]) == ["interim/mtg-jamendo-2/seg10/50/track_9_1.wav"]
+    assert list(out["speaker_ref_id"]) == ["artist:foo"]

@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
@@ -474,38 +475,40 @@ def _sing_real_whole(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
     return _whole_songs(root, "interim/sing-real/whole_songs.csv", v2)
 
 
-def _mtg_jamendo(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+def _mtg_jamendo(root: Path, v2: pd.DataFrame, sub: str = "mtg-jamendo") -> pd.DataFrame:
     """strategy-v6: MTG-Jamendo instrumentals -> pool C (real music components).
     10 s rows of 30 s 16 kHz mono excerpts (scripts/data_extra/jamendo_prepare.py) that
     the vocal screen calls instrumental. Publisher atom `mtg-jamendo/<artist id>` (the draw's
     domain and its `domain_weights` prefix); speaker key = processing.corpus's artist
-    atom (`artist:<name>`), the key FMA and MUSAN rows use."""
-    d = _metadata(root / "interim" / "mtg-jamendo" / "metadata.csv")
+    atom (`artist:<name>`), the key FMA and MUSAN rows use. `sub`: strategy-v6c's second
+    batch (interim/mtg-jamendo-2), same keys, so an artist's new tracks join its atom."""
+    d = _metadata(root / "interim" / sub / "metadata.csv")
     if d.empty:
         return pd.DataFrame(columns=["path"])
     return pd.DataFrame({
-        "file_id": "mtg-jamendo:" + d["file"].astype(str).str.replace(".wav", "", regex=False),
-        "path": "interim/mtg-jamendo/" + d["file"].astype(str),
+        "file_id": f"{sub}:" + d["file"].astype(str).str.replace(".wav", "", regex=False),
+        "path": f"interim/{sub}/" + d["file"].astype(str),
         "artifact_family": None, "source_name": d["source_name"].astype(str),
         "speaker_ref_id": d["speaker_ref_id"].astype(str),
         "domain_key": None, "prompt_speaker": None, "lang": None,
         "licence_verdict": d["licence_verdict"].astype(str)})
 
 
-def _acestep_inst(root: Path, v2: pd.DataFrame) -> pd.DataFrame:
+def _acestep_inst(root: Path, v2: pd.DataFrame, sub: str = "acestep-inst") -> pd.DataFrame:
     """strategy-v6b: ACE-Step 1.5 instrumentals -> pool D (fake music components).
     30 s 16 kHz mono clips made the way the Jamendo side's are, captions from Jamendo
     tag sets (scripts/synth3/music_acestep_inst_gen.py); rows the exact-zero / silence /
     AST vocal screen dropped never enter. One generator, one atom: family
     `acestep15-inst` (build_folds_pinned.FAMILY_FOLD puts it with the ACE-Step songs),
-    domain `acestep-inst|acestep15-inst` (the draw's `domain_weights` prefix)."""
-    d = _metadata(root / "interim" / "acestep-inst" / "metadata.csv")
+    domain `acestep-inst|acestep15-inst` (the draw's `domain_weights` prefix). `sub`:
+    strategy-v6c's second batch (interim/acestep-inst-2), the same family / atom / domain."""
+    d = _metadata(root / "interim" / sub / "metadata.csv")
     if d.empty:
         return pd.DataFrame(columns=["path"])
     fam = "acestep15-inst"
     return pd.DataFrame({
         "file_id": d["file_id"].astype(str),
-        "path": "interim/acestep-inst/" + d["file"].astype(str),
+        "path": f"interim/{sub}/" + d["file"].astype(str),
         "artifact_family": fam, "source_name": fam, "speaker_ref_id": "acestep-inst/" + fam,
         "domain_key": "acestep-inst|" + fam, "prompt_speaker": None, "lang": None})
 
@@ -537,6 +540,9 @@ NEW_CORPORA = (
     NewCorpus("mtg-jamendo", "C", _mtg_jamendo),
     # strategy-v6b: a post-2025 music generator, instrumental (matched to mtg-jamendo)
     NewCorpus("acestep-inst", "D", _acestep_inst),
+    # strategy-v6c: more of both (second batches, own directories)
+    NewCorpus("mtg-jamendo-2", "C", partial(_mtg_jamendo, sub="mtg-jamendo-2")),
+    NewCorpus("acestep-inst-2", "D", partial(_acestep_inst, sub="acestep-inst-2")),
 )
 
 

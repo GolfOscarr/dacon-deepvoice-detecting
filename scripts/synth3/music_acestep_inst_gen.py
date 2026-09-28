@@ -19,6 +19,10 @@ plan      one row per clip: a kept Jamendo instrumental (interim/mtg-jamendo/met
           drawn per clip. `--provisional` builds the same kept set from the Jamendo
           agent's _work files (AST < 0.03, no voice tag) for a smoke test only. The plan
           is frozen: it is never rewritten once any shard has logged a clip.
+          A second batch (strategy-v6c, its own --out): `--extra-tracks` adds a later
+          Jamendo batch's selected tracks without a voice tag (selection_tracks.csv,
+          tags known before its screen), tracks are counted once each, `--id-prefix`
+          keeps ids distinct and `--avoid-plan` excludes an earlier plan's seeds.
 gen       ACE-Step 1.5 (turbo DiT + 5 Hz LM, the pipeline sing_acestep_gen.py uses:
           LM codes on, caption / language rewrite OFF so the recorded caption is what
           conditioned the clip). Instrumental = lyrics "[Instrumental]" (the marker the
@@ -151,7 +155,19 @@ def plan(args) -> int:
     if any(p.stat().st_size for p in out.glob("gen_log.s*.jsonl")) and not args.dry:
         raise SystemExit(f"FATAL: {out} already has generated clips; the plan is frozen")
     d, src = kept_jamendo(args.provisional)
+    for x in args.extra_tracks:
+        import pandas as pd
+        t = pd.read_csv(x, usecols=["track_id", "tags", "selected"])
+        t = t[t["selected"].astype(bool)].assign(tags=lambda y: y["tags"].fillna(""))
+        t = t[~t["tags"].map(lambda s: any(v in s for v in VOICE_TAGS))]
+        d, src = pd.concat([d, t[["track_id", "tags"]]], ignore_index=True), f"{src}+{x}"
+    if args.extra_tracks:
+        d = d.drop_duplicates("track_id")
     d = d.sort_values("track_id").reset_index(drop=True)
+    avoid = set()
+    if args.avoid_plan:
+        avoid = {json.loads(ln)["seed"] for ln in pathlib.Path(args.avoid_plan).read_text().splitlines()
+                 if ln.strip()}
     r = random.Random(args.seed)
     rows, order = [], []
     while len(rows) < args.n:
@@ -160,8 +176,10 @@ def plan(args) -> int:
             r.shuffle(order)
         j = d.iloc[order.pop()]
         s = r.randrange(1, 2**31 - 1)
+        while s in avoid:
+            s = r.randrange(1, 2**31 - 1)
         i = len(rows)
-        rows.append({"id": f"acestep15inst_{i:05d}", "seed": s, "jamendo_track_id": j["track_id"],
+        rows.append({"id": f"{args.id_prefix}{i:05d}", "seed": s, "jamendo_track_id": j["track_id"],
                      "tags": j["tags"], "caption": caption(j["tags"], random.Random(s)),
                      "gen_s": GEN_S, "clip_s": CLIP_S})
     genres = {}
@@ -426,7 +444,7 @@ def finalize(args) -> int:
     m["kept"] = m["drop_reason"].eq("")
     for k in ("repo", "hf_sha", "code", "dit", "lm"):
         m[f"model_{k}"] = m["model"].map(lambda d, k=k: d.get(k) if isinstance(d, dict) else None)
-    m["file_id"] = "acestep-inst:" + m["id"]
+    m["file_id"] = f"{out.name}:" + m["id"]      # the corpus name (acestep-inst, acestep-inst-2)
     cols = ["file", "file_id", "id", "kept", "drop_reason", "duration_s", "seed", "caption", "tags",
             "jamendo_track_id", "gen_s", "offset_s", "gen_track_s", "src_sr", "src_channels", "mp3_kbps",
             "rms_dbfs", "peak_src", "zero_run_ms", "zero_frac", "rolloff99_hz", "vox_max", "sing_max",
@@ -449,6 +467,10 @@ def main() -> int:
     ap.add_argument("--out", type=pathlib.Path, required=True)
     ap.add_argument("--n", type=int, default=2400, help="plan: clips (2,400 x 30 s = 20 h)")
     ap.add_argument("--seed", type=int, default=20260928)
+    ap.add_argument("--id-prefix", default="acestep15inst_", help="plan: clip id prefix")
+    ap.add_argument("--extra-tracks", nargs="*", default=[],
+                    help="plan: later Jamendo batches' selection_tracks.csv (selected, no voice tag)")
+    ap.add_argument("--avoid-plan", default=None, help="plan: an earlier plan.jsonl whose seeds are not reused")
     ap.add_argument("--provisional", action="store_true", help="plan: Jamendo _work files (smoke only)")
     ap.add_argument("--dry", action="store_true", help="plan: print, write nothing")
     ap.add_argument("--shard", type=int, default=0)

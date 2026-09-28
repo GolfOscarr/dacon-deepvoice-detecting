@@ -74,3 +74,21 @@ def test_clips_are_cut_into_three_10s_rows(tmp_path):
     assert list(out["file"]) == ["seg10/a_0.wav", "seg10/a_1.wav"]
     assert list(out["clip"]) == ["clips/a.wav"] * 2 and list(out["offset_s"]) == [4.0, 14.0]
     assert all(sf.info(tmp_path / f).duration == 10.0 for f in out["file"])
+
+
+def test_second_batch_is_the_same_atom_in_its_own_dir(tmp_path):
+    """strategy-v6c: interim/acestep-inst-2 rows keep the family / atom / domain (fold 2
+    with the rest of ACE-Step), paths point into their own dir."""
+    d = tmp_path / "interim" / "acestep-inst-2"
+    d.mkdir(parents=True)
+    pd.DataFrame({"file": ["seg10/acestep15inst2_00000_0.wav"],
+                  "file_id": ["acestep-inst-2:acestep15inst2_00000_0"], "kept": [True],
+                  "drop_reason": [""]}).to_csv(d / "metadata.csv", index=False)
+    nc = {nc.name: nc for nc in NEW_CORPORA}["acestep-inst-2"]
+    out = nc.reader(tmp_path, pd.DataFrame())
+    assert nc.pool == "D"
+    assert list(out["file_id"]) == ["acestep-inst-2:acestep15inst2_00000_0"]
+    assert list(out["path"]) == ["interim/acestep-inst-2/seg10/acestep15inst2_00000_0.wav"]
+    assert set(out["artifact_family"]) == {"acestep15-inst"}
+    assert set(out["speaker_ref_id"]) == {"acestep-inst/acestep15-inst"}
+    assert set(out["domain_key"]) == {"acestep-inst|acestep15-inst"}
