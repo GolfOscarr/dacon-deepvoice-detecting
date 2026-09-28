@@ -1,0 +1,32 @@
+# 1B SECOND RUN (owner 2026-09-28): train_1b_main.yaml at half the peak LR; a new seed and draw give ensemble diversity.
+# 1B MAIN RUN (docs/training/14, 15): train_run2.yaml with the LR raised for cold 1B heads/LoRA at a large global batch.
+# RUN 2 fine-tune (docs/training/11 §3): run 1's train_first_run.yaml, initialised from run 1
+# (--init-weights). Half the peak LR to limit forgetting; 10 passes of the launcher's --draws.
+# Training-only. Never shipped, never stored in the checkpoint.
+stage: joint
+teachers:                       # frozen, training-only; never enter the inference path
+  speech_teacher: {name: xlsr_2b, weights: null, freeze: true, output_dim: 1920, fps: 50.0,
+                   adapter: {kind: none}, freq_pool: {kind: none}}
+  audio_teacher:  {name: sslam,   weights: null, freeze: true, output_dim: 768,  fps: 50.0,
+                   adapter: {kind: none}, freq_pool: {kind: none}}
+epochs: 10
+# 16: with layer checkpointing (loop.grad_checkpointing) a 60 s clip costs
+# ~2.8 GiB in training (8 x 60 s = 22 GiB measured), vs ~12.5 GiB without.
+batch_size: 16
+lr: 5.0e-5   # run D (owner 2026-09-28): run A best -> v6c + voice fixes, gentle continuation (A: 1.5e-4)
+weight_decay: 1.0e-5
+precision: bf16
+seed: 0
+loss:
+  # ✅ Metric-proportional: the score weights File .45 / Music .27 / Voice .18 /
+  # presence .05 each. Equal weights were INHERITED from PC-Mix, whose metric
+  # weighted its components equally and ours does not. Set by argument, not sweep
+  # (docs/training/02 §4); 09 B11 closed.
+  weights: {voice: 0.18, music: 0.27, file: 0.45, v_pres: 0.05, m_pres: 0.05}
+  # 🔴 Stays 0. TFPARN's own ablation moves EER 12.91 -> 12.92; every gain it buys
+  # is minDCF/Cllr/actDCF, which a ranking metric cannot read. Stage S4 is dropped
+  # (docs/training/03 §1). Raise ONLY for the one-off confirmatory ablation.
+  ranking_weight: 0.0
+  distill_weight: 1.0
+  # The clip-vs-frame_max blend is SEDHeadConfig.clip_weight, in the *model*
+  # config, and the loss reads that same field so the two cannot diverge.

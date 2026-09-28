@@ -128,3 +128,7 @@ loop:
   grad_checkpointing: false
   # render workers also use the hyperthread siblings of this task's CPUs
   render_on_ht_siblings: false
+  # docs/training/14 D5: micro-batches per optimizer step per rank (1 = off)
+  grad_accum: 1
+  # docs/training/14 D6: steps the frontend (LoRA, GeM) is held before its own warm-up
+  frontend_hold_steps: 0

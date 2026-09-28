@@ -1,3 +1,12 @@
+# RUN 2 (docs/training/09): processing_first_run.yaml on strategy-v4 (the round-2
+# corpora: processed audio, conversational/new Korean clones, Chinese clones,
+# CtrSVDD singing). OWNER DECISION 2026-09-25: English and Korean are the only
+# languages for now -- every other language (zh, ja, MLAAD's long tail) gets share 0,
+# and zh-synth / CtrSVDD are not ingested into strategy-v4.
+#
+# THE FIRST REAL RUN (docs/training/07): processing_v1.yaml plus the language
+# balance (D-d), strategy-v3, and the loop knobs of §3. Everything else is v1's.
+#
 # The data-processing pipeline's v1 draw -- docs/processing/03 §5, loaded by
 # `processing.config.load_processing_config`. Independent of the training
 # run configs (configs/run_*.yaml): this is what `processing.sampler.Sampler`
@@ -19,11 +28,42 @@ draw:
   f8: 1.0
   # D-16. DOSS cap as a sampling weight, on component AND whole-file rows.
   domain_cap: 500
-  # docs/training/07 D-d: per-language shares of each voice pool, equal on
-  # the real and fake side. null = off (v1); the first run sets it.
-  lang_shares: null
-  # docs/training/10 F1: DOSS-domain prefix -> weight multiplier. null = off.
-  domain_weights: null
+  # docs/training/07 D-d. Each voice pool (real A, fake B) is rescaled after the
+  # DOSS cap so every language holds the same share on both sides. `ja` exists on
+  # the fake side only (JSUT) and is removed; `other` is MLAAD's long tail, fake
+  # side only, kept small for its generator diversity.
+  lang_shares: {ko: 0.55, en: 0.45, zh: 0.0, ja: 0.0, other: 0.0}
+  # docs/training/10 F1: one speaker (LJ) was 39 % of the English FAKE voice
+  # components drawn and 1.2 % of the English REAL ones -- WaveFake's 8 vocoder
+  # domains each hit the DOSS cap, real LJSpeech is one publisher domain -- so "LJ
+  # voice => fake" was learnable. WaveFake (and its S1-processed copies) x 0.25,
+  # real LJSpeech x 25. Measured on v3 + proc + emilia-ko/en + ko-synth2 + a 5-family
+  # en-synth2 stand-in, 20,000 specs (the en-data track, 2026-09-26): LJ voice drawn
+  # real 0.012 -> 0.176, fake 0.391 -> 0.158; WaveFake 0.383 -> 0.154 of English fakes.
+  domain_weights:
+    "wavefake|": 0.25
+    "proc-codec-lm|wavefake|": 0.25
+    "proc-dac|wavefake|": 0.25
+    "proc-dsp|wavefake|": 0.25
+    "proc-encodec|wavefake|": 0.25
+    "proc-enhance|wavefake|": 0.25
+    "ljspeech/": 25.0
+    # label symmetry of the draw (docs/training/11 §1.1), tuned on _rehearsal-v4b fold 1
+    # (draw_balance.py n=6000): voice-slot repeats real .249 / fake .288, processed .194 / .235
+    "proc-codec-lm/": 14.0
+    "proc-dac/": 14.0
+    "proc-encodec/": 14.0
+    "proc-dsp/": 14.0
+    "proc-enhance/": 14.0
+    "proc-codec-lm|": 0.35
+    "proc-dac|": 0.35
+    "proc-encodec|": 0.35
+    "proc-dsp|": 0.35
+    "proc-enhance|": 0.35
+    "ko-synth2|": 1.5
+    "en-synth2|": 1.1
+    "emilia-ko/": 2.0
+    "emilia-en/": 2.0
   # DRAW-1. The competition's own range; drawn first.
   duration_range: [4.0, 60.0]
   # D-3 / D-21. ONE take per sample, shared by every role and row kind,
@@ -75,7 +115,7 @@ draw:
     channels:  {mono: 0.5, stereo: 0.5}
     telephone: {none: 0.80, ulaw: 0.10, alaw: 0.05, plain: 0.05}
     telephone_hz: 8000
-  scheme_version: strategy-v2
+  scheme_version: strategy-v4
   # Leave false: it exists for the audit's own mutation tests.
   allow_unsound_mix: false
 
@@ -161,27 +201,21 @@ loop:
   # 0 disables the EMA entirely.
   ema_decay: 0.999
   grad_clip: 5.0
-  device: cpu
+  device: cuda
   # 0 = checkpoint at pass boundaries only.
   checkpoint_every: 0
   # Critical: a run with max_steps set is a TRUNCATED run. StageResult.truncated
   # says so, and its numbers are not quotable.
   max_steps: null
-  # docs/training/07 §3. 0 = render inline; N = N worker processes, same batches.
-  render_workers: 0
-  # render workers may also use the hyperthread siblings of the pinned CPUs (no sample changes)
-  render_on_ht_siblings: false
-  # constant | cosine (linear warmup, then cosine to min_lr_ratio of the base rate)
-  lr_schedule: constant
-  warmup_steps: 0
-  min_lr_ratio: 0.0
-  # the frontends' trainable parameters run at this multiple of the base rate
-  frontend_lr_scale: 1.0
-  # 0 = no per-step log; N = mean loss parts to <out_dir>/train_log.jsonl every N steps
-  log_every: 0
-  # recompute the frontends' transformer layers in backward (same numbers, less memory)
-  grad_checkpointing: false
-  # docs/training/14 D5: micro-batches per optimizer step per rank (1 = off)
+  # docs/training/07 §3: 7 render workers per GPU task (8 CPUs each).
+  render_workers: 7
+  lr_schedule: cosine
+  warmup_steps: 500
+  min_lr_ratio: 0.05
+  # LoRA and GeM at a fifth of the heads' rate.
+  frontend_lr_scale: 0.5   # cold 1B LoRA (doc 14 §4 ESTIMATE)
+  log_every: 50
+  # a 60 s clip holds ~17 GiB of attention maps across both trunks otherwise
+  grad_checkpointing: true   # 1B trial: per-rank 16 needs it (probe: 47.6 GiB, 2.34 s/step)
   grad_accum: 1
-  # docs/training/14 D6: steps the frontend (LoRA, GeM) is held before its own warm-up
-  frontend_hold_steps: 0
+  frontend_hold_steps: 500   # heads + fusion first, then the cold LoRA warms up (doc 14 D6)

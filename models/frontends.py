@@ -12,7 +12,9 @@ know which family fed it:
 
     forward(wav, lengths) -> (features: (B, T, D), frame_mask: (B, T))
 
-plus ``output_dim`` and ``fps``. ``fps`` is what lets two frontends with
+plus ``output_dim`` and ``fps``. The one exception is a frontend configured
+with a layer fusion (`FusionConfig`): its ``features`` is then a tuple of
+per-layer (B, T, D) outputs, which only `models.model.LayerFusion` consumes. ``fps`` is what lets two frontends with
 different frame rates be aligned onto a common time base for the file branch.
 
 `StubFrontend` is a randomly-initialised encoder with no pretrained weights. It
@@ -147,6 +149,10 @@ class Frontend(nn.Module):
                 lengths.to(wav.device)[:, None]
             wav = wav * keep.to(wav.dtype)
         feats = self._encode(wav, lengths)
+        if isinstance(feats, tuple):
+            # every kept layer's output, for `models.model.LayerFusion`
+            b, t, _ = feats[0].shape
+            return feats, self._mask(b, t, lengths, feats[0].device)
 
         if self.freq_pool is not None:
             if feats.dim() != 4:
@@ -160,12 +166,14 @@ class Frontend(nn.Module):
                 f"got {tuple(feats.shape)}")
 
         b, t, _ = feats.shape
+        return feats, self._mask(b, t, lengths, feats.device)
+
+    def _mask(self, b: int, t: int, lengths: Tensor | None,
+              device: torch.device) -> Tensor:
         if lengths is None:
-            mask = torch.ones(b, t, dtype=torch.bool, device=feats.device)
-        else:
-            valid = self._frames_for(lengths).to(feats.device)
-            mask = torch.arange(t, device=feats.device)[None, :] < valid[:, None].clamp(max=t)
-        return feats, mask
+            return torch.ones(b, t, dtype=torch.bool, device=device)
+        valid = self._frames_for(lengths).to(device)
+        return torch.arange(t, device=device)[None, :] < valid[:, None].clamp(max=t)
 
 
 class StubFrontend(Frontend):
@@ -756,8 +764,10 @@ class _BEATsEncoderConfig:
 
 
 class XLSRFrontend(Frontend):
-    """XLS-R 300M (`facebook/wav2vec2-xls-r-300m`, Apache-2.0), truncated and
-    LoRA-adapted, on `transformers.Wav2Vec2Model`.
+    """XLS-R 300M / 1B (`facebook/wav2vec2-xls-r-300m`, `-1b`, Apache-2.0),
+    truncated and LoRA-adapted, on `transformers.Wav2Vec2Model`. The width is
+    the checkpoint's ``hidden_size`` (1024 / 1280), asserted against
+    ``output_dim``.
 
     Loaded from a local directory only (`local_files_only=True`): the test
     server has no network, and a build that silently reached for the Hub would
@@ -786,6 +796,11 @@ class XLSRFrontend(Frontend):
     12-layer config, and it keeps the stream's scale bounded under fp16 --
     which is the reason it is kept, not a claim that it is the best readout.
 
+    With ``fusion`` on, `_encode` returns every kept block's output instead
+    (un-normalised: `LayerFusion` applies a non-affine layer norm to each), and
+    the final LayerNorm is unused, so it is frozen -- a trainable parameter that
+    no forward reaches would hang DDP.
+
     The CNN feature extractor is always frozen (even with `freeze: false`): it is
     the standard wav2vec2 fine-tuning recipe.
     """
@@ -802,7 +817,7 @@ class XLSRFrontend(Frontend):
         if cfg.weights is None:
             raise ValueError(
                 "XLSRFrontend needs `weights`: a local directory holding "
-                "facebook/wav2vec2-xls-r-300m (config.json + weights). A randomly-"
+                "facebook/wav2vec2-xls-r-300m or -1b (config.json + weights). A randomly-"
                 "initialised XLS-R is a StubFrontend with a longer runtime.")
         if cfg.freq_pool.kind != "none" or cfg.n_freq is not None:
             raise ValueError(
@@ -864,9 +879,13 @@ class XLSRFrontend(Frontend):
         elif cfg.adapter.kind != "none":
             raise ValueError(f"unsupported adapter kind {cfg.adapter.kind!r} for XLS-R")
 
+        self.keep_layers = cfg.fusion.kind != "none"
+
         self._apply_freeze()
         for p in self.model.feature_extractor.parameters():
             p.requires_grad_(False)
+        if self.keep_layers:
+            self.model.encoder.layer_norm.requires_grad_(False)
 
     def _transformer_layers(self) -> nn.ModuleList:
         return self.model.encoder.layers
@@ -916,8 +935,10 @@ class XLSRFrontend(Frontend):
         var = (((x - mean) * valid) ** 2).sum(-1, keepdim=True) / n
         return (x - mean) / torch.sqrt(var + 1e-7) * valid
 
-    def _encode(self, wav: Tensor, lengths: Tensor | None = None) -> Tensor:
-        """(B, S) -> (B, T, 1024) at 50 fps.
+    def _encode(self, wav: Tensor,
+                lengths: Tensor | None = None) -> Tensor | tuple[Tensor, ...]:
+        """(B, S) -> (B, T, D) at 50 fps; with ``keep_layers``, a tuple of every
+        kept block's (B, T, D) output instead.
 
         One padded pass, unlike BEATs: wav2vec2's token sequence *is* time, so a
         row's valid frames are a prefix and a key-padding mask is exact. What
@@ -938,7 +959,7 @@ class XLSRFrontend(Frontend):
             x = F.pad(x, (0, self._MIN_SAMPLES - s))
         m = self.model
         feats = m.feature_extractor(x).transpose(1, 2)          # (B, T, 512)
-        hidden, _ = m.feature_projection(feats)                 # (B, T, 1024)
+        hidden, _ = m.feature_projection(feats)                 # (B, T, D)
 
         t = hidden.shape[1]
         valid = self._frames_for(lengths)
@@ -948,15 +969,20 @@ class XLSRFrontend(Frontend):
         attn_mask = enc._update_full_mask(frame_mask.long(), hidden)
         hidden = hidden + enc.pos_conv_embed(hidden)
         hidden = enc.dropout(hidden)
+        outs = []
         for layer in enc.layers:
             hidden = layer(hidden, attention_mask=attn_mask)[0]
+            if self.keep_layers:
+                outs.append(hidden)
+        if self.keep_layers:
+            return tuple(outs)
         return enc.layer_norm(hidden)
 
 
 def build_frontend(cfg: FrontendConfig, audio: AudioConfig) -> Frontend:
     """Construct a frontend from config.
 
-    `stub`, `beats` and `xlsr_300m` are implemented. The remaining names in
+    `stub`, `beats`, `xlsr_300m` and `xlsr_1b` are implemented. The remaining names in
     docs/architecture/02 stay unwired on purpose: the licences for SSLAM, EAT
     and W2V-BERT 2.0 are unverified (09 C1-C3), and a licence that forbids
     third-party provision makes a checkpoint unusable *at all* here rather than
@@ -965,16 +991,18 @@ def build_frontend(cfg: FrontendConfig, audio: AudioConfig) -> Frontend:
     BEATs is exempt from that gate because its licence is not in question --
     MIT, read at origin -- which is exactly why 02 calls it "the licence-safe
     floor" and why candidate A was specified against it. XLS-R 300M is exempt
-    for the same reason: Apache-2.0, read on the facebook/wav2vec2-xls-r-300m card.
+    for the same reason: Apache-2.0, read on the facebook/wav2vec2-xls-r-300m card
+    (and -1b: the same licence, the same Wav2Vec2 architecture at width 1280).
     """
     if cfg.name == "stub":
         return StubFrontend(cfg, audio)
     if cfg.name == "beats":
         return BEATsFrontend(cfg, audio)
-    if cfg.name == "xlsr_300m":
+    if cfg.name in ("xlsr_300m", "xlsr_1b"):
         return XLSRFrontend(cfg, audio)
     raise NotImplementedError(
-        f"frontend {cfg.name!r} is not wired yet. 'stub', 'beats' and 'xlsr_300m' are "
+        f"frontend {cfg.name!r} is not wired yet. 'stub', 'beats', 'xlsr_300m' and "
+        f"'xlsr_1b' are "
         f"implemented; "
         f"the other checkpoints are gated on the licence verification in "
         f"docs/architecture/09-open-questions.md (C1-C3). Set `name: stub` with "

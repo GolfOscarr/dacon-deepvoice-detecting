@@ -63,6 +63,10 @@ _KNOB_PROBES: dict[str, tuple] = {
     "min_lr_ratio": (0.0, 0.9, "weights", {"lr_schedule": "cosine"}),
     "frontend_lr_scale": (1.0, 0.01, "weights"),
     "log_every": (0, 1, "log"),
+    # docs/training/14 D5: a global batch of 4 instead of 2 halves the steps
+    "grad_accum": (1, 2, "steps"),
+    # docs/training/14 D6: the stub's learnable GeM exponent is a frontend param
+    "frontend_hold_steps": (0, 2, "weights"),
 }
 
 #: `out_dir` is where the probe writes rather than something it can vary against
