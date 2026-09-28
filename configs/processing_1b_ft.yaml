@@ -1,5 +1,5 @@
-# 1B SECOND RUN (warm restart for the ensemble, owner 2026-09-28): processing_1b_main.yaml with
-# the frontend hold off and a short warmup, since it starts from the trained 1B final (--init-weights).
+# 1B FINE-TUNE, run A (owner 2026-09-28): processing_1b_main.yaml with the frontend hold off and a short
+# warmup, since it starts from a trained 1B checkpoint (main pass 15 EMA, --init-weights).
 # 1B MAIN RUN (docs/training/14, 15), GENERATED from configs/processing_run5.yaml (strategy-v5 draw)
 # + loop: grad_checkpointing (per-rank 16), grad_accum 1, frontend_hold_steps 1000, warmup 1000,
 # frontend_lr_scale 0.5. Comments are in processing_run5.yaml.

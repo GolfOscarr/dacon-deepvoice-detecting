@@ -190,7 +190,8 @@ loss = (per_sample * mask).sum() * dist.world / denom.clamp(min=1)
   every rank's `_rng_state()` with `all_gather_object` and store it as `rng_by_rank` (keep `rng`
   = rank 0's, for back-compat with 1-GPU loaders). Put a `barrier` after the write. On resume
   each rank restores `rng_by_rank[rank]` and refuses a checkpoint whose `world`, global batch
-  `G` or `grad_accum` differs, because its slices and RNG would not line up.
+  `G` or `grad_accum` differs, because its slices and RNG would not line up. *(As built, 781433c: a
+  different world is allowed when `DDP_ALLOW_WORLD_CHANGE=1` and the global batch is unchanged.)*
   - Size ESTIMATE: 1B@24 state ~2 GB, plus EMA ~2.3 GB, plus AdamW over the trainable set. So
     ≈ 5 GB per checkpoint.
   - At pass boundaries × ~30 passes (§4) that is ~150 GB; prune all but the last few + EMA. `/data/project/private` has 78 TB free
@@ -448,6 +449,10 @@ D9 is done for the 300M@12 model. The 1B probe is **not** done: `xlsr_1b` is not
     resume defect; CPU resume is bitwise (T4).
 
 ### What remains (owner)
+
+> **Done (2026-09-29):** the 1B wiring landed (fef750e) and the main run trained on 7 then 8 GPUs
+> (jobs 221505 → 221709); outcomes in `docs/training/17-final-runs.md` on `feat/training`.
+
 
 - wire `xlsr_1b`, the fusion and the partial init (§5);
 - then the 1B memory probe on 2 GPUs (per-rank 8/12/16, grad checkpointing off/on);

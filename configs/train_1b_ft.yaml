@@ -1,4 +1,5 @@
-# 1B SECOND RUN (owner 2026-09-28): train_1b_main.yaml at half the peak LR; a new seed and draw give ensemble diversity.
+# 1B FINE-TUNE, runs A and C (owner 2026-09-28): train_1b_main.yaml at half the peak LR, initialised from the
+# 1B main run's pass-15 EMA (not the final; see docs/training/17). A new seed and draw per run.
 # 1B MAIN RUN (docs/training/14, 15): train_run2.yaml with the LR raised for cold 1B heads/LoRA at a large global batch.
 # RUN 2 fine-tune (docs/training/11 §3): run 1's train_first_run.yaml, initialised from run 1
 # (--init-weights). Half the peak LR to limit forgetting; 10 passes of the launcher's --draws.
