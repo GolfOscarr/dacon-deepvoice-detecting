@@ -7,6 +7,8 @@ strategy-v5) and [../HANDOFF_RUN4.md](../HANDOFF_RUN4.md) (the 1B run's operatio
 
 ## 1 · The one-paragraph summary
 
+- **Final standing: 28th place (top 3 %), score 0.86669** — [leaderboard](https://dacon.io/competitions/official/236749/leaderboard).
+
 - **The v6b music fix was the biggest late gain:** LB 0.83046 → **0.85441** (+0.024, almost all ADS,
   0.812 → 0.838), from real music diversity (MTG-Jamendo), a fair real/fake music draw (10 s cut)
   and newer fake music (ACE-Step 1.5), on the 1B model.

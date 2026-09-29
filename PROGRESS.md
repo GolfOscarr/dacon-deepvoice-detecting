@@ -1,5 +1,8 @@
 # PROGRESS
 
+> **Historical (last updated 2026-09-11).** The competition closed 2026-09-29: **28th place, top 3 %,
+> score 0.86669**. The final state is in [README.md](README.md) and [docs/training/17-final-runs.md](docs/training/17-final-runs.md).
+
 **DACON 236749 — 딥보이스 범죄 대응을 위한 AI 탐지 모델 경진대회**
 Updated 2026-09-11 · **18 days to LB close** (2026-09-29 10:00 KST) · 2nd-stage materials 2026-10-05
 

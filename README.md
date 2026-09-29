@@ -4,18 +4,22 @@ Research and strategy for **딥보이스 범죄 대응을 위한 AI 탐지 모�
 ([competition page](https://dacon.io/competitions/official/236749/overview/description)).
 
 Hosted by 행정안전부 and 한국지능정보사회진흥원, supervised by 국립과학수사연구원, run by DACON.
-₩42,000,000 prize pool · leaderboard closes **2026-09-29**.
+₩42,000,000 prize pool · leaderboard closed **2026-09-29** · **our result: 28th / top 3 % (0.86669)**.
 
-> **Status: the pipeline now trains end to end on real audio with pretrained BEATs weights, and
-> the measurement chain has been verified from manifest to submission CSV. No competition-relevant
-> model exists yet: the only corpus that runs is a 2,177-row smoke corpus whose fake-music pool is a
-> placeholder, so every number it produces is a pipeline check rather than a result
-> ([`docs/data/12`](docs/data/12-acquisition-status.md)). 9 sources / ~239 GiB in S3; pools A, B, C
-> and E real, **D still has no acquisition path**.**
-> Code ships in **[`metrics/`](metrics/AGENTS.md)**, **[`models/`](models/AGENTS.md)** and
-> **[`training/`](training/AGENTS.md)** — 927 tests, every invariant paired with a mutation that
-> was observed to fail. Runs are launched by **[`scripts/train.py`](scripts/train.py)**, one GPU per
-> invocation. Current state and next actions: **[PROGRESS.md](PROGRESS.md)**
+> **Final result (competition closed 2026-09-29): 28th place, top 3 %** on the
+> [leaderboard](https://dacon.io/competitions/official/236749/leaderboard) — **score 0.86669**
+> (ADS 0.85206, CPS 0.99830; Private = Public).
+>
+> The final submission is a per-file ensemble of two XLS-R-1B + BEATs models trained with DDP on
+> 8×H200: fine-tune A on strategy-v6b (pass 8) and fine-tune C on strategy-v6c with voice-cue fixes
+> (pass 2), file head in `max3` mode. The path there: 300M baselines (0.79 → 0.81 → 0.83), the 1B
+> model plus the music-data fix (0.854), soups and ensembles (0.867). Full write-up:
+> **[docs/training/17-final-runs.md](docs/training/17-final-runs.md)**; lessons:
+> **[docs/training/16-lessons-learned.md](docs/training/16-lessons-learned.md)**.
+>
+> Code: [`metrics/`](metrics/AGENTS.md), [`models/`](models/AGENTS.md), [`training/`](training/AGENTS.md),
+> [`processing/`](processing/), [`scripts/`](scripts/) — 1,702 tests. Data, checkpoints and
+> packages were deleted after the competition; only the code and docs remain.
 
 ---
 
