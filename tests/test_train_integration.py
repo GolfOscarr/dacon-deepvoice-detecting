@@ -126,3 +126,34 @@ def test_the_raw_manifest_is_refused_without_folds(corpus, tmp_path):
     raw["fold"] = pd.array([None] * len(raw), dtype="Int64")
     with pytest.raises(ValueError, match="apply_folds"):
         Sampler(raw, cfg.draw)
+
+
+def test_all_data_mode_trains_on_every_fold_and_saves_the_weights(corpus, tmp_path):
+    """docs/training/07 §3: the shipping runs train on TRAIN + VAL of every fold,
+    PROBE sealed, with pooled rendering and the cosine schedule from the config."""
+    root, mdir, cfg_path = corpus
+    raw = yaml.safe_load(cfg_path.read_text())
+    raw["loop"].update(render_workers=2, lr_schedule="cosine", warmup_steps=1,
+                       log_every=1)
+    cfg2 = tmp_path / "processing_pool.yaml"
+    cfg2.write_text(yaml.safe_dump(raw))
+    out = tmp_path / "alldata"
+    r = _train((root, mdir, cfg2), out, "--all-data", "--seed", "3", "--draws", "48")
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-3000:]
+    run = out / "all_data_seed3"
+    assert (run / "scored.pt").exists() and (run / "processing.json").exists()
+    assert not (run / "val_predictions.parquet").exists()
+    assert len((run / "train_log.jsonl").read_text().splitlines()) == 2
+    assert "all data, seed 3" in r.stdout
+
+
+def test_init_weights_starts_a_run_from_a_finished_model(corpus, tmp_path):
+    """docs/training/09: run 2 may start from run 1's soup. --init-weights loads a
+    scored.pt strictly; the optimizer and the draw start fresh."""
+    first = tmp_path / "first"
+    r = _train(corpus, first)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-3000:]
+    r2 = _train(corpus, tmp_path / "second", "--all-data", "--draws", "48",
+                "--init-weights", str(first / "fold0" / "scored.pt"))
+    assert r2.returncode == 0, r2.stdout[-2000:] + r2.stderr[-3000:]
+    assert "initialised from" in r2.stdout

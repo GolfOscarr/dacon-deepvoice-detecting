@@ -46,6 +46,9 @@ def _corpus_like_buckets(m):
     m = m.copy()
     v = m.index[m.pool.isin(["A", "B"])]
     m.loc[v, "speaker_ref_id"] = [f"{p}_spk{i % 2}" for i, p in enumerate(m.loc[v, "pool"])]
+    # one language per speaker bucket, so `lang_shares` has something to move
+    m["lang"] = None
+    m.loc[v, "lang"] = [("ko", "en")[i % 2] for i in range(len(v))]
     return m
 
 
@@ -646,7 +649,7 @@ def test_an_unregistered_augment_is_refused_at_construction():
     {"container": {"wav_64": 1.0}},
     {"container": {"wav": 0.6, "flac": 0.6}},
     {"channels": {"mono": 0.5, "left": 0.5}},
-    {"telephone": {"none": 0.5, "gsm": 0.5}},
+    {"telephone": {"none": 0.5, "g729": 0.5}},
     {"telephone_hz": 0},
 ])
 def test_malformed_normalize_menus_are_rejected(bad):
@@ -704,6 +707,8 @@ _KNOBS: dict[str, tuple] = {
     "noise_snr_db_range": ((10.0, 30.0), (5.0, 5.0), "layer_snrs", {}),
     "augments": (AUGMENTS_V1, (), "transforms", {}),
     "normalize_menu": (NORMALIZE_MENU_V1, None, "normalize", {}),
+    "lang_shares": (None, {"ko": 1.0}, "component_files", {}),
+    "domain_weights": (None, {"gen_hifigan": 0.0}, "component_files", {}),
     "scheme_version": ("strategy-v1", "strategy-v2", "scheme", {}),
 }
 
@@ -760,6 +765,8 @@ _V1_DEFAULTS = {
     "cell_mix": CellMix(),
     "f8": 1.0,
     "domain_cap": 500,
+    "lang_shares": None,
+    "domain_weights": None,
     "duration_range": (4.0, 60.0),
     "take_range_s": (1.5, 2.5),
     "edge_margin_s": 0.5,
@@ -806,6 +813,23 @@ def test_malformed_draw_configs_are_rejected(bad):
         DrawConfig(**bad)
 
 
+def test_domain_weights_scale_a_prefix_after_the_cap_and_the_longest_prefix_wins(manifest):
+    s = Sampler(manifest, DrawConfig(domain_weights={"gen_": 0.5, "gen_hifigan": 0.0}))
+    dom = pd.Series(["gen_hifigan::hifigan"] * 3 + ["gen_dac::dac"] * 2 + ["libritts"] * 2)
+    w = s._doss_weights(dom)
+    assert w[:3].sum() == 0.0                       # the longer prefix beats "gen_"
+    assert w[3] == pytest.approx(w[5] / 2)          # "gen_" halves, unlisted keeps 1
+    assert w.sum() == pytest.approx(1.0)
+    with pytest.raises(ValueError, match="weight 0"):             # every fake domain is gen_*
+        Sampler(manifest, DrawConfig(domain_weights={"gen_": 0.0}))
+
+
+@pytest.mark.parametrize("bad", [{"": 1.0}, {"x": -1.0}, {"x": float("nan")}, {}])
+def test_malformed_domain_weights_are_rejected(bad):
+    with pytest.raises(ValueError, match="domain_weights"):
+        DrawConfig(domain_weights=bad)
+
+
 def test_an_unsound_mix_must_be_asked_for():
     unsound = CellMix({1: 0.02, 2: 0.02, 3: 0.02, 4: 0.02, 5: 0.02,
                        6: 0.45, 7: 0.43, 8: 0.01, 9: 0.01})
@@ -843,7 +867,8 @@ def test_a_non_default_config_round_trips(tmp_path):
     alt = {"draw": {
         "cell_mix": {"p": {1: 0.060, 2: 0.130, 3: 0.060, 4: 0.135, 5: 0.155,
                            6: 0.095, 7: 0.125, 8: 0.125, 9: 0.115}},
-        "f8": 0.5, "domain_cap": 42,
+        "f8": 0.5, "domain_cap": 42, "lang_shares": {"ko": 0.5, "en": 0.5},
+        "domain_weights": {"wavefake|": 0.3, "ljspeech/": 4.0},
         "duration_range": [5.0, 30.0], "take_range_s": [1.0, 1.5],
         "edge_margin_s": 0.25, "component_floor_s": 2.5,
         "gain_db_range": [-10.0, 10.0], "gain_db_mean": -1.0, "gain_db_sigma": 2.0,
@@ -871,6 +896,8 @@ def test_a_non_default_config_round_trips(tmp_path):
             assert [a.to_flat() for a in got] == v
         elif k == "normalize_menu":
             assert got == NormalizeMenu(**v)
+        elif k in ("lang_shares", "domain_weights"):
+            assert got == tuple(sorted(v.items()))
         elif isinstance(v, list):
             assert got == tuple(v)
         else:

@@ -79,6 +79,16 @@ _ALT: dict[str, dict] = {
         "device": "meta",
         "checkpoint_every": 3,
         "max_steps": 7,
+        "render_workers": 2,
+        "lr_schedule": "cosine",
+        "warmup_steps": 5,
+        "min_lr_ratio": 0.1,
+        "frontend_lr_scale": 0.5,
+        "log_every": 10,
+        "grad_checkpointing": True,
+        "render_on_ht_siblings": True,
+        "grad_accum": 2,
+        "frontend_hold_steps": 100,
     },
 }
 

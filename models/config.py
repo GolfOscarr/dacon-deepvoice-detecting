@@ -32,7 +32,7 @@ from metrics.dacon import PREDICTION_COLUMNS
 __all__ = [
     "AdapterConfig", "AggregationConfig", "AudioConfig", "AuxConfig",
     "BranchConfig", "ConfigError", "DistillConfig", "FileHeadConfig",
-    "FreqPoolConfig", "FrontendConfig", "LossConfig", "ModelConfig",
+    "FreqPoolConfig", "FrontendConfig", "FusionConfig", "LossConfig", "ModelConfig",
     "OutputConfig", "RuntimeConfig", "SEDHeadConfig", "SegmentationConfig",
     "TrainConfig",
     "load_model_config", "load_train_config", "dump_config",
@@ -89,6 +89,9 @@ class ConfigError(ValueError):
 #: by 1.12 at the model boundary, which is why `promote_channels` refuses one.
 CHANNEL_POLICIES = ("downmix", "left", "mid_side")
 
+#: Every FILE construction `DeepVoiceNet.submission_probs` implements (G3, 13 O5).
+FILE_HEAD_MODES = ("learned", "noisy_or", "max", "max3")
+
 
 @dataclass(frozen=True)
 class AudioConfig:
@@ -141,6 +144,26 @@ class FreqPoolConfig:
     rectifier: str = "softplus"   # softplus | clamp
 
 
+#: Frontends whose wrapper can hand every kept transformer layer to a fusion.
+FUSABLE_FRONTENDS = ("xlsr_300m", "xlsr_1b")
+
+
+@dataclass(frozen=True)
+class FusionConfig:
+    """Learnable layer fusion over a frontend's kept transformer layers
+    (docs/training/13 M2).
+
+    `weighted`: every branch that reads this frontend gets its own softmax over
+    the layers, and reads the weighted sum of the layer outputs, each normalised
+    by a non-affine layer norm first -- XLS-R is pre-LN, so the residual stream
+    between blocks is unnormalised and its scale grows with depth. The weights
+    live in the top-level ``model.fusion`` (not under ``model.frontends``) so the
+    frontend hold does not freeze them. `none` = the frontend's last layer, as
+    before.
+    """
+    kind: str = "none"                # none | weighted
+
+
 @dataclass(frozen=True)
 class FrontendConfig:
     name: str
@@ -155,6 +178,24 @@ class FrontendConfig:
     #: EAT / SSLAM tokenise a mel spectrogram into a (F', T') grid and the wrapper
     #: needs F' to reshape. Must be set exactly when freq_pool.kind != "none".
     n_freq: int | None = None
+    #: BEATs only (docs/training/07 §3): encode the patch grid in windows of
+    #: this many patch columns (62 = 9.92 s, BEATs' 10 s pretraining length)
+    #: instead of as one sequence. Attention cost then grows linearly with
+    #: duration: a 60 s row was 3,000 tokens and 3.7 of a 3.9 s step. None =
+    #: one sequence per row (candidate A as specified).
+    window_patches: int | None = None
+    #: BEATs with `window_patches` only: compute the filterbank, the patch
+    #: embedding and the window cut for the whole batch in a few kernels rather
+    #: than a loop over rows and windows (HANDOFF_TRAINING D6). The same arithmetic
+    #: on the same valid samples, so it is exact up to kernel choice: fp32
+    #: outputs move by float rounding, not by what a row can see. False = the
+    #: per-row loop run 1 trained with.
+    batched_tokens: bool = False
+    fusion: FusionConfig = field(default_factory=FusionConfig)
+
+    def __post_init__(self) -> None:
+        if self.window_patches is not None and self.window_patches < 1:
+            raise ValueError(f"window_patches must be >= 1 or None, got {self.window_patches}")
 
 
 @dataclass(frozen=True)
@@ -184,6 +225,11 @@ class SEDHeadConfig:
     #: than inheriting this default. Do not "simplify" them back.
     clip_weight: float = 1.0        # blend of clip vs frame_max, applied in LOGIT space
     attention: str = "linear"       # linear | scaled_tanh | tanh
+    #: O1 (docs/training/13 §3): the head owns an OC-Softmax centre and returns
+    #: its attention-pooled hidden as ``embedding``, for `LossConfig.oc_weight`.
+    #: Training-only regularisation; the submitted logit does not read it.
+    #: Off by default so every existing config builds the same module.
+    oc: bool = False
 
 
 @dataclass(frozen=True)
@@ -225,7 +271,7 @@ class AggregationConfig:
 @dataclass(frozen=True)
 class FileHeadConfig:
     """How FILE_FAKE_PROB is formed (G3 -- no prior art; build all three)."""
-    mode: str = "learned"            # learned | noisy_or | max
+    mode: str = "learned"            # learned | noisy_or | max | max3
 
 
 @dataclass(frozen=True)
@@ -314,8 +360,21 @@ class LossConfig:
     ranking_weight: float = 0.0
     distill_weight: float = 1.0
     label_smoothing: float = 0.0
+    #: O1 one-class (OC-Softmax, Zhang, Jiang & Duan 2021) on every branch whose
+    #: head has `oc: true`. 0 = off, and the loss is then bitwise the run-2 loss.
+    #: Real (label 0) is pulled to cos >= oc_m_real, fake pushed below oc_m_fake.
+    oc_weight: float = 0.0
+    oc_alpha: float = 20.0
+    oc_m_real: float = 0.9
+    oc_m_fake: float = 0.2
 
     def __post_init__(self):
+        if self.oc_weight < 0 or self.oc_alpha <= 0 or not (
+                -1.0 <= self.oc_m_fake < self.oc_m_real <= 1.0):
+            raise ConfigError(
+                "loss: need oc_weight >= 0, oc_alpha > 0 and -1 <= oc_m_fake < "
+                f"oc_m_real <= 1; got {self.oc_weight}, {self.oc_alpha}, "
+                f"{self.oc_m_fake}, {self.oc_m_real}")
         # 🔴 Checked here rather than in `load_train_config` so that the rule
         # holds for every LossConfig, however it was built -- a YAML load, a
         # `dataclasses.replace`, a checkpoint round-trip or a test. A partial
@@ -480,6 +539,20 @@ def validate_model_config(cfg: ModelConfig) -> None:
             raise ConfigError(
                 f"frontends.{name}: an unfrozen frontend with adapters is almost never "
                 "intended -- set adapter.kind: none or freeze: true")
+        if fe.fusion.kind not in ("none", "weighted"):
+            raise ConfigError(f"frontends.{name}.fusion.kind invalid: {fe.fusion.kind!r}")
+        if fe.fusion.kind != "none":
+            if fe.name not in FUSABLE_FRONTENDS:
+                raise ConfigError(
+                    f"frontends.{name}: fusion is implemented for {list(FUSABLE_FRONTENDS)}, "
+                    f"not {fe.name!r}")
+            if not any(name in br.sources for br in cfg.branches.values()):
+                # its fusion and adapter would receive no gradient: a DDP hang
+                raise ConfigError(f"frontends.{name}: fused but read by no branch")
+            if cfg.distill.enabled or cfg.aux.separation_head:
+                raise ConfigError(
+                    f"frontends.{name}: fusion with distill / separation_head is not "
+                    "implemented -- those read one (B, T, D) output per frontend")
 
     if not cfg.branches:
         raise ConfigError("model: at least one branch is required")
@@ -547,7 +620,7 @@ def validate_model_config(cfg: ModelConfig) -> None:
         raise ConfigError("aggregation.k must be >= 1")
     if not 0.0 < cfg.aggregation.quantile <= 1.0:
         raise ConfigError("aggregation.quantile must be in (0, 1]")
-    if cfg.file_head.mode not in ("learned", "noisy_or", "max"):
+    if cfg.file_head.mode not in FILE_HEAD_MODES:
         raise ConfigError(f"file_head.mode invalid: {cfg.file_head.mode!r}")
     if cfg.output.dtype not in ("float64", "float32"):
         raise ConfigError(f"output.dtype invalid: {cfg.output.dtype!r}")

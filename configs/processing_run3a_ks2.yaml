@@ -1,0 +1,222 @@
+# RUN 3a (docs/training/12 §2): processing_run2.yaml + round-1 ko-synth (VITS-style melo/mms, xtts, ...)
+# weighted x2, to test whether it recovers held-out VITS-style TTS.
+# RUN 2 (docs/training/09): processing_first_run.yaml on strategy-v4 (the round-2
+# corpora: processed audio, conversational/new Korean clones, Chinese clones,
+# CtrSVDD singing). OWNER DECISION 2026-09-25: English and Korean are the only
+# languages for now -- every other language (zh, ja, MLAAD's long tail) gets share 0,
+# and zh-synth / CtrSVDD are not ingested into strategy-v4.
+#
+# THE FIRST REAL RUN (docs/training/07): processing_v1.yaml plus the language
+# balance (D-d), strategy-v3, and the loop knobs of §3. Everything else is v1's.
+#
+# The data-processing pipeline's v1 draw -- docs/processing/03 §5, loaded by
+# `processing.config.load_processing_config`. Independent of the training
+# run configs (configs/run_*.yaml): this is what `processing.sampler.Sampler`
+# draws, and nothing else reads it.
+#
+# Every field is written out even where it equals the default, so the ledger
+# row is this file and not whatever the code defaulted to that week. Values
+# marked OPEN are docs/processing/03 §8's -- placeholders, decided by the
+# measurement named there, never silently.
+
+draw:
+  # D-2. The reference mix, verified against C1 and C3. OPEN: sweep vs the
+  # minimax mix {.03 .03 .03 .03 .323 .10 .10 .197 .16} on per-head VAL EER.
+  cell_mix:
+    p: {1: 0.060, 2: 0.130, 3: 0.060, 4: 0.135, 5: 0.155,
+        6: 0.125, 7: 0.125, 8: 0.095, 9: 0.115}
+  # D-1. Strict: every mixed sample composed. Only f8 = 1 balances composedness
+  # on the component heads (02 §4.2). Whole-file rows exist for the sweep only.
+  f8: 1.0
+  # D-16. DOSS cap as a sampling weight, on component AND whole-file rows.
+  domain_cap: 500
+  # docs/training/07 D-d. Each voice pool (real A, fake B) is rescaled after the
+  # DOSS cap so every language holds the same share on both sides. `ja` exists on
+  # the fake side only (JSUT) and is removed; `other` is MLAAD's long tail, fake
+  # side only, kept small for its generator diversity.
+  lang_shares: {ko: 0.55, en: 0.45, zh: 0.0, ja: 0.0, other: 0.0}
+  # docs/training/10 F1: one speaker (LJ) was 39 % of the English FAKE voice
+  # components drawn and 1.2 % of the English REAL ones -- WaveFake's 8 vocoder
+  # domains each hit the DOSS cap, real LJSpeech is one publisher domain -- so "LJ
+  # voice => fake" was learnable. WaveFake (and its S1-processed copies) x 0.25,
+  # real LJSpeech x 25. Measured on v3 + proc + emilia-ko/en + ko-synth2 + a 5-family
+  # en-synth2 stand-in, 20,000 specs (the en-data track, 2026-09-26): LJ voice drawn
+  # real 0.012 -> 0.176, fake 0.391 -> 0.158; WaveFake 0.383 -> 0.154 of English fakes.
+  domain_weights:
+    "wavefake|": 0.25
+    "proc-codec-lm|wavefake|": 0.25
+    "proc-dac|wavefake|": 0.25
+    "proc-dsp|wavefake|": 0.25
+    "proc-encodec|wavefake|": 0.25
+    "proc-enhance|wavefake|": 0.25
+    "ljspeech/": 25.0
+    # label symmetry of the draw (docs/training/11 §1.1), tuned on _rehearsal-v4b fold 1
+    # (draw_balance.py n=6000): voice-slot repeats real .249 / fake .288, processed .194 / .235
+    "proc-codec-lm/": 14.0
+    "proc-dac/": 14.0
+    "proc-encodec/": 14.0
+    "proc-dsp/": 14.0
+    "proc-enhance/": 14.0
+    "proc-codec-lm|": 0.35
+    "proc-dac|": 0.35
+    "proc-encodec|": 0.35
+    "proc-dsp|": 0.35
+    "proc-enhance|": 0.35
+    "ko-synth2|": 1.5
+    "en-synth2|": 1.1
+    "emilia-ko/": 2.0
+    "emilia-en/": 2.0
+    "ko-synth|": 2.0   # run 3a
+  # DRAW-1. The competition's own range; drawn first.
+  duration_range: [4.0, 60.0]
+  # D-3 / D-21. ONE take per sample, shared by every role and row kind,
+  # strictly inside the file by edge_margin_s at both ends, tiled to its
+  # span with independent offsets per tile. take_range_s[1] must not exceed
+  # component_floor_s - 2 * edge_margin_s (asserted): no file ever caps the
+  # take, so the join count is a function of (span, take) only.
+  take_range_s: [1.5, 2.5]
+  edge_margin_s: 0.5
+  # D-5 (revised). OPEN with the take: floor 3.0 / take [1.5, 2.0] keeps 92 %
+  # of pool B's hours, 4.0 / [2, 3] keeps 80 %, 6.0 / [3, 5] keeps 63 %.
+  component_floor_s: 2.5
+  # DRAW-4. The voice/music level ratio, skewed quiet (A-A3).
+  gain_db_range: [-15.0, 15.0]
+  gain_db_mean: -3.6
+  gain_db_sigma: 4.0
+  sequential_prob: 0.25
+  # The taper at every join: the sequential joint and every tile joint.
+  crossfade_ms_range: [10.0, 200.0]
+  # D-6. lead ~ U(0, 3.0) on every sample (0.595 -> 0.553); tail OPEN,
+  # unmeasured -- next harness run with tail in the grid.
+  silence_lead_s: 3.0
+  silence_tail_s: 1.0
+  # DRAW-5. With p_noise_layer a pool-E row goes under the composite of ANY
+  # cell at U(10, 30) dB SNR, tiled like a component and scaled at render.
+  # Rows flagged noise_has_speech (D-14) never go under a voice_present = 0
+  # cell. The decision and the SNR are drawn before the cell.
+  p_noise_layer: 0.5
+  noise_snr_db_range: [10.0, 30.0]
+  # DRAW-6. name, per-sample p, parameter ranges; drawn before the cell into
+  # spec.transforms. A `<k>_range` the augment accepts as scalar `<k>` is
+  # drawn at spec time (I1b sees the value); the others are drawn inside the
+  # augment from spec.rng. `rir` (A-A10): RIRS' 218 real responses (the
+  # `_rir_` files beside the isotropic noises), direct path aligned to 0,
+  # dry/wet U(0.3, 1.0), level preserved.
+  augments:
+    - {name: gain_jitter,      p: 1.0, db_range: [-12.0, 12.0]}        # D-8
+    - {name: rawboost_ssi,     p: 0.5, snr_db_range: [10.0, 40.0], tilt_db_range: [-12.0, 12.0]}
+    - {name: gaussian_noise,   p: 0.3, snr_db_range: [10.0, 30.0]}
+    - {name: pink_noise,       p: 0.3, snr_db_range: [10.0, 30.0]}
+    - {name: stereo_imbalance, p: 0.3, db_range: [-4.0, 4.0]}
+    - {name: rir, p: 0.2, wet_range: [0.3, 1.0], max_rir_s: 1.0, pattern: "*_rir_*.wav",
+       bank_dir: /data/project/private/dacon-corpus/interim/rirs-noises/openslr-28/RIRS_NOISES/real_rirs_isotropic_noises}
+  # DRAW-7 / D-13. One menu for every cell, drawn per sample into
+  # spec.normalize: container (+ bitrate for mp3), channels, and the 8 kHz
+  # telephone leg with mu-law / A-law / no companding ("plain").
+  normalize_menu:
+    container: {wav: 0.30, flac: 0.15, mp3_64: 0.15, mp3_96: 0.15, mp3_128: 0.15, mp3_192: 0.10}
+    channels:  {mono: 0.5, stereo: 0.5}
+    telephone: {none: 0.80, ulaw: 0.10, alaw: 0.05, plain: 0.05}
+    telephone_hz: 8000
+  scheme_version: strategy-v4
+  # Leave false: it exists for the audit's own mutation tests.
+  allow_unsound_mix: false
+
+render:
+  # Manifest paths are relative to this: the corpus root. The built manifest
+  # (scripts/build_corpus_manifest.py -> manifests/strategy-v1/) writes paths
+  # with their stage directory (interim/..., raw/... for mlaad), so one root
+  # resolves every source. The EDA's S-tier manifest (eda/out/_strategy/) is
+  # relative to <root>/interim instead.
+  root: /data/project/private/dacon-corpus
+  audio:
+    sample_rate: 16000
+    min_seconds: 4.0
+    max_seconds: 60.0
+    # Caveat: `channels` and `band_hz` are the SHIPPED chain's (SHIP-3, SHIP-5)
+    # and are not applied by the renderer; band_hz is set when that stage
+    # lands (docs/processing/03 §6 step 5), not before.
+    channels: downmix
+    band_hz: null
+  # A callable, so YAML carries its NAME and `training.config.RESAMPLERS`
+  # resolves it (A-S1).
+  resampler: training.render.resample_poly_to
+  # sigmoid beats a hard cut, which becomes a splice shortcut (A-A4).
+  crossfade_shape: sigmoid
+  # I12, the length-regime guard.
+  check_duration: true
+  # OFF-6. Set: every component is a slice of its cached 16 kHz int16 decode
+  # (scripts/build_cache.py), and a file missing from the cache is an error --
+  # one decode regime per run. null: decode from the corpus.
+  cache_root: /data/project/private/dacon-corpus/cache16k
+  # 06 D7: the composite's RMS over the placed span, before the augments;
+  # each tile is scaled to the same level before placement (bucket tiling
+  # stitches files of different loudness).
+  target_rms_dbfs: -23.0
+  tile_rms_dbfs: -23.0
+  # 06 D6: clip to [-1, 1] after the augments, as a wav on disk would.
+  clip: true
+  # 06 D11: the augment chain on one torch thread (bitwise across counts).
+  single_thread: true
+
+ship:
+  # The shipped chain (`processing.ship.ship`): what happens between the
+  # decoded waveform and the model, identically in training and in
+  # submit.zip, per file over its valid prefix (I14). One function, one
+  # call site.
+  sample_rate: 16000
+  # SHIP-3. downmix | left | mid_side.
+  channels: downmix
+  # SHIP-4 / D-10. DC is a generator id that inverts across archives.
+  preprocess: [dc_offset]
+  # SHIP-5. D-11: no high-pass (low edge 0). D-12, OPEN: 7200 Hz upper edge
+  # vs the resampler shelf and SONICS' 7.3 kHz rolloff -- ablate vs null.
+  band_hz: [0.0, 7200.0]
+
+folds:
+  # OFF-5, `training.folds.FoldConfig`. D-22: FOUR folds. The music head has
+  # five composable fake families (FakeMusicCaps) plus SONICS' two whole-file
+  # only ones; PROBE seals one, and five VAL sides need five composable --
+  # four is what the corpus supports. Each VAL fold validates the music head
+  # on 1-2 families (the variance caveat in folds.caveats.txt). OPEN: five
+  # folds with allow_no_probe, or a sixth fake-music family.
+  n_folds: 4
+  probe_share: 0.10
+  scheme_version: null
+  caveat_families_per_val_fold: 2
+  require_component_coverage: true
+  allow_no_probe: false
+  assigned_at: null
+  # 06 D1: the PROBE row budget counts drawable rows only, and PROBE's real
+  # side gets a floor in hours and atoms per role. 06 D4: folds balance the
+  # drawable hours of every (role, fake) pair, and a thin VAL side is a caveat.
+  probe_budget_drawable_only: true
+  probe_min_real_hours: 5.0
+  probe_min_real_atoms: 5
+  balance_on: hours
+  caveat_min_role_hours: 5.0
+
+loop:
+  # 06 P8, `training.loop.LoopConfig` -- the run's own knobs, so one file
+  # drives draw, render, ship, folds and the loop. Values are run_default's.
+  out_dir: runs/dev
+  n_buckets: 4
+  # 0 disables the EMA entirely.
+  ema_decay: 0.999
+  grad_clip: 5.0
+  device: cuda
+  # 0 = checkpoint at pass boundaries only.
+  checkpoint_every: 0
+  # Critical: a run with max_steps set is a TRUNCATED run. StageResult.truncated
+  # says so, and its numbers are not quotable.
+  max_steps: null
+  # docs/training/07 §3: 7 render workers per GPU task (8 CPUs each).
+  render_workers: 7
+  lr_schedule: cosine
+  warmup_steps: 1000
+  min_lr_ratio: 0.05
+  # LoRA and GeM at a fifth of the heads' rate.
+  frontend_lr_scale: 0.2
+  log_every: 50
+  # a 60 s clip holds ~17 GiB of attention maps across both trunks otherwise
+  grad_checkpointing: false   # run 2 (docs/training/11 §3): 0.86-1.0 vs 1.05-1.14 s/step; peak ~99-103 GiB of 141

@@ -13,7 +13,7 @@ This file is how to *use* it.
 | Module | Use it for |
 |---|---|
 | `models.config` | Loading and validating a config. Rejects unknown keys |
-| `models.frontends` | Encoder wrappers, normalised to one `(B, T, D)` contract. ⚠️ Only `stub` is wired |
+| `models.frontends` | Encoder wrappers, normalised to one `(B, T, D)` contract. `stub`, `beats` and `xlsr_300m` are wired |
 | `models.heads` | The SED head and frequency pooling |
 | `models.model` | `DeepVoiceNet`, checkpoint save/load |
 | `models.losses` | The masked multi-task objective |
@@ -124,7 +124,8 @@ print(sorted(probs))
 ```
 
 `submission_probs` honours `file_head.mode`: `learned` reads the file branch, while `noisy_or`
-and `max` combine the component and presence columns analytically. G3 records the FILE
+and `max` combine the component and presence columns analytically, and `max3` takes the max of
+the learned column and both component products (docs/training/13 O5). G3 records the FILE
 construction as an open question with no prior art, so all three must genuinely differ — and a
 test asserts they do.
 
@@ -209,6 +210,13 @@ The config is stored beside the weights and the model is rebuilt from it before 
 the guard `script.py` needs, since a silently mis-shaped model would otherwise write a
 well-formed `submission.csv` full of 0.5 and score exactly 0.5000 without raising.
 
+🔴 A pretrained frontend (`beats`, `xlsr_300m`) reads its checkpoint **at construction**, from
+the stored `frontends.<name>.weights` — the training machine's absolute path, which does not
+exist on the offline test server. `load_checkpoint(path, weights={name: dir})` replaces it, and
+`script.py` passes `shipped_weights(model_dir)`: one directory per frontend under
+`model/weights/<frontend>/` (the BEATs `.pt`; the XLS-R snapshot with `config.json`). The strict
+load then overwrites every weight, so which copy is read changes no number.
+
 ## Windows, if you ever tile
 
 ⚠️ **`DeepVoiceNet` refuses `segmentation.mode: tiling`** — it consumes a whole waveform, and
@@ -245,12 +253,12 @@ being ignored:
 
 | Setting | Behaviour today |
 |---|---|
-| `frontends.layers` (truncation) | ❌ `build_frontend` raises — the stub has no layers to truncate |
-| `frontends.adapter.kind != none` | ❌ raises — no attention projections to adapt |
+| `frontends.layers` (truncation) | ✅ `beats` and `xlsr_300m` delete the blocks past it; ❌ the stub raises |
+| `frontends.adapter.kind != none` | ✅ `lora` on `beats`/`xlsr_300m` (`fc1`/`fc2` map to XLS-R's `intermediate_dense`/`output_dense`; a target matching nothing raises); ❌ the stub raises |
 | `segmentation.mode: tiling` | ❌ `DeepVoiceNet` raises — windowing belongs to the inference script |
 | `frontends.freeze` | ✅ applied (encoder frozen; the GeM exponent stays trainable — it is ours) |
 | `distill.stop_gradient` | ✅ applied — branch heads get detached features |
-| `file_head.mode` | ✅ all three implemented |
+| `file_head.mode` | ✅ all four implemented (`max3`: 13 O5) |
 | `audio.band_hz` | ✅ applied, as a brick wall in the rFFT domain |
 | `audio.channels` | ✅ applied by `models.audio.prepare_waveform`, which the data path calls |
 | `runtime.*`, `audio.min/max_seconds`, `aggregation.*` | consumed by the inference script / data loader |

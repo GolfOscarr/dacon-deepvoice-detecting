@@ -33,7 +33,7 @@ from training.config import RESAMPLERS, _cell_mix_from, _loop_from_dict
 from training.folds import FoldConfig
 from training.loop import LoopConfig
 from training.registries import AUGMENT
-from training.render import CODEC_CONTAINERS
+from training.render import CODEC_CONTAINERS, PHONE_CODECS
 from training.sampler import CellMix, check_mix, composed_fractions
 
 __all__ = ["AUGMENTS_V1", "NORMALIZE_MENU_V1", "RESAMPLERS", "SECTIONS", "AugmentSpec",
@@ -136,7 +136,9 @@ class NormalizeMenu:
 
     ``container`` options are ``wav``, ``flac`` and ``mp3_<kbps>``;
     ``telephone`` options are ``none``, ``ulaw``, ``alaw`` (8 kHz + companding)
-    and ``plain`` (the 8 kHz leg alone). The draw's keys are a subset of
+    and ``plain`` (the 8 kHz leg alone), and -- docs/training/15 N4 -- the phone
+    codecs of ``training.render.PHONE_CODECS``: ``gsm`` (the 8 kHz leg + GSM-FR)
+    and ``opus_<kbps>`` (VoIP Opus at 16 kHz). The draw's keys are a subset of
     ``training.render.NORMALIZE_KEYS``.
     """
 
@@ -154,7 +156,20 @@ class NormalizeMenu:
                 raise ValueError(
                     f"normalize_menu.container: {key!r} is not wav | flac | mp3_<kbps>")
         _distribution("channels", self.channels, {"mono", "stereo"})
-        _distribution("telephone", self.telephone, {"none", "ulaw", "alaw", "plain"})
+        _distribution("telephone", self.telephone, None)
+        for key in self.telephone:
+            if key in ("none", "ulaw", "alaw", "plain"):
+                continue
+            codec, _, rate = key.partition("_")
+            known = PHONE_CODECS.get(codec)
+            if known is None or bool(known[1]) != bool(rate) \
+                    or (rate and not (rate.isdigit() and int(rate) in known[1])):
+                raise ValueError(
+                    f"normalize_menu.telephone: {key!r} is not none | ulaw | alaw | plain | "
+                    f"gsm | opus_<kbps in {PHONE_CODECS['opus'][1]}>")
+            if codec == "gsm" and self.telephone_hz != PHONE_CODECS["gsm"][0]:
+                raise ValueError(f"normalize_menu.telephone: gsm needs telephone_hz "
+                                 f"{PHONE_CODECS['gsm'][0]}, got {self.telephone_hz}")
         if self.telephone_hz <= 0:
             raise ValueError(f"telephone_hz must be > 0, got {self.telephone_hz}")
 
@@ -187,6 +202,21 @@ class DrawConfig:
     #: count`` -- and applied to whole-file rows too, which ``training.sampler``
     #: draws uniformly.
     domain_cap: int = 500
+    #: docs/training/07 D-d. ``None`` = off. Otherwise ``(lang, share)`` pairs:
+    #: after the DOSS cap, each voice pool's weight is rescaled so language
+    #: ``lang`` holds ``share`` of it (renormalised over the languages the pool
+    #: has), on the real AND the fake side alike, so language alone does not
+    #: predict fakeness. A language not listed counts as ``other``; share 0
+    #: removes a language. Needs the manifest's ``lang`` column. YAML may give
+    #: a mapping; it is stored as sorted pairs so the config stays hashable.
+    lang_shares: tuple[tuple[str, float], ...] | None = None
+    #: docs/training/10 F1. ``None`` = off. Otherwise ``(prefix, multiplier)``
+    #: pairs: after the DOSS cap, a row whose DOSS domain (``domain_key``, else
+    #: ``source_name``) starts with ``prefix`` has its weight multiplied (the
+    #: longest matching prefix wins), before the language rescale. For a corpus
+    #: whose many domains are one speaker (WaveFake: 8 vocoders of LJ). Stored as
+    #: sorted pairs, like ``lang_shares``.
+    domain_weights: tuple[tuple[str, float], ...] | None = None
 
     # -- DRAW-1: the timeline ----------------------------------------------- #
     duration_range: tuple[float, float] = (4.0, 60.0)
@@ -270,6 +300,22 @@ class DrawConfig:
                 f"under bucket tiling, docs/processing/06 D5)")
         if self.domain_cap < 1:
             raise ValueError(f"domain_cap must be >= 1, got {self.domain_cap}")
+        if self.lang_shares is not None:
+            pairs = (self.lang_shares.items() if isinstance(self.lang_shares, Mapping)
+                     else self.lang_shares)
+            pairs = tuple(sorted((str(k), float(v)) for k, v in pairs))
+            if not pairs or any(v < 0 or v != v for _, v in pairs) \
+                    or sum(v for _, v in pairs) <= 0:
+                raise ValueError(f"lang_shares must be >= 0 with a positive sum, got {pairs}")
+            object.__setattr__(self, "lang_shares", pairs)
+        if self.domain_weights is not None:
+            pairs = (self.domain_weights.items() if isinstance(self.domain_weights, Mapping)
+                     else self.domain_weights)
+            pairs = tuple(sorted((str(k), float(v)) for k, v in pairs))
+            if not pairs or any(not k or not v >= 0 or not math.isfinite(v) for k, v in pairs):
+                raise ValueError(f"domain_weights must map non-empty prefixes to finite "
+                                 f"multipliers >= 0, got {pairs}")
+            object.__setattr__(self, "domain_weights", pairs)
         for name in ("silence_lead_s", "silence_tail_s"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
@@ -421,6 +467,8 @@ def dump_processing_config(cfg: ProcessingConfig) -> dict:
                 section[key] = str(value)
             elif key == "augments":
                 section[key] = [a.to_flat() for a in getattr(cfg, name).augments]
+            elif key in ("lang_shares", "domain_weights") and value is not None:
+                section[key] = {k: v for k, v in value}
             elif key == "preprocess":
                 section[key] = [s.to_flat() for s in getattr(cfg, name).preprocess]
             elif isinstance(value, tuple):

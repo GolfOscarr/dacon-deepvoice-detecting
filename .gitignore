@@ -41,3 +41,7 @@ slurm-*.out
 # them; `docs/EDA/00` section 1 describes the layout. The corpus itself lives
 # outside the repo (/data/project/private/dacon-corpus).
 eda/out/
+
+# training outputs (symlinks into /data/project/private/dacon-runs, Slurm logs) and agent worktrees
+/runs/
+/.claude/worktrees/

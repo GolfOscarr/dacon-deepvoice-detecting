@@ -237,6 +237,20 @@ def trainable_parameters(model: DeepVoiceNet, plan: StagePlan,
     for extra in (model.distill_head, model.separation_head):
         if extra is not None and plan.train_frontends:
             params += [p for p in extra.parameters() if p.requires_grad]
+    # 🔴 Any OTHER top-level module (e.g. a `fusion` over encoder layers,
+    # docs/training/14 D6) trains with the frontends. Listing only the four
+    # known attributes silently left a new module out of AdamW: it received
+    # gradients and never moved. `tests/test_ddp.py` asserts every parameter
+    # that requires grad reaches the optimizer.
+    known = {"frontends", "heads", "distill_head", "separation_head"}
+    if plan.train_frontends:
+        for name, child in model.named_children():
+            if name not in known:
+                params += [p for p in child.parameters() if p.requires_grad]
+    # A module that shares (ties) a parameter with another is listed once:
+    # AdamW refuses a parameter in two groups.
+    seen: set[int] = set()
+    params = [p for p in params if not (id(p) in seen or seen.add(id(p)))]
     if not params:
         raise ValueError(
             f"stage {plan.stage!r} group {tuple(group)} has no trainable parameter. "

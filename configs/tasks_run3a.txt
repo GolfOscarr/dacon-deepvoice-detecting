@@ -1,0 +1,5 @@
+# run 3a (docs/training/12 §2): does up-weighting round-1 ko-synth recover held-out VITS-style TTS?
+2 | v4 | configs/processing_run3a_ks2.yaml | configs/train_run2.yaml | /data/project/private/dacon-runs/run2-v4/T2/fold2/scored.pt
+3 | v4 | configs/processing_run3a_ks2.yaml | configs/train_run2.yaml | /data/project/private/dacon-runs/run2-v4/T3/fold3/scored.pt
+2 | v4 | configs/processing_run3a_ks3.yaml | configs/train_run2.yaml | /data/project/private/dacon-runs/run2-v4/T2/fold2/scored.pt
+3 | v4 | configs/processing_run3a_ks3.yaml | configs/train_run2.yaml | /data/project/private/dacon-runs/run2-v4/T3/fold3/scored.pt

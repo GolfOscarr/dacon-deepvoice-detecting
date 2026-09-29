@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -25,10 +25,12 @@ from metrics.dacon import PREDICTION_COLUMNS
 from processing.ship import ShipConfig, ship
 from training.render import DecodeError, load_audio
 
-__all__ = ["AUDIO_SUFFIXES", "ConstantModel", "InferenceReport", "list_test_files",
-           "predict_files", "write_submission"]
+__all__ = ["AUDIO_SUFFIXES", "ENSEMBLE_RULES", "ConstantModel", "InferenceReport",
+           "ensemble_probs", "list_test_files", "predict_files", "write_submission"]
 
 AUDIO_SUFFIXES = (".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aac", ".opus")
+#: how `ensemble_probs` combines members' per-file probabilities
+ENSEMBLE_RULES = ("prob_mean", "logit_mean")
 
 
 def list_test_files(test_dir: Path) -> list[Path]:
@@ -124,6 +126,45 @@ def predict_files(model: Any, files: Sequence[Path], ship_cfg: ShipConfig, *,
             f"{report.n_fallback} of {report.n} files fell back to 0.5 "
             f"(> {max_fallback:.0%}): {report.failures[:3]}")
     return report
+
+
+def ensemble_probs(members: Sequence[Mapping[str, Sequence[float]]], rule: str = "prob_mean",
+                   weights: Sequence[float] | None = None,
+                   valid: Sequence[Sequence[bool]] | None = None) -> dict[str, np.ndarray]:
+    """Per-file, per-column weighted average of several models' probabilities.
+
+    ``members[m][col]`` is model m's column over the SAME file order. Each file's
+    output depends only on that file's member rows (rule 2.4: no cross-file
+    statistics). ``valid[m][i] = False`` drops member m from file i (a decode
+    fallback row); a file no member scored is 0.5. ``logit_mean`` averages
+    log-odds (probabilities clipped to [1e-12, 1 - 1e-12]).
+    """
+    if rule not in ENSEMBLE_RULES:
+        raise ValueError(f"unknown ensemble rule {rule!r}; expected one of {ENSEMBLE_RULES}")
+    if not members:
+        raise ValueError("no ensemble members")
+    w = np.ones(len(members)) if weights is None else np.asarray(weights, dtype=np.float64)
+    if w.shape != (len(members),) or not (w >= 0).all() or not w.sum() > 0:
+        raise ValueError(f"ensemble weights {list(w)} do not fit {len(members)} members")
+    n = len(members[0][PREDICTION_COLUMNS[0]])
+    ok = (np.ones((len(members), n), dtype=bool) if valid is None
+          else np.asarray(valid, dtype=bool).reshape(len(members), n))
+    wm = w[:, None] * ok                                   # (members, files)
+    total = wm.sum(0)
+    out = {}
+    for c in PREDICTION_COLUMNS:
+        p = np.stack([np.asarray(m[c], dtype=np.float64) for m in members])
+        if p.shape != (len(members), n):
+            raise ValueError(f"column {c}: members disagree on the number of files")
+        if rule == "logit_mean":
+            q = np.clip(p, 1e-12, 1 - 1e-12)
+            p = np.log(q / (1 - q))
+        num = (wm * p).sum(0)
+        avg = np.divide(num, total, out=np.zeros(n), where=total > 0)
+        if rule == "logit_mean":
+            avg = 1 / (1 + np.exp(-avg))
+        out[c] = np.where(total > 0, avg, 0.5)
+    return out
 
 
 def write_submission(report: InferenceReport, out_path: Path, *,

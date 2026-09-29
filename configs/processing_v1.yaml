@@ -19,6 +19,11 @@ draw:
   f8: 1.0
   # D-16. DOSS cap as a sampling weight, on component AND whole-file rows.
   domain_cap: 500
+  # docs/training/07 D-d: per-language shares of each voice pool, equal on
+  # the real and fake side. null = off (v1); the first run sets it.
+  lang_shares: null
+  # docs/training/10 F1: DOSS-domain prefix -> weight multiplier. null = off.
+  domain_weights: null
   # DRAW-1. The competition's own range; drawn first.
   duration_range: [4.0, 60.0]
   # D-3 / D-21. ONE take per sample, shared by every role and row kind,
@@ -162,3 +167,21 @@ loop:
   # Critical: a run with max_steps set is a TRUNCATED run. StageResult.truncated
   # says so, and its numbers are not quotable.
   max_steps: null
+  # docs/training/07 §3. 0 = render inline; N = N worker processes, same batches.
+  render_workers: 0
+  # render workers may also use the hyperthread siblings of the pinned CPUs (no sample changes)
+  render_on_ht_siblings: false
+  # constant | cosine (linear warmup, then cosine to min_lr_ratio of the base rate)
+  lr_schedule: constant
+  warmup_steps: 0
+  min_lr_ratio: 0.0
+  # the frontends' trainable parameters run at this multiple of the base rate
+  frontend_lr_scale: 1.0
+  # 0 = no per-step log; N = mean loss parts to <out_dir>/train_log.jsonl every N steps
+  log_every: 0
+  # recompute the frontends' transformer layers in backward (same numbers, less memory)
+  grad_checkpointing: false
+  # docs/training/14 D5: micro-batches per optimizer step per rank (1 = off)
+  grad_accum: 1
+  # docs/training/14 D6: steps the frontend (LoRA, GeM) is held before its own warm-up
+  frontend_hold_steps: 0

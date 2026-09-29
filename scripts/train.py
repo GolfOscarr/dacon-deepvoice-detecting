@@ -34,10 +34,16 @@ because two runs that scored different weights are two runs.
 `gates.ok and tripwires.ok`, and a fold that fails either still contributes its
 metrics to the mean -- so the row has to say which folds were clean.
 
-⚠️ One GPU per invocation, by design. Folds are independent, so N folds is a job
-array rather than a distributed run; the sampler's bitwise-resume guarantee is
-keyed on `(sample_id, epoch, seed)` and sharding it across ranks would have to be
-re-established from scratch.
+⚠️ One GPU per invocation by default. Folds are independent, so N folds is a job
+array rather than a distributed run.
+
+*Data parallel* (docs/training/14): under `torchrun --nproc_per_node N` the SAME
+invocation trains one fold or `--all-data` on N GPUs. Every rank builds the same
+draw and pass plan at the global batch (`--batch-size` per rank x N x
+`loop.grad_accum`) and trains its slice, so the bitwise-resume guarantee carries
+over. After training every rank meets at a barrier, ranks > 0 exit 0, and rank 0
+leaves the process group and selects, saves, evaluates and writes the ledger
+exactly as a one-GPU run does. Only rank 0's exit code carries `quotable`.
 """
 
 from __future__ import annotations
@@ -45,6 +51,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import pathlib
 import sys
 import time
@@ -61,6 +68,8 @@ from processing.render import ManifestIndex                           # noqa: E4
 from processing.sampler import Sampler                                # noqa: E402
 from training.checkpoint import checkpoint_soup                       # noqa: E402
 from training.dataset import SpecDataset, frozen_eval_specs           # noqa: E402
+from training.distributed import (barrier, current, init_from_env,     # noqa: E402
+                                  teardown)
 from training.folds import apply_folds                                # noqa: E402
 from training.loop import check_chain, run_schedule                   # noqa: E402
 from training.manifest import load_manifest                           # noqa: E402
@@ -71,11 +80,131 @@ from training.validate import (FoldResult, aggregate_folds, evaluate,  # noqa: E
 SELECTIONS = ("raw", "ema", "soup")
 
 
+def parse_weights(weights: str | None, frontends) -> dict[str, str]:
+    """`--weights` -> {frontend name: checkpoint dir}.
+
+    Two forms. A bare path applies to every frontend -- the single-trunk form
+    every earlier run used. `name=DIR[,name=DIR...]` names each frontend, which a
+    two-trunk config needs because BEATs and XLS-R read different checkpoints.
+
+    🔴 A bare path on a multi-frontend config is refused rather than broadcast:
+    handing the BEATs directory to XLS-R fails deep inside `transformers` with a
+    missing-config.json error that does not name the flag. A name the config does
+    not have is refused too; a frontend the mapping omits keeps its config value.
+    """
+    if weights is None:
+        return {}
+    names = list(frontends)
+    if "=" not in weights:
+        if len(names) > 1:
+            raise SystemExit(
+                f"--weights {weights!r} is one path but the model has {len(names)} "
+                f"frontends {names}; pass --weights "
+                + ",".join(f"{n}=DIR" for n in names))
+        return {n: weights for n in names}
+    out = {}
+    for part in weights.split(","):
+        name, sep, path = part.partition("=")
+        name, path = name.strip(), path.strip()
+        if not sep or not name or not path:
+            raise SystemExit(f"--weights: cannot parse {part!r}; expected name=DIR")
+        if name not in frontends:
+            raise SystemExit(f"--weights names frontend {name!r}; the model has {names}")
+        if name in out:
+            raise SystemExit(f"--weights names frontend {name!r} twice")
+        out[name] = path
+    return out
+
+
+#: Parameters a run-2 checkpoint may lack: new heads' state that starts fresh.
+#: `.oc_center` is the O1 one-class centre (docs/training/13 O1).
+INIT_MAY_MISS = (".oc_center",)
+
+
+def init_from(model: DeepVoiceNet, path: str) -> None:
+    """Load a finished model's weights (scored.pt: config + state_dict) strictly.
+    The architecture must match; the optimizer and the draw start fresh.
+
+    The one exception is a missing key ending in `INIT_MAY_MISS`, which keeps
+    its fresh init and is logged. Any other missing key, and every unexpected
+    key, still fails."""
+    blob = torch.load(path, map_location="cpu", weights_only=False)
+    res = model.load_state_dict(blob["state_dict"], strict=False)
+    fresh = [k for k in res.missing_keys if k.endswith(INIT_MAY_MISS)]
+    missing = [k for k in res.missing_keys if k not in fresh]
+    if missing or res.unexpected_keys:
+        raise RuntimeError(
+            f"init_from {path}: state dict does not match the model -- missing "
+            f"{missing}, unexpected {res.unexpected_keys}")
+    if fresh:
+        print(f"  left at their fresh init (not in {path}): {fresh}", flush=True)
+    print(f"  initialised from {path}", flush=True)
+
+
+def init_partial(model: DeepVoiceNet, path: str) -> dict[str, list[str]]:
+    """docs/training/13 M3 / 14 §5.1: initialise what fits from a scored.pt of a
+    DIFFERENT architecture (run-2 T7, 300M@12, into 1B@24 + fusion).
+
+    A key loads when its name AND shape match. On top of that:
+
+    * a head (``heads.<name>``) and a frontend (``frontends.<name>``) load
+      all-or-nothing: one missing or mismatched key leaves the WHOLE module at
+      its fresh init -- a head whose first layer is fresh and whose later layers
+      are T7's is neither model. 🔴 For a frontend this is not tidiness: the
+      300M and 1B CNN feature extractors have the SAME shapes (512 channels), so
+      a key-by-key load would put 300M's CNN under 1B's transformer;
+    * everything else that does not fit (the fusion) stays fresh, and is reported;
+    * nothing of BEATs (a ``beats`` frontend) loading is refused: then this is
+      not a partial init of the T7 model at all.
+
+    Run on every rank before the DDP wrap, so every rank holds the same result.
+    Returns {"loaded": [...], "fresh": [...], "unused": [...]} (keys).
+    """
+    from training.distributed import current as current_dist
+
+    src = torch.load(path, map_location="cpu", weights_only=False)["state_dict"]
+    own = model.state_dict()
+    fits = {k for k, v in own.items() if k in src and tuple(src[k].shape) == tuple(v.shape)}
+    for prefix in ([f"heads.{n}." for n in model.heads]
+                   + [f"frontends.{n}." for n in model.frontends]):
+        keys = [k for k in own if k.startswith(prefix)]
+        if not all(k in fits for k in keys):
+            fits -= set(keys)
+    beats = tuple(f"frontends.{n}." for n, fe in model.cfg.frontends.items()
+                  if fe.name == "beats")
+    if not beats or not any(k.startswith(beats) for k in fits):
+        raise RuntimeError(f"init_partial {path}: no BEATs frontend key fits the model; "
+                           f"refusing a partial init that loads nothing of it")
+    res = model.load_state_dict({k: src[k] for k in fits}, strict=False)
+    assert not res.unexpected_keys, res.unexpected_keys
+    report = {"loaded": sorted(fits), "fresh": sorted(set(own) - fits),
+              "unused": sorted(set(src) - fits)}
+    if current_dist().main:
+        def modules(keys):
+            out: dict[str, int] = {}
+            for k in keys:
+                parts = k.split(".")
+                m = ".".join(parts[:2]) if parts[0] in ("heads", "frontends", "fusion") \
+                    else parts[0]
+                out[m] = out.get(m, 0) + 1
+            return ", ".join(f"{m} ({n})" for m, n in sorted(out.items())) or "-"
+        print(f"  partial init from {path}", flush=True)
+        print(f"    loaded: {modules(report['loaded'])}", flush=True)
+        print(f"    fresh:  {modules(report['fresh'])}", flush=True)
+        print(f"    unused from the checkpoint: {modules(report['unused'])}", flush=True)
+        lora = [k for k in report["fresh"] if ".lora_" in k]
+        if lora:
+            print(f"    fresh LoRA tensors: {len(lora)}", flush=True)
+    return report
+
+
 def build_model(model_cfg_path: str, weights: str | None) -> DeepVoiceNet:
     cfg = load_model_config(model_cfg_path)
-    if weights is not None:
+    by_name = parse_weights(weights, cfg.frontends)
+    if by_name:
         cfg = dataclasses.replace(cfg, frontends={
-            k: dataclasses.replace(v, weights=weights) for k, v in cfg.frontends.items()})
+            k: (dataclasses.replace(v, weights=by_name[k]) if k in by_name else v)
+            for k, v in cfg.frontends.items()})
     torch.manual_seed(cfg.seed)
     return DeepVoiceNet(cfg)
 
@@ -121,6 +250,22 @@ def select_weights(model: DeepVoiceNet, results, how: str) -> str:
     return f"soup ({len(paths)} checkpoints from {scope}, uniform average)"
 
 
+def _leave_group() -> bool:
+    """After training: meet, leave the process group, and say whether this
+    process carries on (rank 0, or a one-process run).
+
+    Every rank leaves -- rank 0 too -- so rank 0's evaluation, which can take far
+    longer than any collective timeout, runs as a plain single process with
+    nobody waiting on it (docs/training/14 D4).
+    """
+    d = current()
+    if not d.enabled:
+        return True
+    barrier(d)
+    teardown(d)
+    return d.main
+
+
 def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
     # 06 P8: every sampler is built on the fold VIEW (05 A7); the raw manifest
     # carries no fold and `processing.sampler.Sampler` refuses it.
@@ -152,10 +297,14 @@ def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
                           else run_cfg.loop.checkpoint_every))
 
     model = build_model(args.model, args.weights)
+    if args.init_weights:
+        (init_partial if args.init_partial else init_from)(model, args.init_weights)
     check_chain(model, ds)                      # one shipped chain, once (05 C2)
     t0 = time.time()
     results = run_schedule(model, ds, train_cfg=train_cfg, loop_cfg=loop_cfg,
-                           stages=args.stages)
+                           stages=args.stages, resume_from=args.resume)
+    if not _leave_group():
+        return None                     # rank > 0: rank 0 scores and writes
     print(f"  trained {sum(r.steps for r in results)} step(s) across "
           f"{len(results)} stage(s) in {time.time() - t0:.0f}s", flush=True)
     for r in results:
@@ -209,6 +358,50 @@ def train_fold(fold: int, *, manifest, folds_tbl, args, run_cfg, train_cfg):
                       tripwires=tripwires), caveats, selection
 
 
+def train_all_data(*, manifest, folds_tbl, args, run_cfg, train_cfg) -> str:
+    """docs/training/07 §3: train on TRAIN + VAL of every fold (PROBE stays
+    sealed) and save the selected weights. No validation: nothing is held out,
+    so the fold runs of the same recipe are what say how far to train."""
+    view = apply_folds(manifest, folds_tbl, 0).copy()
+    view.loc[view["slice"] == "val", "slice"] = "train"
+    index = ManifestIndex.from_frame(view)
+    rcfg = run_cfg.render
+    if args.corpus_root is not None:
+        rcfg = dataclasses.replace(rcfg, root=pathlib.Path(args.corpus_root))
+    out = pathlib.Path(args.out) / f"all_data_seed{train_cfg.seed}"
+    print(f"\n=== all data, seed {train_cfg.seed}: "
+          f"{(view['slice'] == 'train').sum()} train rows ===", flush=True)
+    sampler = Sampler(view, run_cfg.draw, slice_="train", fold=None)
+    ds = SpecDataset.from_sampler(sampler, args.draws, index, rcfg,
+                                  seed=train_cfg.seed, ship=run_cfg.ship)
+    loop_cfg = dataclasses.replace(
+        run_cfg.loop, out_dir=out, device=args.device,
+        max_steps=(args.max_steps if args.max_steps is not None
+                   else run_cfg.loop.max_steps),
+        checkpoint_every=(args.checkpoint_every if args.checkpoint_every is not None
+                          else run_cfg.loop.checkpoint_every))
+    model = build_model(args.model, args.weights)
+    if args.init_weights:
+        (init_partial if args.init_partial else init_from)(model, args.init_weights)
+    check_chain(model, ds)
+    t0 = time.time()
+    results = run_schedule(model, ds, train_cfg=train_cfg, loop_cfg=loop_cfg,
+                           stages=args.stages, resume_from=args.resume)
+    if not _leave_group():
+        return None                     # rank > 0: rank 0 selects and writes
+    print(f"  trained {sum(r.steps for r in results)} step(s) in {time.time() - t0:.0f}s",
+          flush=True)
+    how = "soup-all" if (args.select == "soup" and args.soup_all_stages) else args.select
+    selection = select_weights(model, results, how)
+    out.mkdir(parents=True, exist_ok=True)
+    save_checkpoint(model, out / "scored.pt")
+    (out / "selection.txt").write_text(selection + "\n", encoding="utf-8")
+    (out / "processing.json").write_text(json.dumps(dump_processing_config(run_cfg), indent=2),
+                                         encoding="utf-8")
+    print(f"  weights saved: {selection} -> {out / 'scored.pt'}", flush=True)
+    return selection
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -224,8 +417,26 @@ def main() -> int:
     p.add_argument("--processing", default="configs/processing_v1.yaml",
                    help="draw / render / ship / folds / loop (06 P8); the older "
                         "run_*.yaml is the training sampler's and is not read")
-    p.add_argument("--weights", help="frontend checkpoint dir; omit for a stub config")
+    p.add_argument("--weights",
+                   help="frontend checkpoint dir, or name=DIR,name=DIR for a config with "
+                        "several frontends (e.g. audio=.../beats,speech=.../xlsr-300m); "
+                        "omit for a stub config")
     p.add_argument("--folds", default="0", help="comma-separated, or 'all'")
+    p.add_argument("--all-data", action="store_true",
+                   help="train on TRAIN+VAL of every fold (PROBE sealed), no validation; "
+                        "writes <out>/all_data_seed<seed>/ (docs/training/07 §3)")
+    p.add_argument("--seed", type=int, help="override TrainConfig.seed (draw and batch order)")
+    p.add_argument("--init-weights",
+                   help="a scored.pt whose weights initialise the model (run 2 from run 1's "
+                        "soup); a fresh optimizer, schedule and draw -- unlike --resume")
+    p.add_argument("--init-partial", action="store_true",
+                   help="with --init-weights: load only the keys that match by name AND "
+                        "shape; a head with any mismatch stays fresh whole; the speech "
+                        "trunk, its LoRA and the fusion may be fresh (docs/training/13 M3). "
+                        "Off: the strict init")
+    p.add_argument("--resume", help="a training checkpoint (e.g. <out>/fold1/joint-pass0.pt) "
+                        "to continue the first --stages stage from; the run's other "
+                        "arguments must match the ones it was started with")
     p.add_argument("--stages", default=",".join(STAGES),
                    help=f"comma-separated subset of {STAGES}, in order")
     p.add_argument("--select", choices=SELECTIONS, default="raw",
@@ -257,6 +468,17 @@ def main() -> int:
                         "noise for a test")
     p.add_argument("--dry-run", action="store_true", help="print the plan and exit")
     args = p.parse_args()
+    if args.init_partial and not args.init_weights:
+        raise SystemExit("--init-partial needs --init-weights")
+
+    # Under torchrun: join the group first, pin this rank's GPU, and keep the
+    # other ranks' stdout out of the Slurm log (their errors still reach stderr).
+    d = init_from_env(device=args.device)
+    if d.enabled:
+        if args.device.startswith("cuda"):
+            args.device = f"cuda:{d.local_rank}"
+        if not d.main:
+            sys.stdout = open(os.devnull, "w")
 
     corpus = pathlib.Path(args.manifest_dir)
     manifest = load_manifest(corpus / "manifest.parquet")
@@ -270,7 +492,8 @@ def main() -> int:
     if run_cfg.folds.scheme_version is None:
         run_cfg = dataclasses.replace(run_cfg, folds=dataclasses.replace(
             run_cfg.folds, scheme_version=str(manifest["scheme_version"].iloc[0])))
-    for field, value in (("epochs", args.epochs), ("batch_size", args.batch_size)):
+    for field, value in (("epochs", args.epochs), ("batch_size", args.batch_size),
+                         ("seed", args.seed)):
         if value is not None:
             train_cfg = dataclasses.replace(train_cfg, **{field: value})
 
@@ -283,6 +506,13 @@ def main() -> int:
     missing = [f for f in wanted if f not in available]
     if missing:
         raise SystemExit(f"fold(s) {missing} not in folds.parquet (has {available})")
+    if d.enabled and len(args.stages) != 1:
+        # one DDP wrapper per stage call; the runs here use `--stages joint`
+        raise SystemExit(f"under DDP one invocation trains one stage; got {args.stages}")
+    if d.enabled and not args.all_data and len(wanted) != 1:
+        # after the first fold every rank has left the process group
+        raise SystemExit(f"under DDP one invocation trains one fold or --all-data; "
+                         f"got folds {wanted}")
 
     print(f"corpus   {corpus}  ({len(manifest)} rows, folds {available}, "
           f"scheme {run_cfg.folds.scheme_version})")
@@ -293,13 +523,26 @@ def main() -> int:
     if args.max_steps:
         print(f"⚠️  max_steps={args.max_steps}: every stage is truncated and the run is "
               f"NOT QUOTABLE")
+    if d.enabled:
+        print(f"ddp      world {d.world} x batch {train_cfg.batch_size} x accum "
+              f"{run_cfg.loop.grad_accum} = global batch "
+              f"{d.world * train_cfg.batch_size * run_cfg.loop.grad_accum}")
     if args.dry_run:
+        teardown(d)
+        return 0
+
+    if args.all_data:
+        train_all_data(manifest=manifest, folds_tbl=folds_tbl, args=args,
+                       run_cfg=run_cfg, train_cfg=train_cfg)
         return 0
 
     results, caveats, selections = [], [], set()
     for fold in wanted:
-        fr, cav, sel = train_fold(fold, manifest=manifest, folds_tbl=folds_tbl,
-                                  args=args, run_cfg=run_cfg, train_cfg=train_cfg)
+        ret = train_fold(fold, manifest=manifest, folds_tbl=folds_tbl,
+                         args=args, run_cfg=run_cfg, train_cfg=train_cfg)
+        if ret is None:                  # a DDP rank > 0 after training
+            return 0
+        fr, cav, sel = ret
         results.append(fr)
         caveats += cav
         selections.add(sel)

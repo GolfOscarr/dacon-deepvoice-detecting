@@ -36,7 +36,7 @@
 # is wekafs and shared; /home is shared EFS but slow. The preflight below refuses to
 # start rather than fail halfway through a transfer.
 
-#SBATCH --job-name=dacon-train
+#SBATCH --job-name=eval-hyeonseop
 #SBATCH --partition=normal
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8

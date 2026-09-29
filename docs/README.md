@@ -34,7 +34,18 @@ Working documentation for **DACON 236749 — 딥보이스 범죄 대응을 위�
 ⚠️ risk or caveat · 🔴 decision-changing · ❌ forbidden by competition rules ·
 🔷 our own inference, untested (used in [architecture/](architecture/README.md))
 
-## Status
+## Status (2026-09-29, end of competition)
+
+| | |
+|---|---|
+| Data | ✅ built through strategy-v6c (652,165 rows) — [training/15](training/15-data-plan.md), [training/17](training/17-final-runs.md) §4 |
+| Training | ✅ 300M runs 1–3, XLS-R-1B DDP main run, fine-tunes A/C (D stopped) — [training/16](training/16-lessons-learned.md), [training/17](training/17-final-runs.md) |
+| Best LB | **0.86669** (`ens-1b-v6bA8-v6cC2-max3`, ensemble of fine-tunes A and C; [training/17](training/17-final-runs.md) §2, §6) |
+| Handoffs | [HANDOFF_TRAINING](HANDOFF_TRAINING.md), [HANDOFF_RUN3](HANDOFF_RUN3.md), [HANDOFF_RUN4](HANDOFF_RUN4.md) (historical snapshots) |
+
+The planning-phase status table below is kept for history.
+
+### Planning-phase status (2026-09-08)
 
 | | |
 |---|---|

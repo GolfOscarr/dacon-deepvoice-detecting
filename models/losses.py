@@ -21,6 +21,9 @@ defect (see models.outputs).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Mapping
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -28,8 +31,8 @@ from torch import Tensor
 from models.config import LossConfig, ModelConfig
 from models.heads import frame_max
 
-__all__ = ["TRAIN_CONSUMED_ELSEWHERE", "TARGET_FOR_COLUMN", "multitask_loss",
-           "pairwise_ranking_loss"]
+__all__ = ["TRAIN_CONSUMED_ELSEWHERE", "TARGET_FOR_COLUMN", "GlobalNorm", "multitask_loss",
+           "oc_softmax_loss", "pairwise_ranking_loss", "parts_to_floats"]
 
 #: TrainConfig fields the loss deliberately does not read, with who owns them.
 #: ⚠️ This exists because the ModelConfig-only version of the ignored-field guard
@@ -100,6 +103,42 @@ def _masked_mean(per_sample: Tensor, mask: Tensor | None) -> Tensor:
     return (per_sample * mask).sum() / denom
 
 
+@dataclass(frozen=True)
+class GlobalNorm:
+    """How to normalise a loss computed on one slice of a larger batch
+    (docs/training/14 D3, D5).
+
+    Under DDP each rank sees ``B`` of the global batch, and with gradient
+    accumulation each forward sees ``B`` of the rank's ``B x accum``. DDP then
+    *averages* the ranks' gradients and accumulation *sums* the micro-batches'.
+    For the result to be the single-process gradient on the whole global batch:
+
+    * a masked head's term is ``sum(mask * loss) * world / N`` with ``N`` the
+      present count over the **whole global batch** (all ranks, all
+      micro-batches) -- the local count would weight a rare component by how it
+      happened to fall across ranks, and a rank with none still counts in the
+      average;
+    * an unmasked head's mean is divided by ``accum`` (and needs nothing for
+      ``world``: every slice has the same ``B``).
+
+    ``counts`` maps each ``masked_by`` target key to that global count (a 0-d
+    tensor); ``n_total`` is the global batch size, for the ``p_c`` diagnostic.
+    """
+
+    counts: Mapping[str, Tensor]
+    n_total: int
+    world: int = 1
+    accum: int = 1
+
+
+def _global_masked_mean(per_sample: Tensor, mask: Tensor, count: Tensor,
+                        world: int) -> Tensor:
+    if count == 0:
+        # Nowhere in the global batch: contribute nothing, keep the graph (A6).
+        return per_sample.sum() * 0.0
+    return (per_sample * mask.to(per_sample.dtype)).sum() * world / count
+
+
 def pairwise_ranking_loss(scores: Tensor, labels: Tensor, mask: Tensor | None = None) -> Tensor:
     """RankNet-style logistic loss over positive/negative pairs.
 
@@ -131,6 +170,24 @@ def pairwise_ranking_loss(scores: Tensor, labels: Tensor, mask: Tensor | None = 
     return F.softplus(-(pos[:, None] - neg[None, :])).mean()
 
 
+def oc_softmax_loss(embedding: Tensor, center: Tensor, labels: Tensor, alpha: float,
+                    m_real: float, m_fake: float) -> Tensor:
+    """Per-sample OC-Softmax (Zhang, Jiang & Duan 2021), shape (B,).
+
+    ``s = cos(w, x)`` with both L2-normalised; real (label 0) pays
+    ``softplus(alpha * (m_real - s))``, fake pays ``softplus(alpha * (s - m_fake))``.
+    Real is the compact class: an unseen fake only has to be "not real"
+    (docs/training/13 O1). Computed in fp32 whatever the autocast dtype -- at
+    alpha=20 a bf16 cosine is off by up to ~0.08 in the exponent.
+    """
+    x = F.normalize(embedding.float(), dim=-1)
+    w = F.normalize(center.float(), dim=-1)
+    s = x @ w
+    fake = labels.float() > 0.5
+    margin = torch.where(fake, s - m_fake, m_real - s)
+    return F.softplus(alpha * margin)
+
+
 def multitask_loss(
     outputs: dict,
     targets: dict[str, Tensor],
@@ -138,6 +195,8 @@ def multitask_loss(
     loss_cfg: LossConfig,
     frame_masks: dict[str, Tensor] | None = None,
     teacher_emb: Tensor | None = None,
+    tensor_parts: bool = False,
+    norm: GlobalNorm | None = None,
 ) -> tuple[Tensor, dict[str, float]]:
     """Total loss and a per-part breakdown for the experiment ledger.
 
@@ -149,18 +208,41 @@ def multitask_loss(
     not loss terms**: ``<branch>/p_c`` is the fraction of the batch carrying that
     branch's component and ``<branch>/w_eff`` the `w_c / p_c` of docs/training/02
     §4. Averaging them over a pass, as `training.loop._mean_parts` does, is the
-    intended reading.
+    intended reading. ``<branch>/oc`` (heads with ``oc: true`` only) is the raw
+    OC-Softmax loss; ``oc_weight`` times it is inside ``total``, not ``<branch>``.
+
+    ``tensor_parts=True`` leaves every part a detached 0-d tensor on the loss's
+    device, for `parts_to_floats` to convert later: each ``float(...)`` here is
+    a device sync, eleven per training step, and the loop only reads the parts
+    every `log_every` steps. The converted values are the same floats.
+
+    ``norm`` (DDP / gradient accumulation, `GlobalNorm`): the returned total is
+    this slice's share of the global-batch loss, so that DDP's average plus the
+    accumulated sum is the single-process gradient. The **parts** are rescaled to
+    read like single-process values: their mean over every slice of a global
+    batch is that batch's loss. ``None`` is bitwise the historical path.
     """
+    if norm is not None and loss_cfg.ranking_weight:
+        raise ValueError(
+            "ranking_weight > 0 with a GlobalNorm: pairwise_ranking_loss only sees the "
+            "pairs inside one slice, so it is not the global-batch loss under DDP / "
+            "accumulation (docs/training/14 D3)")
+    if norm is not None and teacher_emb is not None:
+        raise ValueError("distillation under a GlobalNorm is not normalised globally; "
+                         "no DDP run distils (docs/training/14)")
     missing = [k for k in TARGET_FOR_COLUMN.values() if k not in targets]
     if missing:
         raise KeyError(f"multitask_loss: missing target(s) {missing}")
 
     total = None
+    log_total = None                    # only under `norm`: the rescaled total
     parts: dict[str, float] = {}
+    scale = 1 if norm is None else norm.accum     # parts -> single-process reading
 
     for branch, br_cfg in cfg.branches.items():
         target_key = TARGET_FOR_COLUMN[br_cfg.column]
         y = targets[target_key].float()
+        y_hard = y                      # the OC term takes no label smoothing
         if loss_cfg.label_smoothing:
             eps = loss_cfg.label_smoothing
             y = y * (1 - eps) + 0.5 * eps
@@ -181,7 +263,13 @@ def multitask_loss(
         per_sample = cw * clip_bce + (1.0 - cw) * frame_bce
 
         sample_mask = None if br_cfg.masked_by is None else targets[br_cfg.masked_by].bool()
-        head_loss = _masked_mean(per_sample, sample_mask)
+        if norm is None:
+            head_loss = _masked_mean(per_sample, sample_mask)
+        elif sample_mask is None:
+            head_loss = per_sample.mean() / norm.accum
+        else:
+            head_loss = _global_masked_mean(per_sample, sample_mask,
+                                            norm.counts[br_cfg.masked_by], norm.world)
 
         if loss_cfg.ranking_weight:
             # 🔴 Rank the *blended* logit -- the quantity inference actually ranks
@@ -206,7 +294,9 @@ def multitask_loss(
         # this reads them as required so the two cannot drift apart.
         weight = loss_cfg.weights[WEIGHT_KEY_FOR_COLUMN[br_cfg.column]]
         contribution = weight * head_loss
-        parts[branch] = float(head_loss.detach())
+        logged = head_loss.detach() * scale if norm is not None else head_loss.detach()
+        log_contribution = weight * logged
+        parts[branch] = logged if tensor_parts else float(logged)
         # 🔴 The standing diagnostic docs/training/02 §4 commits to. `_masked_mean`
         # divides by the present-count, so the per-sample weight a masked head
         # exerts on the shared trunk is `w_c / p_c`, not `w_c` -- and §4 says
@@ -214,10 +304,49 @@ def multitask_loss(
         # nowhere, which made T2 unreadable as specified. `p_c` is 1.0 for an
         # unmasked head, and `w_eff` is 0 when the batch carries the component
         # nowhere, because then the head contributes nothing at all.
-        p_c = 1.0 if sample_mask is None else float(sample_mask.float().mean())
-        parts[f"{branch}/p_c"] = p_c
-        parts[f"{branch}/w_eff"] = weight / p_c if p_c else 0.0
+        if norm is not None and sample_mask is not None:
+            # the global batch's fraction, not this slice's
+            p_c64 = norm.counts[br_cfg.masked_by].double() / norm.n_total
+            parts[f"{branch}/p_c"] = p_c64 if tensor_parts else float(p_c64)
+            w64 = (torch.where(p_c64 > 0, torch.full_like(p_c64, weight) / p_c64,
+                               torch.zeros_like(p_c64)))
+            parts[f"{branch}/w_eff"] = w64 if tensor_parts else float(w64)
+        elif tensor_parts and sample_mask is not None:
+            # float64 on the device: the same IEEE division as the float path.
+            p_c64 = sample_mask.float().mean().double()
+            parts[f"{branch}/p_c"] = p_c64
+            parts[f"{branch}/w_eff"] = torch.where(
+                p_c64 > 0, torch.full_like(p_c64, weight) / p_c64, torch.zeros_like(p_c64))
+        else:
+            p_c = 1.0 if sample_mask is None else float(sample_mask.float().mean())
+            parts[f"{branch}/p_c"] = p_c
+            parts[f"{branch}/w_eff"] = weight / p_c if p_c else 0.0
+        # O1: only for a head built with `oc`, so a flag-off model adds no op to
+        # the graph and its total is bitwise run 2's. At oc_weight 0 the term is
+        # still added (x 0) so `oc_center` stays in the graph -- DDP deadlocks on
+        # unused params. Same mask as the BCE term; logged raw (unweighted).
+        if br_cfg.head.oc:
+            if "embedding" not in out or "oc_center" not in out:
+                raise KeyError(
+                    f"multitask_loss: branch {branch!r} has head.oc but its output "
+                    "carries no embedding / oc_center")
+            oc_per = oc_softmax_loss(
+                out["embedding"], out["oc_center"], y_hard, loss_cfg.oc_alpha,
+                loss_cfg.oc_m_real, loss_cfg.oc_m_fake)
+            if norm is None:
+                oc = _masked_mean(oc_per, sample_mask)
+            elif sample_mask is None:
+                oc = oc_per.mean() / norm.accum
+            else:
+                oc = _global_masked_mean(oc_per, sample_mask,
+                                         norm.counts[br_cfg.masked_by], norm.world)
+            contribution = contribution + loss_cfg.oc_weight * oc
+            oc_logged = oc.detach() * scale if norm is not None else oc.detach()
+            log_contribution = log_contribution + loss_cfg.oc_weight * oc_logged
+            parts[f"{branch}/oc"] = oc_logged if tensor_parts else float(oc_logged)
         total = contribution if total is None else total + contribution
+        log_total = (log_contribution if log_total is None
+                     else log_total + log_contribution)
 
     if teacher_emb is not None:
         aux = outputs.get("_aux", {})
@@ -230,8 +359,20 @@ def multitask_loss(
         # not here (docs/architecture/06 §3 -- and see 09 B9, which flags that a
         # frozen frontend weakens the mechanism this borrows).
         distill = F.mse_loss(aux["distill_emb"], teacher_emb.detach())
-        parts["distill"] = float(distill.detach())
+        parts["distill"] = distill.detach() if tensor_parts else float(distill.detach())
         total = total + loss_cfg.distill_weight * distill
 
-    parts["total"] = float(total.detach())
+    shown = total.detach() if norm is None else log_total
+    parts["total"] = shown if tensor_parts else float(shown)
     return total, parts
+
+
+def parts_to_floats(parts: list[dict]) -> list[dict[str, float]]:
+    """`multitask_loss(..., tensor_parts=True)` parts -> plain floats, with one
+    device sync for the whole list rather than one per value."""
+    tensors = [v for p in parts for v in p.values() if isinstance(v, Tensor)]
+    if not tensors:
+        return [dict(p) for p in parts]
+    values = iter(torch.stack([t.double() for t in tensors]).tolist())
+    return [{k: (next(values) if isinstance(v, Tensor) else v) for k, v in p.items()}
+            for p in parts]

@@ -15,19 +15,22 @@ and independently fake, leaving a hard switch undefined.
 
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Mapping
 from pathlib import Path
 
 import torch
 from torch import Tensor, nn
 
 from models.audio import bandpass
-from models.config import ModelConfig, dump_config, _model_from_dict
+from models.config import ModelConfig, dump_config, _model_from_dict, validate_model_config
 from models.frontends import build_frontend
 from models.heads import SEDHead
 from models.outputs import branch_logit, to_probability
 from models.utils import align_time
 
-__all__ = ["DeepVoiceNet", "load_checkpoint", "save_checkpoint"]
+__all__ = ["DeepVoiceNet", "LayerFusion", "load_checkpoint", "save_checkpoint",
+           "shipped_weights", "with_file_mode"]
 
 #: Config fields the *model* deliberately does not read, with who owns them.
 #: tests/test_model.py asserts that every other field is read somewhere, so a
@@ -54,6 +57,84 @@ CONSUMED_ELSEWHERE = {
 }
 
 
+_LN_EPS = 1e-5
+
+
+def _norm(h: Tensor) -> tuple[Tensor, Tensor]:
+    """Non-affine layer norm over the last dim, in at least float32: (y, 1/sigma)."""
+    h = h.to(torch.promote_types(h.dtype, torch.float32))
+    mu = h.mean(-1, keepdim=True)
+    rstd = torch.rsqrt(h.var(-1, unbiased=False, keepdim=True) + _LN_EPS)
+    return (h - mu) * rstd, rstd
+
+
+class _WeightedLayerSum(torch.autograd.Function):
+    """``sum_l p[l] * LN(h_l)``, in at least float32, streaming in both directions.
+
+    Autograd over the plain expression would keep all L normalised layers --
+    L x (B, T, D), 24 x 1280 wide on XLS-R-1B -- alive from the forward to the
+    backward. The backward instead recomputes one layer's norm at a time from
+    ``h_l``, which the encoder keeps for its own backward anyway, so the fusion
+    adds O(one layer) of memory rather than O(L).
+    """
+
+    @staticmethod
+    def forward(ctx, p: Tensor, *hs: Tensor) -> Tensor:
+        out = None
+        for i, h in enumerate(hs):
+            y = _norm(h)[0] * p[i]
+            out = y if out is None else out + y
+        ctx.save_for_backward(p, *hs)
+        return out
+
+    @staticmethod
+    def backward(ctx, g: Tensor):
+        p, *hs = ctx.saved_tensors
+        g = g.to(torch.promote_types(g.dtype, torch.float32))
+        grad_p = torch.empty_like(p) if ctx.needs_input_grad[0] else None
+        grads = []
+        for i, h in enumerate(hs):
+            y, rstd = _norm(h)
+            if grad_p is not None:
+                grad_p[i] = (g * y).sum()
+            if ctx.needs_input_grad[1 + i]:
+                dy = g * p[i]
+                dx = rstd * (dy - dy.mean(-1, keepdim=True)
+                             - y * (dy * y).mean(-1, keepdim=True))
+                grads.append(dx.to(h.dtype))
+            else:
+                grads.append(None)
+        return (grad_p, *grads)
+
+
+class LayerFusion(nn.Module):
+    """docs/training/13 M2: per (branch, fused frontend), a softmax over the
+    frontend's kept layers, applied to the layer-normalised layer outputs.
+
+    Parameters are ``fusion.<branch>.<source>``, a (L,) logit vector at zero:
+    a uniform average at init. Every branch reading a fused source applies its
+    own, so every parameter here is used in every forward (DDP runs with
+    ``find_unused_parameters=False``).
+    """
+
+    def __init__(self, pairs: dict[str, dict[str, int]]):
+        super().__init__()
+        self.logits = nn.ModuleDict({
+            branch: nn.ParameterDict({src: nn.Parameter(torch.zeros(n))
+                                      for src, n in srcs.items()})
+            for branch, srcs in pairs.items()})
+
+    def weights(self, branch: str, source: str) -> Tensor:
+        return torch.softmax(self.logits[branch][source].float(), dim=0)
+
+    def forward(self, branch: str, source: str, layers: tuple[Tensor, ...]) -> Tensor:
+        p = self.weights(branch, source)
+        if len(layers) != p.numel():
+            raise ValueError(f"fusion {branch}.{source}: {p.numel()} weights for "
+                             f"{len(layers)} layers")
+        return _WeightedLayerSum.apply(p, *layers)
+
+
 class DeepVoiceNet(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
@@ -75,6 +156,14 @@ class DeepVoiceNet(nn.Module):
             in_dim = sum(cfg.frontends[s].output_dim for s in br.sources)
             self.heads[name] = SEDHead(in_dim, br.head)
 
+        # 13 M2. A TOP-LEVEL module, not under `frontends`: the frontend hold
+        # (LoopConfig.frontend_hold_steps) must not freeze it.
+        pairs = {name: {s: self.frontends[s].n_layers for s in br.sources
+                        if cfg.frontends[s].fusion.kind != "none"}
+                 for name, br in cfg.branches.items()}
+        pairs = {k: v for k, v in pairs.items() if v}
+        self.fusion = LayerFusion(pairs) if pairs else None
+
         # Training-only appendages. Both are deleted before packaging, so neither
         # may contribute to a submission column.
         self.distill_head = None
@@ -91,6 +180,11 @@ class DeepVoiceNet(nn.Module):
     def _branch_input(self, name: str, encoded: dict[str, tuple[Tensor, Tensor]]):
         """Gather a branch's sources onto one time base and concatenate."""
         br = self.cfg.branches[name]
+        if self.fusion is not None and name in self.fusion.logits:
+            # a fused source's features are its layer outputs: this branch's mix
+            encoded = {s: ((self.fusion(name, s, encoded[s][0]), encoded[s][1])
+                           if s in self.fusion.logits[name] else encoded[s])
+                       for s in br.sources}
         if len(br.sources) == 1:
             return encoded[br.sources[0]]
 
@@ -153,7 +247,7 @@ class DeepVoiceNet(nn.Module):
         """The five submission columns, as float64 probabilities.
 
         Honours ``file_head.mode``. G3 records the FILE construction as an open
-        question with no prior art, so all three must actually differ -- an
+        question with no prior art, so all four must actually differ -- an
         earlier version validated the field and then always produced `learned`,
         which would have made a three-way comparison return one answer.
         """
@@ -174,6 +268,11 @@ class DeepVoiceNet(nn.Module):
                 probs["FILE_FAKE_PROB"] = (1.0 - (1.0 - v) * (1.0 - m)).clamp(eps, 1.0 - eps)
             elif mode == "max":
                 probs["FILE_FAKE_PROB"] = torch.maximum(v, m).clamp(eps, 1.0 - eps)
+            elif mode == "max3":
+                # 13 O5 / E9: the learned FILE head, overruled by either component
+                # head when that one is surer. Elementwise, so still per file.
+                probs["FILE_FAKE_PROB"] = torch.maximum(
+                    probs["FILE_FAKE_PROB"], torch.maximum(v, m)).clamp(eps, 1.0 - eps)
             else:
                 raise ValueError(f"unknown file_head.mode {mode!r}")
         return probs
@@ -203,12 +302,60 @@ def save_checkpoint(model: DeepVoiceNet, path: str | Path) -> None:
                 "state_dict": model.state_dict()}, Path(path))
 
 
-def load_checkpoint(path: str | Path, map_location="cpu") -> DeepVoiceNet:
+def with_file_mode(model: DeepVoiceNet, mode: str) -> DeepVoiceNet:
+    """The same module with ``cfg.file_head.mode`` replaced (the config is frozen).
+
+    Only `submission_probs` reads the mode, so no parameter or buffer changes.
+    """
+    cfg = dataclasses.replace(
+        model.cfg, file_head=dataclasses.replace(model.cfg.file_head, mode=mode))
+    validate_model_config(cfg)
+    model.cfg = cfg
+    return model
+
+
+def shipped_weights(model_dir: str | Path) -> dict[str, str] | None:
+    """``model_dir/weights/<frontend>/`` -> {frontend: dir}, or None if absent.
+
+    The layout `script.py` ships: one directory per pretrained frontend, holding
+    what that frontend needs to *construct* (the BEATs ``.pt``; the XLS-R
+    snapshot with ``config.json``). Keys are frontend names from the config.
+    """
+    root = Path(model_dir) / "weights"
+    if not root.is_dir():
+        return None
+    return {p.name: str(p) for p in sorted(root.iterdir()) if p.is_dir()} or None
+
+
+def load_checkpoint(path: str | Path, map_location="cpu",
+                    weights: Mapping[str, str | Path] | None = None) -> DeepVoiceNet:
+    """Rebuild from the stored config, then load the state dict strictly.
+
+    ``weights`` maps frontend name -> pretrained checkpoint directory, replacing
+    the stored ``frontends.<name>.weights``. ⚠️ A pretrained frontend (BEATs,
+    XLS-R) reads its checkpoint at *construction* for the architecture, so the
+    stored path -- the training machine's absolute /data/... path -- must
+    resolve wherever this runs. On the offline test server it will not;
+    `script.py` passes `shipped_weights(model_dir)`. Every weight is then
+    overwritten by the strict load below, so which copy of the pretrained file
+    is read changes no number -- a test asserts that bitwise.
+    """
+    import dataclasses
+
     blob = torch.load(Path(path), map_location=map_location, weights_only=False)
     if "config" not in blob or "state_dict" not in blob:
         raise ValueError(
             f"{path}: not a DeepVoiceNet checkpoint (expected 'config' and 'state_dict')")
-    model = DeepVoiceNet(_model_from_dict(blob["config"]))
+    cfg = _model_from_dict(blob["config"])
+    if weights:
+        unknown = sorted(set(weights) - set(cfg.frontends))
+        if unknown:
+            raise ValueError(f"weights names frontends {unknown} not in the checkpoint's "
+                             f"config {sorted(cfg.frontends)}")
+        cfg = dataclasses.replace(cfg, frontends={
+            k: (dataclasses.replace(v, weights=str(weights[k])) if k in weights else v)
+            for k, v in cfg.frontends.items()})
+    model = DeepVoiceNet(cfg)
     # strict=True raises on any missing or unexpected key. That is the point: the
     # config was rebuilt from the same blob, so a mismatch means the checkpoint is
     # not what it claims to be rather than that the architecture drifted.

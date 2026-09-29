@@ -50,6 +50,27 @@ def align_time(
     device = feats.device
     n_src = mask.sum(dim=-1).clamp(min=1)                          # (B,) valid source frames
 
+    # docs/training/07 §2: an integer down-ratio (XLS-R 50 fps -> BEATs 6.25 fps
+    # is 8) averages the source frames each target frame spans, over the
+    # sample's own valid frames only, instead of sampling one frame in eight.
+    ratio = fps_src / fps_tgt
+    r = int(round(ratio))
+    if r > 1 and abs(ratio - r) < 1e-9:
+        width = target_frames * r
+        valid = mask.to(feats.dtype)
+        x = feats * valid.unsqueeze(-1)
+        if t_src < width:
+            x = torch.nn.functional.pad(x, (0, 0, 0, width - t_src))
+            valid = torch.nn.functional.pad(valid, (0, width - t_src))
+        x, valid = x[:, :width], valid[:, :width]
+        num = x.reshape(b, target_frames, r, d).sum(dim=2)
+        den = valid.reshape(b, target_frames, r).sum(dim=2)
+        pooled = num / den.clamp(min=1.0).unsqueeze(-1)
+        valid_tgt = torch.ceil(n_src.to(feats.dtype) / r).long()
+        pooled_mask = (torch.arange(target_frames, device=device).unsqueeze(0)
+                       < valid_tgt.clamp(max=target_frames).unsqueeze(-1))
+        return pooled, pooled_mask
+
     # Absolute-time centres of the target frames, expressed in source indices.
     pos = (torch.arange(target_frames, device=device, dtype=feats.dtype) + 0.5) \
         * (fps_src / fps_tgt) - 0.5

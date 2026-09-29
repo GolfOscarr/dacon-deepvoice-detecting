@@ -61,6 +61,7 @@ import pandas as pd
 from processing.config import DrawConfig
 from training.manifest import POOL_IS_FAKE, ROLE_POOLS
 from training.registries import AUGMENT
+from training.render import PHONE_CODECS
 from training.spec import CELL_TABLE, ComponentDraw, SampleSpec, spec_rng
 
 __all__ = ["Sampler", "bucket_keys"]
@@ -153,6 +154,27 @@ class Sampler:
                 f"than component_floor_s={self.cfg.component_floor_s}s")
         comp = usable
 
+        # docs/training/07 D-d: a language keeps its share only when this view
+        # has it on BOTH voice sides. Measured on strategy-v3: CFAD's Chinese
+        # fakes are sealed in PROBE with their pair atoms, so every train view
+        # had Chinese as real only (20 % of real draws, 0 % of fake) -- per-side
+        # renormalisation cannot fix a language one side lacks. `other` is the
+        # exception: it exists for MLAAD's generator diversity, fake side only.
+        self._shares = None
+        if self.cfg.lang_shares is not None:
+            voice = comp[comp.pool.isin(ROLE_POOLS["voice"])]
+            if "lang" not in voice.columns:
+                raise ValueError("draw.lang_shares is set but the manifest has no `lang` column")
+            fake_side = voice.pool.map(POOL_IS_FAKE).astype(bool)
+            listed = [k for k, _ in self.cfg.lang_shares]
+            key = voice["lang"].fillna("other").astype(str)
+            key = key.where(key.isin(listed), "other")
+            both = set(key[fake_side]) & set(key[~fake_side])
+            self._shares = {k: (v if (k in both or k == "other") else 0.0)
+                            for k, v in self.cfg.lang_shares}
+            self.lang_shares_dropped = sorted(k for k, v in self.cfg.lang_shares
+                                              if v > 0 and self._shares[k] == 0)
+
         self._pools: dict[tuple[str, bool], _Pool] = {}
         for role, pools in ROLE_POOLS.items():
             sub = comp[comp.pool.isin(pools)]
@@ -181,6 +203,10 @@ class Sampler:
     # -- pools and DOSS ------------------------------------------------------ #
 
     def _make_pool(self, rows: pd.DataFrame, role: str, fake: bool) -> _Pool:
+        if role == "voice" and self.cfg.lang_shares is not None and not rows.empty:
+            # share 0 removes the language outright: the bucket fallback draws
+            # from the whole pool, so a zero weight alone would still leak it
+            rows = rows[self._lang_of(rows).map(self._shares).gt(0)]
         if rows.empty:
             empty = np.empty(0, dtype=int)
             return _Pool(np.empty(0, dtype=object), np.empty(0), empty, np.empty(0),
@@ -188,6 +214,8 @@ class Sampler:
         # 06 D2: a real row's domain is its publisher atom, capped like a generator
         domain = rows["domain_key"].where(rows["domain_key"].notna(), rows["source_name"])
         weights = self._doss_weights(domain)
+        if role == "voice" and self.cfg.lang_shares is not None:
+            weights = self._lang_balanced(rows, weights)
         codes, _ = pd.factorize(bucket_keys(rows, role, fake), sort=True)
         flagged = (rows["noise_has_speech"].fillna(False).astype(bool).to_numpy()
                    if role == "noise" and "noise_has_speech" in rows.columns
@@ -201,6 +229,29 @@ class Sampler:
         return _Pool(rows["file_id"].astype(str).to_numpy(dtype=object), duration,
                      codes.astype(int), weights, flagged, members, (order, duration[order]))
 
+    def _lang_of(self, rows: pd.DataFrame) -> pd.Series:
+        """Each row's language key: its `lang`, or `other` when unlisted."""
+        if "lang" not in rows.columns:
+            raise ValueError("draw.lang_shares is set but the manifest has no `lang` column")
+        listed = [k for k, _ in self.cfg.lang_shares]
+        lang = rows["lang"].fillna("other").astype(str)
+        return lang.where(lang.isin(listed), "other")
+
+    def _lang_balanced(self, rows: pd.DataFrame, weights: np.ndarray) -> np.ndarray:
+        """docs/training/07 D-d: rescale so each language holds its configured
+        share of the pool, after the DOSS cap and within it."""
+        shares = self._shares
+        lang = self._lang_of(rows).to_numpy()
+        out = np.zeros_like(weights)
+        for code in np.unique(lang):
+            m = lang == code
+            mass = weights[m].sum()
+            if mass > 0:
+                out[m] = weights[m] / mass * shares.get(code, 0.0)
+        if out.sum() <= 0:
+            raise ValueError("lang_shares gives every language of a voice pool share 0")
+        return out / out.sum()
+
     def _doss_weights(self, domain: pd.Series) -> np.ndarray:
         """``w(file) = min(count(domain), cap) / count(domain)``, normalised."""
         if domain.empty:
@@ -208,6 +259,16 @@ class Sampler:
         domain = domain.fillna("__real__")
         counts = domain.map(domain.value_counts())
         w = np.minimum(counts, self.cfg.domain_cap) / counts
+        if self.cfg.domain_weights is not None:
+            # docs/training/10 F1: the longest matching prefix sets the multiplier
+            mult = pd.Series(1.0, index=domain.index)
+            best = pd.Series(-1, index=domain.index)
+            for prefix, m in self.cfg.domain_weights:
+                hit = domain.str.startswith(prefix) & (best < len(prefix))
+                mult[hit], best[hit] = m, len(prefix)
+            w = w * mult
+            if w.sum() <= 0:
+                raise ValueError("draw.domain_weights gives every domain of a pool weight 0")
         return (w / w.sum()).to_numpy(dtype=float)
 
     # -- DRAW-6 / DRAW-7 ----------------------------------------------------- #
@@ -254,7 +315,16 @@ class Sampler:
             out["bitrate"] = int(rate)
         out["channels"] = pick(menu.channels)
         telephone = pick(menu.telephone)
-        if telephone != "none":
+        codec, _, rate = telephone.partition("_")
+        if codec in PHONE_CODECS:
+            # docs/training/15 N4: a codec at the telephone rate (gsm) rides
+            # the 8 kHz leg; a wideband one (opus) codes at the render rate
+            if PHONE_CODECS[codec][0] == int(menu.telephone_hz):
+                out["telephone_hz"] = int(menu.telephone_hz)
+            out["phone_codec"] = codec
+            if rate:
+                out["phone_bitrate"] = int(rate)
+        elif telephone != "none":
             out["telephone_hz"] = int(menu.telephone_hz)
             if telephone != "plain":
                 out["companding"] = telephone

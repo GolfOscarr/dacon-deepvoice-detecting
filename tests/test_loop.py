@@ -57,6 +57,16 @@ _KNOB_PROBES: dict[str, tuple] = {
     "grad_clip": (0.0, 1e-3, "weights"),
     "checkpoint_every": (0, 1, "checkpoints"),
     "max_steps": (None, 1, "steps"),
+    "lr_schedule": ("constant", "cosine", "weights"),
+    # read only under the cosine schedule, so probed inside it
+    "warmup_steps": (0, 3, "weights", {"lr_schedule": "cosine"}),
+    "min_lr_ratio": (0.0, 0.9, "weights", {"lr_schedule": "cosine"}),
+    "frontend_lr_scale": (1.0, 0.01, "weights"),
+    "log_every": (0, 1, "log"),
+    # docs/training/14 D5: a global batch of 4 instead of 2 halves the steps
+    "grad_accum": (1, 2, "steps"),
+    # docs/training/14 D6: the stub's learnable GeM exponent is a frontend param
+    "frontend_hold_steps": (0, 2, "weights"),
 }
 
 #: `out_dir` is where the probe writes rather than something it can vary against
@@ -68,6 +78,13 @@ _OUT_DIR = "out_dir"
 _NOT_VARIABLE_ON_THIS_HARDWARE = {
     "device": "the test hardware has one device; a cuda probe would skip rather "
               "than check, which is the failure mode this table exists to avoid",
+    "grad_checkpointing": "must NOT move the run (a recompute); the stub has no "
+                          "transformer layers, and tests/test_grad_checkpointing.py "
+                          "asserts equal outputs and gradients on real layers",
+    "render_workers": "must NOT move the run: tests/test_loop_pool.py asserts pooled "
+                      "rendering trains the inline model bitwise",
+    "render_on_ht_siblings": "must NOT move the run: only where the render workers "
+                             "run; tests/test_loop_pool.py asserts it bitwise",
 }
 
 
@@ -83,6 +100,7 @@ def _probe_run(model_cfg, corpus, out, **overrides):
         "ema": result.ema is not None,
         "checkpoints": tuple(str(c.path) for c in result.checkpoints),
         "steps": (result.steps, result.truncated),
+        "log": (out / "train_log.jsonl").exists(),
     }
 
 
@@ -105,10 +123,11 @@ def test_every_loop_config_knob_changes_the_run(field, corpus, model_cfg, tmp_pa
     first, so the only thing that can differ between the two observables is the
     knob.
     """
-    a_value, b_value, key = _KNOB_PROBES[field]
+    a_value, b_value, key, *ctx = _KNOB_PROBES[field]
+    extra = ctx[0] if ctx else {}
     out = tmp_path / field
-    a = _probe_run(model_cfg, corpus, out, **{field: a_value})
-    b = _probe_run(model_cfg, corpus, out, **{field: b_value})
+    a = _probe_run(model_cfg, corpus, out, **{**extra, field: a_value})
+    b = _probe_run(model_cfg, corpus, out, **{**extra, field: b_value})
     assert _moved(a, b, key), (
         f"LoopConfig.{field} = {a_value!r} and {b_value!r} produced the same "
         f"{key}: the knob validates and then does nothing")

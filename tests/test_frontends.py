@@ -106,7 +106,9 @@ def test_stereo_input_is_rejected():
 
 
 def test_unwired_frontend_fails_loudly_and_says_why():
-    cfg = FrontendConfig(name="xlsr_300m", output_dim=1024)
+    # xlsr_300m was the example until it was wired (Apache-2.0); w2v_bert2 is
+    # one of the licence-gated names (09 C3).
+    cfg = FrontendConfig(name="w2v_bert2", output_dim=1024)
     with pytest.raises(NotImplementedError, match="licence"):
         build_frontend(cfg, AUDIO)
 

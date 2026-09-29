@@ -235,3 +235,73 @@ def test_no_hidden_generator_in_the_forward_pass(beats):
     finally:
         beats.eval()
     assert beats.encoder.layerdrop == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# the c_first_run audio trunk: all 12 layers, LoRA on six projections
+
+@pytest.fixture(scope="module")
+def beats12():
+    cfg = load_model_config("configs/c_first_run.yaml")
+    fe = dataclasses.replace(cfg.frontends["audio"], weights=WEIGHTS)
+    return build_frontend(fe, cfg.audio).eval()
+
+
+def test_layers_null_keeps_all_twelve_and_lora_wraps_six_per_layer(beats12):
+    assert beats12.n_layers == 12 and len(beats12.encoder.layers) == 12
+    assert beats12.n_lora == 12 * 6
+    for layer in beats12.encoder.layers:
+        for mod in (layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj,
+                    layer.self_attn.out_proj, layer.fc1, layer.fc2):
+            # The shipped checkpoint is `activation_fn: gelu`, so fc1 is a plain
+            # nn.Linear (a `glu` one would be GLU_Linear, adapted via `.linear`).
+            assert isinstance(mod, LoRALinear) and isinstance(mod.base, torch.nn.Linear)
+
+
+def test_every_lora_target_reaches_the_output(beats12):
+    """🔴 LoRA wraps a *module*; it is inert if the forward reads `.weight`
+    directly (e.g. through `F.multi_head_attention_forward`). The vendored
+    `MultiheadAttention.forward` calls `self.q_proj(...)` etc. -- this proves it
+    per target: MUTATION -- have the attention compute `F.linear(x,
+    self.q_proj.weight, ...)` and the q_proj case stops moving the output."""
+    torch.manual_seed(7)
+    wav = torch.randn(1, SR * 3 + 111) * 0.1
+    lengths = torch.tensor([SR * 3 + 111])
+    layer = beats12.encoder.layers[4]
+    mods = {"q_proj": layer.self_attn.q_proj, "k_proj": layer.self_attn.k_proj,
+            "v_proj": layer.self_attn.v_proj, "out_proj": layer.self_attn.out_proj,
+            "fc1": layer.fc1, "fc2": layer.fc2}
+    with torch.no_grad():
+        base = beats12(wav, lengths)[0]
+        for name, mod in mods.items():
+            mod.lora_b.normal_(0, 0.05)
+            try:
+                moved = (beats12(wav, lengths)[0] - base).abs().max().item()
+            finally:
+                mod.lora_b.zero_()
+            assert moved > 1e-4, f"{name}: a trained lora_b did not reach the output"
+        assert torch.equal(beats12(wav, lengths)[0], base)
+
+
+@pytest.mark.parametrize("device", [
+    "cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="needs a GPU"))])
+def test_fbank_is_immune_to_fp16_autocast(beats, device):
+    """🔴 fbank's mel matmul autocast to fp16 overflows at int16 scale and every
+    output went NaN. The fbank must be bitwise the fp32 one under autocast."""
+    wav = torch.randn(SR * 2, device=device) * 0.1
+    beats.to(device)
+    try:
+        ref = beats._fbank(wav)
+        with torch.autocast(device, dtype=torch.float16):
+            got = beats._fbank(wav)
+    finally:
+        beats.to("cpu")
+    assert torch.isfinite(got).all()
+    assert torch.equal(got, ref)
+
+
+def test_six_target_adapters_train_and_nothing_else_in_the_encoder_does(beats12):
+    trainable = {n for n, p in beats12.named_parameters() if p.requires_grad}
+    assert all("lora_" in n or n.startswith("freq_pool.") for n in trainable), trainable
+    assert sum("lora_b" in n for n in trainable) == 12 * 6

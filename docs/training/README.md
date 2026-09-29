@@ -12,6 +12,22 @@ this directory says what the loss does with it.
 | [05-corrections.md](05-corrections.md) | Claims elsewhere in the repo this evidence overturns |
 | [06-tier-list.md](06-tier-list.md) | ⭐ **What to implement, in order** — S/A/B/X tiers for objectives and training methods |
 
+**Runs (2026-09-24 → 09-29), in order:**
+
+| File | Contents |
+|---|---|
+| [07-first-run-plan.md](07-first-run-plan.md) | Run 1 plan (strategy-v3) |
+| [08-ko-synth-report.md](08-ko-synth-report.md) | Synthesised Korean fake voice (track K) |
+| [09-data-synthesis-plan.md](09-data-synthesis-plan.md) | Round-2 synthesis priorities |
+| [10-run1-diagnosis.md](10-run1-diagnosis.md) | Where run 1's errors are |
+| [11-run2-design.md](11-run2-design.md) | Run 2 design (strategy-v4) |
+| [12-run2-results.md](12-run2-results.md) | Run 2 results, LB 0.81144 |
+| [13-run3-plan.md](13-run3-plan.md) | Run 3 plan (superseded by 15–17) |
+| [14-ddp-plan.md](14-ddp-plan.md) | DDP + XLS-R-1B plan (as built: notes inline) |
+| [15-data-plan.md](15-data-plan.md) | strategy-v5 data plan |
+| [16-lessons-learned.md](16-lessons-learned.md) | ⭐ What we learned, runs 1–3 and strategy-v5 |
+| [17-final-runs.md](17-final-runs.md) | ⭐ **Final runs**: 1B, runs A–D, strategy-v6/v6b/v6c, soups, ensembles, final packages |
+
 ## The finding, in one paragraph
 
 🔴 **The objective is close to a solved problem here, and the literature's headline gains do not

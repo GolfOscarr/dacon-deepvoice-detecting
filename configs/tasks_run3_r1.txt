@@ -1,0 +1,10 @@
+# run 3 R1 (docs/training/13 §7, §9): proxy 300M@12 from run-2 fold models, 10k steps (--epochs 5)
+# (a) baseline -- the same draw as run 2, 10k more steps
+1 | v4 | configs/processing_run2.yaml | configs/train_run2.yaml | /data/project/private/dacon-runs/run2-v4/T1/fold1/scored.pt
+2 | v4 | configs/processing_run2.yaml | configs/train_run2.yaml | /data/project/private/dacon-runs/run2-v4/T2/fold2/scored.pt
+# (b) + O1 one-class (oc_weight 0.02)
+1 | v4 | configs/processing_run2.yaml | configs/train_run3_oc.yaml | /data/project/private/dacon-runs/run2-v4/T1/fold1/scored.pt | configs/c_run2_oc.yaml
+2 | v4 | configs/processing_run2.yaml | configs/train_run3_oc.yaml | /data/project/private/dacon-runs/run2-v4/T2/fold2/scored.pt | configs/c_run2_oc.yaml
+# (c) LJ-voice fakes x0 (Q-L1)
+1 | v4 | configs/processing_run3_nowf.yaml | configs/train_run2.yaml | /data/project/private/dacon-runs/run2-v4/T1/fold1/scored.pt
+2 | v4 | configs/processing_run3_nowf.yaml | configs/train_run2.yaml | /data/project/private/dacon-runs/run2-v4/T2/fold2/scored.pt
