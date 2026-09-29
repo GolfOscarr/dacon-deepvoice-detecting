@@ -1,8 +1,8 @@
 # 17 · Final runs (Mon 2026-09-28 → Tue 09-29): 1B on v6b/v6c, soups, ensembles
 
 The closing 30 hours of the competition: the XLS-R-1B main run finished, three new data
-versions (v6, v6b, v6c) were built, four fine-tune runs were planned (A–D) and three started (A, C, D), and the final packages are
-soups and a two-model ensemble. Read with [16-lessons-learned.md](16-lessons-learned.md) (runs 1–3,
+versions (v6, v6b, v6c) were built, four fine-tune runs were planned (A–D) and three started (A, C, D), and the best final
+submission is a two-model per-file ensemble, **LB 0.86669**. Read with [16-lessons-learned.md](16-lessons-learned.md) (runs 1–3,
 strategy-v5) and [../HANDOFF_RUN4.md](../HANDOFF_RUN4.md) (the 1B run's operations).
 
 ## 1 · The one-paragraph summary
@@ -14,8 +14,8 @@ strategy-v5) and [../HANDOFF_RUN4.md](../HANDOFF_RUN4.md) (the 1B run's operatio
   around pass 5 of 11. Training loss keeps falling while PROBE falls back, so **soups of the mid-run passes**
   are the final models.
 - **max3 beats the learned file head on every model** (+0.004 to +0.012 PROBE).
-- **Averaging with weaker (v5) models hurts;** averaging two strong models from different data does not
-  hurt and helps voice (see §5).
+- **Averaging with weaker (v5) models hurts on PROBE;** a per-file ensemble of two strong models from
+  different data is the **best leaderboard result, 0.86669** (+0.006 over the best single model).
 - **Continuing a converged model on shifted data at a low LR hurts** (run D).
 
 ## 2 · Leaderboard
@@ -23,12 +23,20 @@ strategy-v5) and [../HANDOFF_RUN4.md](../HANDOFF_RUN4.md) (the 1B run's operatio
 | submission | LB | ADS | CPS | PROBE (max3) |
 |---|---|---|---|---|
 | run5-T7v5-max3 (300M, v5) | 0.83046 | 0.81196 | 0.99698 | 0.9209 |
-| **1b-v6bA-p2-max3** (run A pass 2) | **0.85441** | **0.83845** | **0.99806** | 0.9627 |
-| ens-1b-v6bA8-v6cC2-max3 (Mon slot 3) | *pending* | | | 0.9639 |
-| ens-soupA58-soupC567-max3 (Tue, planned slot 1) | *pending* | | | 0.9658 |
-| 1b-soupC567-max3 (Tue, planned slot 2) | *pending* | | | 0.9652 |
+| 1b-v6bA-p2-max3 (run A pass 2) | 0.85441 | 0.83845 | 0.99806 | 0.9627 |
+| **ens-1b-v6bA8-v6cC2-max3** (A pass 8 + C pass 2) — **best, final** | **0.86669** | **0.85206** | **0.99830** | 0.9639 |
+| ens-soupA58-soupC567-max3 (soup A 5+8 + soup C 5–7) | 0.86366 | 0.84869 | 0.99843 | 0.9658 |
+| ens3-A8-C2-C5-max3 (A pass 8 + C pass 2 + C pass 5) | 0.86406 | 0.84913 | 0.99834 | – |
+| 1b-soupC567-max3 (single model, soup C 5–7) | 0.86098 | 0.84573 | 0.99822 | 0.9652 |
 | diagB (T7, voice columns only) | 0.57479 | 0.55644 | 0.73985 | – |
 
+- **Ensembles are the biggest late lever on the test:** two models trained on different data (A on v6b,
+  C on v6c + voice fixes) gained **+0.006** over the best single model. The best pair used **raw
+  checkpoints** (A pass 8 + C pass 2); the pair of soups scored 0.003 lower and a third member from the
+  same run as another (C pass 5) scored 0.003 lower too. Diversity between members mattered more than
+  each member's own PROBE score; soups and same-run members reduce it. PROBE ranked these ensembles the
+  other way round (0.9639 < 0.9658), so it cannot choose between ensembles at this resolution. The
+  differences (≤ 0.006) are near the LB noise floor.
 - **PROBE vs LB:** PROBE predicted +0.042 for v6b over 300M-v5; the LB gave +0.024 (over-read about
   1.75×, down from ~3× in runs 1–2). PROBE differences above ~0.005 are trustworthy in sign.
 - **diagB** (Mon 03:30) completed T7's per-head test split: **file 0.202, voice 0.218, music 0.209 EER**,
@@ -175,17 +183,18 @@ v6b's audits (I3 0.526 / 0.513 / 0.510, all ok) are only in `manifests/_build_v6
 | **ensemble soup-A 5+8 + soup-C 5+8** | **0.9657** | |
 | **ensemble soup-A 5+8 + soup-C 5–7 (shipped)** | **0.9658** | prob mean; logit mean 0.9653 |
 
-Server runtime: single 1B ≈ a few minutes for 1,200 files; the two-model package took 1.7× a single
-model on the CPU mirror, far inside the 60-minute limit.
+Server runtime: the two-model ensemble took ~12 min for 1,200 files (owner-reported), the three-model
+one about 1.5× that; the 60-minute limit was never close.
 
 ## 6 · Final packages (`s3://hyeonseop-s3/dacon-deepfake-detection/submissions/` and
 `/data/project/private/dacon-submissions/`, all server-mirror checked)
 
 | package | contents | PROBE | size |
 |---|---|---|---|
-| **ens-soupA58-soupC567-max3.zip** | run A passes 5+8 soup + run C passes 5–7 soup, per-file prob mean | **0.9658** | 6.1 GB |
-| **1b-soupC567-max3.zip** | run C passes 5–7 soup | 0.9652 | 4.1 GB |
-| ens-1b-v6bA8-v6cC2-max3.zip | A pass 8 + C pass 2 (Mon slot 3) | 0.9639 | 6.1 GB |
+| **ens-1b-v6bA8-v6cC2-max3.zip** (final, LB 0.86669) | run A pass 8 + run C pass 2, per-file prob mean | 0.9639 | 6.1 GB |
+| ens-soupA58-soupC567-max3.zip (LB 0.86366) | run A passes 5+8 soup + run C passes 5–7 soup | 0.9658 | 6.1 GB |
+| ens3-A8-C2-C5-max3.zip (LB 0.86406) | run A pass 8 + run C passes 2 and 5; 3 members is the 10 GB zip limit (2.3 GB per member) | – | 8.1 GB |
+| 1b-soupC567-max3.zip (LB 0.86098) | run C passes 5–7 soup | 0.9652 | 4.1 GB |
 | 1b-v6bA-p8-max3.zip, 1b-v6cC-p2-max3.zip, 1b-v6bA-p2-max3.zip (LB 0.85441), 1b-v5-p15-max3.zip | singles | 0.9636 / 0.9611 / 0.9627 / 0.9510 | 4.1 GB |
 
 The packages are built by `scripts/package_submission.py` (`--member SCORED::WEIGHTS` for the
@@ -209,8 +218,10 @@ ensemble) and `_ops/pkg_run.sh`. The soup checkpoints are in `/data/project/priv
   so models trained on v5+ data carry a "Llama" name prefix and "Built with Llama" attribution. ND music (FMA, Jamendo) is
   shipped as originals + deterministic code (talkboard A5), never as the cut pieces.
 
-## 8 · Open at the time of writing
-- The LB results of the Monday-night ensemble and of Tuesday's submissions: record them in §2.
+## 8 · Open
+- **Final selection:** `ens-1b-v6bA8-v6cC2-max3` (0.86669) is the best submission (Private = Public).
+- More than 3 ensemble members needs a slimmer package (each member ships a full 2.3 GB state dict;
+  storing only the trained deltas or fp16 would fit more under the 10 GB zip limit).
 - Voice fixes needing code (high-pass rumble augmentation, edge-silence trim) and a new fake-music
   family (ACE-Step v1 was prepared and put on hold by the owner) were not done.
 - `processing/*` ingesters that look up parents (`proc`, `sing`, `realmusic-sep`) fail on a manifest
